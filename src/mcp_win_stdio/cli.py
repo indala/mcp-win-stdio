@@ -4,120 +4,201 @@ mcp-win-stdio CLI: Windows-optimized Model Context Protocol suite orchestrator.
 
 import argparse
 import importlib
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+# Ensure Windows console uses UTF-8 without crashing on cp1252
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from mcp_win_stdio import __version__
-from mcp_win_stdio.core.config import INDALA_DIR, PLUGINS_DIR, ensure_workspace_dirs, load_config
+from mcp_win_stdio.core.config import INDALA_DIR, PLUGINS_DIR, ensure_workspace_dirs, load_config, save_config
 from mcp_win_stdio.core.discovery import BUILTIN_SERVERS, get_server_info, list_available_servers
 from mcp_win_stdio.core.installer import (
+    generate_claude_cli_command,
+    generate_claude_desktop_snippet,
     get_claude_cli_config_path,
     get_claude_desktop_config_path,
-    install_server_to_cli,
-    install_server_to_desktop,
+    install_pip_dependencies,
     remove_server_from_cli,
     remove_server_from_desktop,
+    safe_apply_to_cli,
+    safe_apply_to_desktop,
 )
 from mcp_win_stdio.guides.excel_guide import print_excel_guide
 from mcp_win_stdio.guides.explorer_guide import print_explorer_guide
+from mcp_win_stdio.guides.tsc_guide import print_tsc_guide
+from mcp_win_stdio.guides.word_guide import print_word_guide
 
 
-def cmd_list(args: argparse.Namespace) -> None:
-    """List available MCP servers and installation status."""
+def print_dashboard() -> None:
+    """Print interactive home dashboard when run with no arguments."""
     ensure_workspace_dirs()
     servers = list_available_servers()
     desktop_cfg = get_claude_desktop_config_path()
     cli_cfg = get_claude_cli_config_path()
 
-    print(f"\n================ mcp-win-stdio v{__version__} ================")
-    print(f"Single-Source Directory: {INDALA_DIR}")
-    print(f"Claude Desktop Config:   {desktop_cfg or 'Not found'}")
-    print(f"Claude Code CLI Config:  {cli_cfg or 'Not found'}\n")
+    print(f"\n" + "=" * 76)
+    print(f"   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v{__version__})")
+    print("=" * 76)
+    print(f" Single-Source Hub:      {INDALA_DIR}")
+    print(f" Claude Desktop Config:  {desktop_cfg or 'Not detected (%APPDATA%\\Claude)'}")
+    print(f" Claude Code CLI Config: {cli_cfg or 'Not detected (~/.claude.json)'}")
+    print("-" * 76)
 
-    print(f"{'SERVER NAME':<16} {'TOOLS':<8} {'TYPE':<12} {'DESCRIPTION'}")
-    print("-" * 75)
+    print(f"{'SERVER':<12} {'STATUS':<16} {'TOOLS':<8} {'DESCRIPTION'}")
+    print("-" * 76)
 
     for name, srv in servers.items():
-        srv_type = "Built-in" if srv.get("is_builtin") else "User Plugin"
+        is_inst = srv.get("is_installed", False)
+        status_str = "[Installed]" if is_inst else "[Not Installed]"
         tools = str(srv.get("tools_count", "?"))
         desc = srv.get("description", "")
-        if len(desc) > 42:
-            desc = desc[:39] + "..."
-        print(f"{name:<16} {tools:<8} {srv_type:<12} {desc}")
+        if len(desc) > 36:
+            desc = desc[:33] + "..."
+        print(f"{name:<12} {status_str:<16} {tools:<8} {desc}")
 
-    print("\nTo setup a server in Claude:  mcp-win-stdio setup [server_name]")
-    print("To view usage guide & prompts: mcp-win-stdio guide [server_name]")
-    print("To run a server over stdio:    mcp-win-stdio run <server_name>\n")
+    print("-" * 76)
+    print(" 💡 Quick Commands:")
+    print("   mws setup <server>    -> Install dependencies & show Claude config")
+    print("   mws guide <server>    -> View complete tool reference & Claude prompts")
+    print("   mws doctor            -> Run health checks (Office COM, Python, Node)")
+    print("   mws run <server>      -> Launch MCP server over stdio")
+    print("   mws list              -> List all servers and custom plugins")
+    print("=" * 76 + "\n")
+
+
+def cmd_list(args: argparse.Namespace) -> None:
+    """List available MCP servers and installation status."""
+    print_dashboard()
 
 
 def cmd_guide(args: argparse.Namespace) -> None:
-    """Print guide and prompts for a specific server."""
+    """Print guide and prompt recipes for a specific server."""
     target = (args.server or "all").lower()
 
     if target in ("excel", "all"):
         print_excel_guide()
+    if target in ("word", "all"):
+        print_word_guide()
     if target in ("explorer", "workspace-explorer", "all"):
         print_explorer_guide()
+    if target in ("tsc", "all"):
+        print_tsc_guide()
 
-    if target not in ("excel", "explorer", "workspace-explorer", "all"):
-        print(f"No specific guide available for '{target}'. Built-in guides: 'excel', 'explorer'.")
+    if target not in ("excel", "word", "explorer", "workspace-explorer", "tsc", "all"):
+        print(f"No built-in guide for '{target}'. Built-in guides: 'excel', 'word', 'explorer', 'tsc'.")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
-    """Configure one or all servers into Claude Desktop and Claude Code CLI."""
+    """Setup and configure a server with transparent guidance and optional safe auto-apply."""
     ensure_workspace_dirs()
     servers = list_available_servers()
 
     target = args.server
     client = args.client.lower()
 
-    # If no target passed, prompt interactively if running in terminal
     if not target:
         if sys.stdin.isatty():
-            print("\n=== mcp-win-stdio Setup Wizard ===")
-            print("Select which MCP servers you want to configure into Claude:")
-            print("  [1] All servers (excel + explorer) [Recommended]")
-            print("  [2] Excel MCP only (20 tools + COM automation)")
-            print("  [3] Workspace Explorer MCP only (11 tools + smart ignore)")
-            print("  [4] Exit")
-            choice = input("\nEnter choice (1-4) [default: 1]: ").strip() or "1"
-            if choice == "1":
-                selected_servers = ["excel", "explorer"]
-            elif choice == "2":
-                selected_servers = ["excel"]
-            elif choice == "3":
-                selected_servers = ["explorer"]
-            else:
+            print("\n=== 🛠️  mcp-win-stdio Setup Wizard ===")
+            print("Select an MCP server to configure:")
+            print("  [1] excel     (20 tools: Pandas queries, RapidFuzz reconciliation, Office COM)")
+            print("  [2] word      (10 tools: Multi-unit margins, multi-columns, typography, images)")
+            print("  [3] explorer  (11 tools: Token-safe tree, .gitignore, regex grep, AST outline)")
+            print("  [4] tsc       (6 tools: TypeScript diagnostic watcher, 0ms cache)")
+            print("  [5] all       (Configure all servers)")
+            print("  [6] Exit")
+            choice = input("\nEnter choice (1-6) [default: 1]: ").strip() or "1"
+            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "all"}
+            if choice not in mapping:
                 print("Setup cancelled.")
                 return
+            target = mapping[choice]
         else:
-            selected_servers = ["excel", "explorer"]
-    elif target.lower() == "all":
-        selected_servers = ["excel", "explorer"]
-    else:
-        if target.lower() not in servers:
-            print(f"Error: Unknown server '{target}'. Run 'mcp-win-stdio list' to see available servers.")
-            return
-        selected_servers = [target.lower()]
+            target = "all"
 
-    print(f"\nSetting up servers: {', '.join(selected_servers)} (target client: {client})...\n")
+    selected_servers = ["excel", "word", "explorer", "tsc"] if target.lower() == "all" else [target.lower()]
 
     for srv_name in selected_servers:
-        print(f"--- Configuring '{srv_name}' ---")
-        if client in ("all", "desktop"):
-            ok, msg = install_server_to_desktop(srv_name)
-            symbol = "OK" if ok else "WARN"
-            print(f"  [{symbol}] Claude Desktop: {msg}")
+        srv = get_server_info(srv_name)
+        if not srv:
+            print(f"\n[ERROR] Unknown server: '{srv_name}'. Run 'mws list' to see available servers.")
+            continue
 
-        if client in ("all", "cli"):
-            ok, msg = install_server_to_cli(srv_name)
-            symbol = "OK" if ok else "WARN"
-            print(f"  [{symbol}] Claude CLI:     {msg}")
+        print(f"\n" + "=" * 70)
+        print(f"  Configuration Setup for: {srv['title']}")
+        print("=" * 70)
 
-    print("\nSetup complete! Please restart Claude Desktop if it is currently running.\n")
+        # 1. Dependency check & optional installation
+        env_vars = {}
+        if not srv.get("is_installed"):
+            req_pip = srv.get("required_pip", [])
+            print(f"\n[INFO] '{srv_name}' requires the following Python packages: {', '.join(req_pip)}")
+            if sys.stdin.isatty():
+                do_install = input(f"Would you like to install them now via pip? [Y/n]: ").strip().lower()
+                if do_install not in ("n", "no"):
+                    ok, msg = install_pip_dependencies(req_pip)
+                    if ok:
+                        print(f"[OK] {msg}")
+                    else:
+                        print(f"[WARN] {msg}")
+            else:
+                install_pip_dependencies(req_pip)
+
+        # Special prompt for TSC watch directory
+        if srv_name == "tsc":
+            default_dir = os.getcwd()
+            if sys.stdin.isatty():
+                chosen_dir = input(f"\nEnter TypeScript project directory to watch [default: {default_dir}]: ").strip() or default_dir
+            else:
+                chosen_dir = default_dir
+            env_vars["TSC_WATCH_DIR"] = os.path.abspath(chosen_dir)
+
+        # 2. Transparent Configuration Guidance
+        snippet_dict = generate_claude_desktop_snippet(srv_name, env_vars if env_vars else None)
+        snippet_json = json.dumps({srv_name: snippet_dict}, indent=2)
+        cli_command = generate_claude_cli_command(srv_name, env_vars if env_vars else None)
+
+        print("\n" + "-" * 70)
+        print("📋 Claude Desktop Configuration:")
+        print("File: %APPDATA%\\Claude\\claude_desktop_config.json")
+        print("Add this snippet inside your \"mcpServers\" object:\n")
+        print(snippet_json)
+
+        print("\n" + "-" * 70)
+        print("💻 Claude Code CLI Command:")
+        print("Run this command in your terminal:\n")
+        print(f"  {cli_command}")
+        print("-" * 70)
+
+        # 3. Optional Safe Auto-Write
+        if sys.stdin.isatty():
+            auto_apply = input("\n👉 Would you like mws to safely write this configuration for you? [y/N]: ").strip().lower()
+            if auto_apply in ("y", "yes"):
+                if client in ("all", "desktop"):
+                    ok, msg = safe_apply_to_desktop(srv_name, env_vars if env_vars else None)
+                    symbol = "OK" if ok else "ERROR"
+                    print(f"  [{symbol}] Claude Desktop: {msg}")
+                if client in ("all", "cli"):
+                    ok, msg = safe_apply_to_cli(srv_name, env_vars if env_vars else None)
+                    symbol = "OK" if ok else "ERROR"
+                    print(f"  [{symbol}] Claude Code CLI: {msg}")
+                print("\n[NOTE] Please restart Claude Desktop if it is currently running.")
+        else:
+            print("\nTo auto-apply via script, pass interactive input or use the JSON snippet above.")
+
+    print("\n" + "=" * 70)
+    print("Setup guide complete!")
+    print("=" * 70 + "\n")
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
@@ -125,7 +206,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     target = args.server.lower()
     client = args.client.lower()
 
-    servers_to_remove = ["excel", "explorer"] if target == "all" else [target]
+    servers_to_remove = ["excel", "word", "explorer", "tsc"] if target == "all" else [target]
 
     for srv_name in servers_to_remove:
         print(f"\nRemoving '{srv_name}'...")
@@ -143,7 +224,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     srv = get_server_info(server_name)
 
     if not srv:
-        print(f"Error: Server '{server_name}' not found. Run 'mcp-win-stdio list' to view available servers.", file=sys.stderr)
+        print(f"Error: Server '{server_name}' not found. Run 'mws list' to view available servers.", file=sys.stderr)
         sys.exit(1)
 
     if srv["is_builtin"]:
@@ -169,7 +250,7 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
-    """Run diagnostic health checks on Windows environment and dependencies."""
+    """Run diagnostic health checks on Windows environment, COM automation, and dependencies."""
     print(f"\n=== mcp-win-stdio Doctor Diagnostic (v{__version__}) ===\n")
 
     # 1. Python Check
@@ -177,46 +258,66 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     py_status = "OK" if sys.version_info >= (3, 10) else "FAIL (Requires Python 3.10+)"
     print(f"[{py_status}] Python Runtime: {py_ver} ({sys.executable})")
 
-    # 2. Dependencies
+    # 2. Python Dependencies
     deps = [
-        ("mcp", "MCP Protocol Framework"),
-        ("pathspec", "Git-Wildmatch Pattern Engine"),
-        ("rapidfuzz", "RapidFuzz Vector Matcher"),
-        ("pandas", "Pandas DataFrames"),
-        ("openpyxl", "OpenPyXL Engine"),
-        ("win32com", "PyWin32 COM Automation"),
+        ("mcp", "MCP Protocol Framework (Core)"),
+        ("docx", "Python-Docx (Word MCP)"),
+        ("pandas", "Pandas DataFrames (Excel MCP)"),
+        ("openpyxl", "OpenPyXL Engine (Excel MCP)"),
+        ("rapidfuzz", "RapidFuzz Vector Matcher (Excel & Explorer)"),
+        ("pathspec", "Git-Wildmatch Pattern Engine (Explorer MCP)"),
+        ("win32com", "PyWin32 Windows COM Automation (Excel & Word)"),
     ]
+    print("\n--- Python Dependencies ---")
     for mod, desc in deps:
         try:
             importlib.import_module(mod)
-            print(f"[OK] Dependency: {mod:<12} ({desc})")
+            print(f"[OK] {mod:<14} : {desc}")
         except ImportError:
-            print(f"[WARN] Dependency: {mod:<12} ({desc}) - Not installed")
+            print(f"[MISSING] {mod:<10} : {desc}")
 
-    # 3. Native Excel COM Check
-    print("\n--- Windows Excel COM Check ---")
+    # 3. Microsoft Office COM Automation
+    print("\n--- Microsoft Office COM Automation ---")
     try:
         import win32com.client
         excel_app = win32com.client.DispatchEx("Excel.Application")
         excel_ver = excel_app.Version
         excel_app.Quit()
-        print(f"[OK] Microsoft Excel COM Automation: Active (Version {excel_ver})")
+        print(f"[OK] Microsoft Excel COM Automation: Ready (Version {excel_ver})")
     except Exception as e:
         print(f"[INFO] Microsoft Excel COM Automation: Not available ({str(e)})")
 
-    # 4. Claude Config Files
+    try:
+        import win32com.client
+        word_app = win32com.client.Dispatch("Word.Application")
+        word_app.Visible = False
+        word_ver = word_app.Version
+        word_app.Quit()
+        print(f"[OK] Microsoft Word COM Automation: Ready (Version {word_ver})")
+    except Exception as e:
+        print(f"[INFO] Microsoft Word COM Automation: Not available ({str(e)})")
+
+    # 4. Node.js & TypeScript
+    print("\n--- Node.js & TypeScript Environment ---")
+    node_bin = shutil.which("node")
+    print(f"[{'OK' if node_bin else 'INFO'}] Node.js: {node_bin or 'Not found on PATH'}")
+
+    tsc_bin = shutil.which("tsc")
+    print(f"[{'OK' if tsc_bin else 'INFO'}] Global tsc: {tsc_bin or 'Not found on PATH (will check local projects)'}")
+
+    # 5. Claude Config Files
     print("\n--- Claude Configuration Targets ---")
     desktop_cfg = get_claude_desktop_config_path()
     if desktop_cfg and desktop_cfg.exists():
         print(f"[OK] Claude Desktop: {desktop_cfg}")
     else:
-        print(f"[WARN] Claude Desktop config not found at standard path")
+        print(f"[INFO] Claude Desktop config: {desktop_cfg or 'Not found in %APPDATA%\\Claude'}")
 
     cli_cfg = get_claude_cli_config_path()
     if cli_cfg and cli_cfg.exists():
         print(f"[OK] Claude Code CLI: {cli_cfg}")
     else:
-        print(f"[INFO] Claude Code CLI config: {cli_cfg or 'Not found'}")
+        print(f"[INFO] Claude Code CLI config: {cli_cfg or 'Not found in ~/.claude.json'}")
 
     print("\nDiagnostic complete.\n")
 
@@ -237,24 +338,24 @@ def main() -> None:
 
     # guide
     sub_guide = subparsers.add_parser("guide", help="View usage guide, tool specs, and LLM prompts")
-    sub_guide.add_argument("server", nargs="?", default="all", help="Server name ('excel', 'explorer', 'all')")
+    sub_guide.add_argument("server", nargs="?", default="all", help="Server name ('excel', 'word', 'explorer', 'tsc', 'all')")
     sub_guide.set_defaults(func=cmd_guide)
 
     # setup
     sub_setup = subparsers.add_parser("setup", help="Configure server(s) into Claude Desktop and CLI")
-    sub_setup.add_argument("server", nargs="?", default=None, help="Server to install ('excel', 'explorer', 'all')")
+    sub_setup.add_argument("server", nargs="?", default=None, help="Server to install ('excel', 'word', 'explorer', 'tsc', 'all')")
     sub_setup.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_setup.set_defaults(func=cmd_setup)
 
     # remove
     sub_remove = subparsers.add_parser("remove", help="Remove server(s) from Claude Desktop and CLI")
-    sub_remove.add_argument("server", help="Server to remove ('excel', 'explorer', 'all')")
+    sub_remove.add_argument("server", help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'all')")
     sub_remove.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_remove.set_defaults(func=cmd_remove)
 
     # run
     sub_run = subparsers.add_parser("run", help="Launch an MCP server over stdio for Claude")
-    sub_run.add_argument("server", help="Server name to launch ('excel', 'explorer', or custom plugin)")
+    sub_run.add_argument("server", help="Server name to launch ('excel', 'word', 'explorer', 'tsc', or custom plugin)")
     sub_run.set_defaults(func=cmd_run)
 
     # doctor
@@ -263,7 +364,8 @@ def main() -> None:
 
     args = parser.parse_args()
     if not args.command:
-        parser.print_help()
+        # Default action when run with no arguments: show interactive dashboard
+        print_dashboard()
         sys.exit(0)
 
     args.func(args)

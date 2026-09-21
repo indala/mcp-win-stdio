@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-win-stdio"
 version = "0.1.0"
-description = "Windows-optimized Model Context Protocol (MCP) suite for local stdio execution (Excel COM automation, Workspace Explorer, and extensible plugins) with automated Claude setup."
+description = "Windows-optimized Model Context Protocol (MCP) suite & interactive CLI hub for Claude Desktop & Claude Code CLI (Excel COM, Word layouts, Workspace Explorer, and TypeScript diagnostic watcher)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "indala", email = "indala@example.com" }
+    { name = "Mohan Kumar Indala" }
 ]
-keywords = ["mcp", "claude", "excel", "workspace-explorer", "stdio", "windows", "ai", "llm"]
+keywords = ["mcp", "claude", "windows", "excel", "word", "workspace-explorer", "typescript", "stdio", "ai", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
@@ -30,31 +30,42 @@ classifiers = [
 
 dependencies = [
     "mcp>=1.2.0",
-    "pathspec>=0.12.0",
-    "rapidfuzz>=3.0.0",
 ]
 
 [project.optional-dependencies]
 excel = [
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
+    "rapidfuzz>=3.0.0",
+    "pywin32>=306; platform_system == 'Windows'",
+]
+word = [
+    "python-docx>=1.1.0",
     "pywin32>=306; platform_system == 'Windows'",
 ]
 explorer = [
     "pathspec>=0.12.0",
     "rapidfuzz>=3.0.0",
 ]
+tsc = [
+    "mcp>=1.2.0",
+]
 all = [
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
-    "pywin32>=306; platform_system == 'Windows'",
-    "pathspec>=0.12.0",
     "rapidfuzz>=3.0.0",
+    "pywin32>=306; platform_system == 'Windows'",
+    "python-docx>=1.1.0",
+    "pathspec>=0.12.0",
 ]
 
 [project.scripts]
 mcp-win-stdio = "mcp_win_stdio.cli:main"
 mws = "mcp_win_stdio.cli:main"
+mws-excel = "mcp_win_stdio.excel.cli:main"
+mws-word = "mcp_win_stdio.word.cli:main"
+mws-explorer = "mcp_win_stdio.explorer.cli:main"
+mws-tsc = "mcp_win_stdio.tsc.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_win_stdio"]

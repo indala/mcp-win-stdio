@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-win-stdio-tsc"
+version = "0.1.0"
+description = "Windows-optimized TypeScript Diagnostic Watcher MCP server: background watchers and in-memory cache for instant 0ms compiler error checks."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Mohan Kumar Indala" }
+]
+keywords = ["mcp", "claude", "typescript", "tsc", "watcher", "diagnostics", "windows", "ai", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+]
+
+dependencies = [
+    "mcp>=1.2.0",
+]
+
+[project.scripts]
+mcp-win-stdio-tsc = "mcp_win_stdio.tsc.cli:main"
+mws-tsc = "mcp_win_stdio.tsc.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_win_stdio"]
