@@ -50,6 +50,10 @@ explorer = [
 tsc = [
     "mcp>=1.2.0",
 ]
+db = [
+    "psycopg2-binary>=2.9.0",
+    "pymysql>=1.1.0",
+]
 all = [
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
@@ -57,6 +61,8 @@ all = [
     "pywin32>=306; platform_system == 'Windows'",
     "python-docx>=1.1.0",
     "pathspec>=0.12.0",
+    "psycopg2-binary>=2.9.0",
+    "pymysql>=1.1.0",
 ]
 
 [project.scripts]
@@ -66,6 +72,8 @@ mws-excel = "mcp_win_stdio.excel.cli:main"
 mws-word = "mcp_win_stdio.word.cli:main"
 mws-explorer = "mcp_win_stdio.explorer.cli:main"
 mws-tsc = "mcp_win_stdio.tsc.cli:main"
+mws-db = "mcp_win_stdio.db.cli:main"
+mcp-win-stdio-db = "mcp_win_stdio.db.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_win_stdio"]

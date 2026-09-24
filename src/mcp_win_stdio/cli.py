@@ -38,6 +38,8 @@ from mcp_win_stdio.guides.excel_guide import print_excel_guide
 from mcp_win_stdio.guides.explorer_guide import print_explorer_guide
 from mcp_win_stdio.guides.tsc_guide import print_tsc_guide
 from mcp_win_stdio.guides.word_guide import print_word_guide
+from mcp_win_stdio.guides.db_guide import print_db_guide
+
 
 
 def print_dashboard() -> None:
@@ -94,9 +96,11 @@ def cmd_guide(args: argparse.Namespace) -> None:
         print_explorer_guide()
     if target in ("tsc", "all"):
         print_tsc_guide()
+    if target in ("db", "database", "all"):
+        print_db_guide()
 
-    if target not in ("excel", "word", "explorer", "workspace-explorer", "tsc", "all"):
-        print(f"No built-in guide for '{target}'. Built-in guides: 'excel', 'word', 'explorer', 'tsc'.")
+    if target not in ("excel", "word", "explorer", "workspace-explorer", "tsc", "db", "database", "all"):
+        print(f"No built-in guide for '{target}'. Built-in guides: 'excel', 'word', 'explorer', 'tsc', 'db'.")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -115,10 +119,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
             print("  [2] word      (10 tools: Multi-unit margins, multi-columns, typography, images)")
             print("  [3] explorer  (11 tools: Token-safe tree, .gitignore, regex grep, AST outline)")
             print("  [4] tsc       (6 tools: TypeScript diagnostic watcher, 0ms cache)")
-            print("  [5] all       (Configure all servers)")
-            print("  [6] Exit")
-            choice = input("\nEnter choice (1-6) [default: 1]: ").strip() or "1"
-            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "all"}
+            print("  [5] db        (20 tools: Polyglot PostgreSQL & MySQL DBA manager)")
+            print("  [6] all       (Configure all servers)")
+            print("  [7] Exit")
+            choice = input("\nEnter choice (1-7) [default: 1]: ").strip() or "1"
+            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "all"}
             if choice not in mapping:
                 print("Setup cancelled.")
                 return
@@ -126,7 +131,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    selected_servers = ["excel", "word", "explorer", "tsc"] if target.lower() == "all" else [target.lower()]
+    selected_servers = ["excel", "word", "explorer", "tsc", "db"] if target.lower() == "all" else [target.lower()]
 
     for srv_name in selected_servers:
         srv = get_server_info(srv_name)
@@ -162,6 +167,17 @@ def cmd_setup(args: argparse.Namespace) -> None:
             else:
                 chosen_dir = default_dir
             env_vars["TSC_WATCH_DIR"] = os.path.abspath(chosen_dir)
+
+        # Special prompt for DB SERVERS env var
+        if srv_name == "db":
+            servers_env = os.environ.get("SERVERS")
+            if servers_env:
+                env_vars["SERVERS"] = servers_env
+            elif sys.stdin.isatty():
+                print("\n[Optional] Enter SERVERS JSON string (or press Enter to configure later):")
+                chosen_servers = input("SERVERS JSON: ").strip()
+                if chosen_servers:
+                    env_vars["SERVERS"] = chosen_servers
 
         # 2. Transparent Configuration Guidance
         snippet_dict = generate_claude_desktop_snippet(srv_name, env_vars if env_vars else None)
@@ -206,7 +222,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     target = args.server.lower()
     client = args.client.lower()
 
-    servers_to_remove = ["excel", "word", "explorer", "tsc"] if target == "all" else [target]
+    servers_to_remove = ["excel", "word", "explorer", "tsc", "db"] if target == "all" else [target]
 
     for srv_name in servers_to_remove:
         print(f"\nRemoving '{srv_name}'...")
@@ -216,6 +232,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
         if client in ("all", "cli"):
             ok, msg = remove_server_from_cli(srv_name)
             print(f"  Claude CLI:     {msg}")
+
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -267,6 +284,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         ("rapidfuzz", "RapidFuzz Vector Matcher (Excel & Explorer)"),
         ("pathspec", "Git-Wildmatch Pattern Engine (Explorer MCP)"),
         ("win32com", "PyWin32 Windows COM Automation (Excel & Word)"),
+        ("psycopg2", "PostgreSQL Adapter (Database MCP)"),
+        ("pymysql", "MySQL Pure-Python Driver (Database MCP)"),
     ]
     print("\n--- Python Dependencies ---")
     for mod, desc in deps:
@@ -297,7 +316,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     except Exception as e:
         print(f"[INFO] Microsoft Word COM Automation: Not available ({str(e)})")
 
-    # 4. Node.js & TypeScript
+    # 4. Native Database Dump & Client Utilities
+    print("\n--- Native Database Dump & Client Utilities ---")
+    for util in ("pg_dump", "psql", "mysqldump", "mysql"):
+        loc = shutil.which(util)
+        status = "OK" if loc else "INFO"
+        note = loc if loc else "Not on PATH (fallback SQL used)"
+        print(f"[{status}] Tool: {util:<12} -> {note}")
+
+    # 5. Node.js & TypeScript
     print("\n--- Node.js & TypeScript Environment ---")
     node_bin = shutil.which("node")
     print(f"[{'OK' if node_bin else 'INFO'}] Node.js: {node_bin or 'Not found on PATH'}")
@@ -305,7 +332,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     tsc_bin = shutil.which("tsc")
     print(f"[{'OK' if tsc_bin else 'INFO'}] Global tsc: {tsc_bin or 'Not found on PATH (will check local projects)'}")
 
-    # 5. Claude Config Files
+    # 6. Claude Config Files
+
     print("\n--- Claude Configuration Targets ---")
     desktop_cfg = get_claude_desktop_config_path()
     if desktop_cfg and desktop_cfg.exists():

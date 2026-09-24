@@ -55,6 +55,17 @@ BUILTIN_SERVERS = {
         "dependencies": ["mcp"],
         "optional_dependencies": [],
     },
+    "db": {
+        "name": "db",
+        "title": "Unified Database MCP (PostgreSQL & MySQL)",
+        "module": "mcp_win_stdio.db.server",
+        "description": "20 tools: polyglot multi-server pooling, cross-schema resolution, DBA management (create, drop, clone, dump), and 0ms connection caching.",
+        "tools_count": 20,
+        "is_builtin": True,
+        "required_pip": ["psycopg2-binary>=2.9.0", "pymysql>=1.1.0"],
+        "dependencies": ["psycopg2", "pymysql"],
+        "optional_dependencies": [],
+    },
 }
 
 

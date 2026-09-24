@@ -12,6 +12,7 @@ Windows-optimized **Model Context Protocol (MCP)** suite and interactive CLI hub
 * **Word MCP (10 Tools)**: Multi-unit page layout geometry (margins in inches, cm, mm, pt), multi-column layout analysis, paragraph spacing/indentation, typography (fonts, sizes, hex colors), and floating/inline header image extraction.
 * **Workspace Explorer MCP (11 Tools)**: Token-safe directory exploration, collapsible heavy folders (`node_modules`, `.next`, `.git`), dynamic `.gitignore` parsing, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outline extraction.
 * **TypeScript Diagnostic Watcher MCP (6 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection across multi-tsconfig projects.
+* **Polyglot Database MCP (20 Tools)**: Unified PostgreSQL & MySQL database manager with cross-database switching, cross-schema auto-resolution, fast JSON queries, DBA administrative operations (safety-guarded DROP, CREATE, CLONE), active connection monitoring, and native dump/restore utilities.
 * **Extensible User Plugins**: Drop any standalone Python MCP script into `~/.mcp-win-stdio/plugins/` and it is immediately discovered, runnable, and configurable.
 
 ---
@@ -34,9 +35,13 @@ pip install "mcp-win-stdio[word]"
 # Explorer MCP (PathSpec + RapidFuzz)
 pip install "mcp-win-stdio[explorer]"
 
+# Database MCP (psycopg2-binary + pymysql)
+pip install "mcp-win-stdio[db]"
+
 # All modules & dependencies
 pip install "mcp-win-stdio[all]"
 ```
+
 
 For local development:
 ```powershell
@@ -68,11 +73,12 @@ excel        [Installed]      20       20 tools: Pandas queries, RapidFuzz...
 word         [Installed]      10       10 tools: multi-unit margins (in, cm...
 explorer     [Installed]      11       11 tools: token-safe collapsible tree...
 tsc          [Installed]      6        6 tools: background tsc compiler...
+db           [Installed]      20       20 tools: polyglot multi-server p...
 ----------------------------------------------------------------------------
  💡 Quick Commands:
    mws setup <server>    -> Install dependencies & show Claude config
    mws guide <server>    -> View complete tool reference & Claude prompts
-   mws doctor            -> Run health checks (Office COM, Python, Node)
+   mws doctor            -> Run health checks (Office COM, Python, Node, DB)
    mws run <server>      -> Launch MCP server over stdio
    mws list              -> List all servers and custom plugins
 ============================================================================
@@ -80,7 +86,7 @@ tsc          [Installed]      6        6 tools: background tsc compiler...
 
 ### 2. Configure a Server for Claude
 ```powershell
-mws setup word
+mws setup db
 ```
 `mws` will verify dependencies, display the exact JSON block to add to Claude Desktop, show the CLI command for Claude Code, and offer safe automated application.
 
@@ -94,13 +100,13 @@ mws setup word
 | `mws list` | Lists all available built-in servers and user plugins with tool counts. |
 | `mws setup [server]` | Guides setup, installs dependencies, and provides copy-pasteable Claude configurations. |
 | `mws remove <server>` | Safely removes server(s) from Claude Desktop and CLI configs. |
-| `mws guide <server>` | Prints complete tool reference, parameters, and prompt recipes for Claude (`excel`, `word`, `explorer`, `tsc`). |
-| `mws doctor` | Runs diagnostic health checks (Python runtime, PyWin32 Excel/Word COM readiness, Node/tsc tools, Claude configs). |
-| `mws run <server>` | Launches the MCP server over stdio (e.g. `mws run word` or `mws run tsc`). |
+| `mws guide <server>` | Prints complete tool reference, parameters, and prompt recipes for Claude (`excel`, `word`, `explorer`, `tsc`, `db`). |
+| `mws doctor` | Runs diagnostic health checks (Python runtime, PyWin32 Excel/Word COM readiness, Node/tsc tools, PostgreSQL/MySQL drivers & native dump utilities). |
+| `mws run <server>` | Launches the MCP server over stdio (e.g. `mws run db`, `mws run word`, `mws run tsc`). |
 
 ---
 
-## 🛠️ Built-In MCP Servers (47 Tools)
+## 🛠️ Built-In MCP Servers (67 Tools)
 
 ### 📊 1. Excel MCP (`mcp_win_stdio.excel`) — 20 Tools
 * **Fast Data Queries**: `query_sheet`, `filter_and_aggregate`, `export_filtered_data`
@@ -124,6 +130,14 @@ mws setup word
 ### ⚡ 4. TypeScript Diagnostic Watcher MCP (`mcp_win_stdio.tsc`) — 6 Tools
 * **Instant Diagnostic Query**: `get_tsc_errors` (0ms in-memory cache), `get_file_errors`, `get_error_summary`
 * **Dynamic Project Control**: `list_watched_projects`, `watch_project(path)`, `restart_tsc_watcher`
+
+### 🗄️ 5. Database MCP (`mcp_win_stdio.db`) — 20 Tools
+* **Unified Polyglot Hub**: Multi-database connection manager configured via `SERVERS` JSON env (PostgreSQL & MySQL side-by-side).
+* **Inspection & Schema**: `list_connections`, `use_database`, `list_databases`, `list_schemas`, `describe_table` (cross-schema auto-resolution), `schema_overview`, `get_table_sample`, `search_schema`
+* **Query Execution & Profiling**: `read_query` (safe SELECT with row counts), `execute_query` (DML/DDL transaction control), `explain_query` (EXPLAIN execution plans), `get_database_stats` (table sizes, row estimates, index sizes)
+* **Database Administration (DBA)**: `create_database`, `drop_database` (with safety `confirmName` requirement & force terminate), `clone_database` (PostgreSQL template cloning), `terminate_connections`, `list_active_queries`
+* **Backup & Restore**: `dump_database` (native `pg_dump`/`mysqldump`), `restore_database` (native `psql`/`mysql`)
+
 
 ---
 
