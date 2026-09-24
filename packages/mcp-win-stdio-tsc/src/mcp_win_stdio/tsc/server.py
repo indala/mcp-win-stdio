@@ -32,6 +32,20 @@ CACHE_LOCK = threading.Lock()
 ERROR_REGEX = re.compile(r"^([^(]+)\((\d+),(\d+)\):\s*(error|warning)\s*(TS\d+):\s*(.+)$")
 
 
+def is_home_or_root_dir(p: str) -> bool:
+    """Check if path is the user home directory, root drive, or Windows system directory."""
+    try:
+        resolved = Path(p).resolve()
+        if resolved == Path.home().resolve() or resolved.parent == resolved:
+            return True
+        windir = os.environ.get("WINDIR", "C:\\Windows")
+        if str(resolved).lower().startswith(windir.lower()):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def get_default_watch_dir() -> str:
     """Get project directory from env, config file, or current working directory."""
     env_dir = os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT")
@@ -49,6 +63,7 @@ def get_default_watch_dir() -> str:
         pass
 
     return os.path.abspath(os.getcwd())
+
 
 
 def normalize_path(p: str) -> str:
@@ -176,10 +191,11 @@ def _watcher_loop(tsconfig_path: str, root_dir: str) -> None:
                 continue
 
             # Check completion markers
-            if "Found 0 errors." in line or "Found " in line and "Watching for file changes." in line:
+            if "Found 0 errors." in line or ("Found " in line and "Watching for file changes." in line):
                 with CACHE_LOCK:
                     if tsconfig_path in WATCHED_PROJECTS:
                         WATCHED_PROJECTS[tsconfig_path]["errors"] = list(pending_errors)
+                        WATCHED_PROJECTS[tsconfig_path]["status"] = "watching"
                         WATCHED_PROJECTS[tsconfig_path]["last_updated"] = datetime.now(timezone.utc).isoformat()
                 pending_errors = []
             elif "Starting compilation in watch mode..." in line or "File change detected." in line:
@@ -188,6 +204,9 @@ def _watcher_loop(tsconfig_path: str, root_dir: str) -> None:
                 err = parse_tsc_line(line, project_dir, root_dir)
                 if err:
                     pending_errors.append(err)
+                elif pending_errors and (line.startswith(" ") or line.startswith("\t")):
+                    # Multi-line diagnostic message continuation
+                    pending_errors[-1]["message"] += "\n" + line.strip()
 
     except Exception as e:
         with CACHE_LOCK:
@@ -236,10 +255,20 @@ def _cleanup_watchers():
 
 atexit.register(_cleanup_watchers)
 
-# Initialize on import
+# Initialize on import if explicitly configured or running in a project workspace
 _initial_root = get_default_watch_dir()
 if os.path.isdir(_initial_root):
-    start_watching_project(_initial_root)
+    is_explicit = bool(os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT"))
+    if not is_explicit:
+        has_project_marker = (
+            (Path(_initial_root) / "tsconfig.json").exists()
+            or (Path(_initial_root) / "package.json").exists()
+        )
+        if not is_home_or_root_dir(_initial_root) and has_project_marker:
+            start_watching_project(_initial_root)
+    else:
+        start_watching_project(_initial_root)
+
 
 
 # ==========================================
@@ -253,8 +282,17 @@ def get_tsc_errors(project_path: Optional[str] = None, tsconfig_path: Optional[s
     Can filter by specific project directory or tsconfig.json path.
     """
     with CACHE_LOCK:
+        if not WATCHED_PROJECTS:
+            return {
+                "total_errors": 0,
+                "projects": [],
+                "errors": [],
+                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first, or configure TSC_WATCH_DIR.",
+            }
+
         all_errors = []
         projects_summary = []
+        initializing_count = 0
 
         for cfg_path, data in WATCHED_PROJECTS.items():
             if tsconfig_path and normalize_path(tsconfig_path) != cfg_path:
@@ -263,19 +301,28 @@ def get_tsc_errors(project_path: Optional[str] = None, tsconfig_path: Optional[s
                 continue
 
             errs = data.get("errors", [])
+            status = data.get("status", "unknown")
+            if status == "initializing":
+                initializing_count += 1
+
             all_errors.extend(errs)
             projects_summary.append({
                 "tsconfig": data["relative_config"],
-                "status": data["status"],
+                "project_dir": data["project_dir"],
+                "status": status,
                 "error_count": len(errs),
                 "last_updated": data["last_updated"],
             })
 
-        return {
+        result: Dict[str, Any] = {
             "total_errors": len(all_errors),
             "projects": projects_summary,
             "errors": all_errors,
         }
+        if initializing_count > 0:
+            result["notice"] = f"{initializing_count} project(s) still compiling initial pass. Errors may update in a few seconds."
+
+        return result
 
 
 @mcp.tool()
@@ -283,10 +330,19 @@ def get_file_errors(file_path: str) -> Dict[str, Any]:
     """
     Get TypeScript compiler errors for a specific file (.ts, .tsx, .js, .jsx).
     """
-    norm_file = normalize_path(file_path)
-    file_errors = []
-
     with CACHE_LOCK:
+        if not WATCHED_PROJECTS:
+            return {
+                "file": file_path,
+                "error_count": 0,
+                "has_errors": False,
+                "errors": [],
+                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first.",
+            }
+
+        norm_file = normalize_path(file_path)
+        file_errors = []
+
         for cfg_path, data in WATCHED_PROJECTS.items():
             for err in data.get("errors", []):
                 if err["file"] == norm_file or err["relative_path"] == norm_file or file_path.replace("\\", "/") in err["file"]:
@@ -306,28 +362,45 @@ def get_error_summary() -> Dict[str, Any]:
     Get high-level summary of TypeScript errors across all projects without full diagnostic lists.
     """
     with CACHE_LOCK:
+        if not WATCHED_PROJECTS:
+            return {
+                "total_errors": 0,
+                "projects_count": 0,
+                "projects": {},
+                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first.",
+            }
+
         summary = {}
         total = 0
         error_by_code: Dict[str, int] = {}
+        initializing_count = 0
 
         for cfg_path, data in WATCHED_PROJECTS.items():
             errs = data.get("errors", [])
             count = len(errs)
             total += count
+            status = data.get("status", "unknown")
+            if status == "initializing":
+                initializing_count += 1
             summary[data["relative_config"]] = {
-                "status": data["status"],
+                "project_dir": data["project_dir"],
+                "status": status,
                 "errors": count,
             }
             for e in errs:
                 code = e.get("code", "UNKNOWN")
                 error_by_code[code] = error_by_code.get(code, 0) + 1
 
-        return {
+        result: Dict[str, Any] = {
             "total_errors": total,
             "projects_count": len(WATCHED_PROJECTS),
             "projects": summary,
             "most_common_error_codes": sorted(error_by_code.items(), key=lambda x: x[1], reverse=True)[:5],
         }
+        if initializing_count > 0:
+            result["notice"] = f"{initializing_count} project(s) still compiling initial pass."
+
+        return result
 
 
 @mcp.tool()
@@ -361,13 +434,26 @@ def watch_project(project_path: str) -> Dict[str, Any]:
     if not os.path.exists(project_path):
         return {"success": False, "error": f"Path not found: {project_path}"}
 
+    # If user or LLM passed a file path, resolve to its containing directory
+    if os.path.isfile(project_path):
+        project_path = os.path.dirname(project_path)
+
     configs = start_watching_project(project_path)
+    if not configs:
+        return {
+            "success": False,
+            "project_path": normalize_path(project_path),
+            "found_tsconfigs": [],
+            "error": f"No tsconfig.json found in '{project_path}' (searched up to 4 directories deep). Make sure this directory contains a TypeScript project.",
+        }
+
     return {
         "success": True,
         "project_path": normalize_path(project_path),
         "found_tsconfigs": configs,
         "message": f"Started background TypeScript watchers for {len(configs)} configuration(s).",
     }
+
 
 
 @mcp.tool()
