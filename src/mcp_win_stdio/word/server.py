@@ -824,16 +824,19 @@ def read_word_document(
     file_path: str,
     include_tables: bool = True,
     include_headers_footers: bool = True,
-    output_format: str = "markdown"
+    output_format: str = "markdown",
+    max_chars: int = 30000
 ) -> str:
     """
-    Read and extract the full content of a Word document formatted as Markdown or structured JSON.
+    Read and extract the content of a Word document formatted as Markdown or structured JSON.
+    Includes token-safe truncation for large documents.
     
     Args:
         file_path: Path to the .docx or .doc file.
         include_tables: Whether to include table contents (default: True).
         include_headers_footers: Whether to include header and footer text (default: True).
         output_format: Output format ('markdown' or 'json'). Default is 'markdown'.
+        max_chars: Maximum characters to return before truncating (default: 30000, ~7500 tokens).
     """
     try:
         doc = load_document(file_path)
@@ -857,13 +860,20 @@ def read_word_document(
                         "runs": runs
                     })
 
+            has_more = len(paragraphs_data) > 100
+            display_paras = paragraphs_data[:100]
             result = {
                 "file_path": os.path.abspath(file_path),
-                "paragraphs": paragraphs_data,
+                "total_paragraphs": len(paragraphs_data),
+                "returned_paragraphs": len(display_paras),
+                "has_more": has_more,
+                "paragraphs": display_paras,
             }
+            if has_more:
+                result["notice"] = "... [TRUNCATED: Showing first 100 paragraphs to protect context window] ..."
             if include_tables:
                 tables_res = []
-                for t in doc.tables:
+                for t in doc.tables[:20]:
                     rows = [[cell.text.strip() for cell in r.cells] for r in t.rows]
                     tables_res.append(rows)
                 result["tables"] = tables_res
@@ -913,16 +923,18 @@ def read_word_document(
 
         if include_tables and doc.tables:
             md.append("\n## Embedded Tables\n")
-            for t_idx, table in enumerate(doc.tables, 1):
+            for t_idx, table in enumerate(doc.tables[:15], 1):
                 md.append(f"### Table {t_idx}")
                 rows = [[cell.text.strip().replace("\n", " ") for cell in r.cells] for r in table.rows]
                 if rows:
                     header = rows[0]
                     md.append("| " + " | ".join(header) + " |")
                     md.append("| " + " | ".join(["---"] * len(header)) + " |")
-                    for r in rows[1:]:
+                    for r in rows[1:50]:
                         cells = r + [""] * (len(header) - len(r))
                         md.append("| " + " | ".join(cells[:len(header)]) + " |")
+                    if len(rows) > 50:
+                        md.append(f"\n*... [{len(rows) - 50} table rows truncated] ...*\n")
                 md.append("\n")
 
         if include_headers_footers and doc.sections:
@@ -931,13 +943,22 @@ def read_word_document(
             if footer_text:
                 md.append(f"\n> **Footer**: {footer_text}\n")
 
-        return "\n".join(md)
+        full_output = "\n".join(md)
+        if len(full_output) > max_chars:
+            notice = f"\n\n... [TRUNCATED: Document exceeds {max_chars} characters. Use get_document_outline or search_word_document to inspect specific sections] ..."
+            return full_output[:max_chars] + notice
+        return full_output
     except Exception as e:
         return f"Error reading Word document: {str(e)}"
 
 
 @mcp.tool()
-def search_word_document(file_path: str, search_term: str, match_case: bool = False) -> str:
+def search_word_document(
+    file_path: str,
+    search_term: str,
+    match_case: bool = False,
+    max_matches: int = 50
+) -> str:
     """
     Search for a text term or pattern across paragraphs, headers, footers, and table cells in a Word document.
     
@@ -945,12 +966,14 @@ def search_word_document(file_path: str, search_term: str, match_case: bool = Fa
         file_path: Path to the .docx or .doc file.
         search_term: String or pattern to search for.
         match_case: Case-sensitive search flag (default: False).
+        max_matches: Maximum number of matches to return (default: 50).
     """
     try:
         doc = load_document(file_path)
         matches = []
         flags = 0 if match_case else re.IGNORECASE
         pattern = re.compile(re.escape(search_term), flags)
+        safe_max = min(max(1, max_matches), 200)
 
         for p_idx, p in enumerate(doc.paragraphs):
             if pattern.search(p.text):
@@ -959,32 +982,50 @@ def search_word_document(file_path: str, search_term: str, match_case: bool = Fa
                     "style": p.style.name if p.style else "",
                     "text": p.text.strip()
                 })
+                if len(matches) >= safe_max:
+                    break
 
-        for s_idx, section in enumerate(doc.sections, 1):
-            h_text = " ".join(p.text for p in section.header.paragraphs)
-            if pattern.search(h_text):
-                matches.append({"location": f"Section {s_idx} Header", "text": h_text.strip()})
-            f_text = " ".join(p.text for p in section.footer.paragraphs)
-            if pattern.search(f_text):
-                matches.append({"location": f"Section {s_idx} Footer", "text": f_text.strip()})
+        if len(matches) < safe_max:
+            for s_idx, section in enumerate(doc.sections, 1):
+                h_text = " ".join(p.text for p in section.header.paragraphs)
+                if pattern.search(h_text):
+                    matches.append({"location": f"Section {s_idx} Header", "text": h_text.strip()})
+                f_text = " ".join(p.text for p in section.footer.paragraphs)
+                if pattern.search(f_text):
+                    matches.append({"location": f"Section {s_idx} Footer", "text": f_text.strip()})
+                if len(matches) >= safe_max:
+                    break
 
-        for t_idx, table in enumerate(doc.tables, 1):
-            for r_idx, row in enumerate(table.rows):
-                for c_idx, cell in enumerate(row.cells):
-                    if pattern.search(cell.text):
-                        matches.append({
-                            "location": f"Table {t_idx}, Row {r_idx + 1}, Col {c_idx + 1}",
-                            "text": cell.text.strip()
-                        })
+        if len(matches) < safe_max:
+            for t_idx, table in enumerate(doc.tables, 1):
+                for r_idx, row in enumerate(table.rows):
+                    for c_idx, cell in enumerate(row.cells):
+                        if pattern.search(cell.text):
+                            matches.append({
+                                "location": f"Table {t_idx}, Row {r_idx + 1}, Col {c_idx + 1}",
+                                "text": cell.text.strip()
+                            })
+                            if len(matches) >= safe_max:
+                                break
+                    if len(matches) >= safe_max:
+                        break
+                if len(matches) >= safe_max:
+                    break
 
-        return json.dumps({
+        result_dict: Dict[str, Any] = {
             "file_path": os.path.abspath(file_path),
             "search_term": search_term,
             "total_matches": len(matches),
+            "limit_reached": len(matches) >= safe_max,
             "matches": matches
-        }, indent=2)
+        }
+        if len(matches) >= safe_max:
+            result_dict["notice"] = f"... [TRUNCATED: Showing first {safe_max} matches. Narrow your search term for more specific results] ..."
+
+        return json.dumps(result_dict, indent=2)
     except Exception as e:
         return json.dumps({"error": str(e)}, indent=2)
+
 
 
 if __name__ == "__main__":

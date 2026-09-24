@@ -197,9 +197,24 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
     return {"schema": s or "public", "table": t, "notFound": True}
 
 
+def _truncate_cell(val: Any, max_chars: int = 500) -> Any:
+    """Truncate massive strings or raw binary data to prevent context window exhaustion."""
+    if isinstance(val, str) and len(val) > max_chars:
+        return val[:max_chars] + f"... [truncated {len(val) - max_chars} chars]"
+    elif isinstance(val, (bytes, bytearray)):
+        return f"<binary data: {len(val)} bytes>"
+    return val
+
+
+def _truncate_row(row: Dict[str, Any], max_chars: int = 500) -> Dict[str, Any]:
+    """Truncate all values in a single row dictionary."""
+    return {k: _truncate_cell(v, max_chars) for k, v in row.items()}
+
+
 # ==========================================
 # MCP TOOLS
 # ==========================================
+
 
 @mcp.tool()
 def list_connections() -> Dict[str, Any]:
@@ -470,13 +485,14 @@ def get_table_sample(tableName: str, limit: int = 5, schema: Optional[str] = Non
                 t = resolved["table"]
                 cur.execute(f'SELECT * FROM "{s}"."{t}" LIMIT %s;', (lim,))
                 rows = cur.fetchall()
+                cleaned_rows = [_truncate_row(r) for r in rows]
                 return {
                     "connection": info["name"],
                     "database": info["database"],
                     "table": t,
                     "schema": s,
-                    "sampleCount": len(rows),
-                    "sampleRows": rows
+                    "sampleCount": len(cleaned_rows),
+                    "sampleRows": cleaned_rows
                 }
         finally:
             conn.close()
@@ -486,21 +502,28 @@ def get_table_sample(tableName: str, limit: int = 5, schema: Optional[str] = Non
             with conn.cursor() as cur:
                 cur.execute(f"SELECT * FROM `{tableName}` LIMIT %s;", (lim,))
                 rows = cur.fetchall()
+                cleaned_rows = [_truncate_row(r) for r in rows]
                 return {
                     "connection": info["name"],
                     "database": info["database"],
                     "table": tableName,
-                    "sampleCount": len(rows),
-                    "sampleRows": rows
+                    "sampleCount": len(cleaned_rows),
+                    "sampleRows": cleaned_rows
                 }
         finally:
             conn.close()
 
 
 @mcp.tool()
-def search_schema(searchTerm: str, schema: Optional[str] = "all", connection: Optional[str] = None) -> Dict[str, Any]:
-    """Search across tables and column names for a keyword."""
+def search_schema(
+    searchTerm: str,
+    schema: Optional[str] = "all",
+    max_results: int = 50,
+    connection: Optional[str] = None
+) -> Dict[str, Any]:
+    """Search across tables and column names for a keyword with safety limits to protect context window."""
     info = _get_connection(connection)
+    safe_max = min(max(1, max_results), 100)
     pat = f"%{searchTerm}%"
     if info["engine"] == "postgres":
         conn = _get_pg_client(info)
@@ -514,46 +537,98 @@ def search_schema(searchTerm: str, schema: Optional[str] = "all", connection: Op
                 UNION ALL
                 SELECT 'table' AS match_type, table_schema, table_name, table_name AS match_name, table_type AS details
                 FROM information_schema.tables WHERE {cond} AND table_name ILIKE %s
-                ORDER BY table_schema, table_name;
+                ORDER BY table_schema, table_name
+                LIMIT {safe_max + 1};
                 """
                 params = [pat, pat, pat] if is_all else [schema, pat, pat, schema, pat]
                 cur.execute(sql, tuple(params))
                 rows = cur.fetchall()
-                return {"connection": info["name"], "matchesCount": len(rows), "matches": rows}
+                has_more = len(rows) > safe_max
+                display_rows = rows[:safe_max]
+                res: Dict[str, Any] = {
+                    "connection": info["name"],
+                    "matchesCount": len(display_rows),
+                    "has_more": has_more,
+                    "matches": display_rows
+                }
+                if has_more:
+                    res["notice"] = (
+                        f"... [TRUNCATED: Showing first {safe_max} schema matches. "
+                        f"Narrow your search term to see more specific results] ..."
+                    )
+                return res
         finally:
             conn.close()
     else:
         conn = _get_mysql_client(info)
         try:
             with conn.cursor() as cur:
-                sql = """
+                sql = f"""
                 SELECT 'column' AS match_type, table_schema, table_name, column_name AS match_name, data_type AS details
                 FROM information_schema.columns WHERE table_schema = DATABASE() AND (column_name LIKE %s OR table_name LIKE %s)
                 UNION ALL
                 SELECT 'table' AS match_type, table_schema, table_name, table_name AS match_name, table_type AS details
                 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name LIKE %s
-                ORDER BY table_name;
+                ORDER BY table_name
+                LIMIT {safe_max + 1};
                 """
                 cur.execute(sql, (pat, pat, pat))
                 rows = cur.fetchall()
-                return {"connection": info["name"], "matchesCount": len(rows), "matches": rows}
+                has_more = len(rows) > safe_max
+                display_rows = rows[:safe_max]
+                res: Dict[str, Any] = {
+                    "connection": info["name"],
+                    "matchesCount": len(display_rows),
+                    "has_more": has_more,
+                    "matches": display_rows
+                }
+                if has_more:
+                    res["notice"] = (
+                        f"... [TRUNCATED: Showing first {safe_max} schema matches. "
+                        f"Narrow your search term to see more specific results] ..."
+                    )
+                return res
         finally:
             conn.close()
 
 
 @mcp.tool()
-def read_query(sql: str, params: Optional[List[Any]] = None, connection: Optional[str] = None) -> Dict[str, Any]:
-    """Safely execute a read-only SELECT query inside a read-only transaction with automatic rollback."""
+def read_query(
+    sql: str,
+    params: Optional[List[Any]] = None,
+    limit: int = 50,
+    max_cell_chars: int = 500,
+    connection: Optional[str] = None
+) -> Dict[str, Any]:
+    """Safely execute a read-only SELECT query inside a read-only transaction with automatic rollback and token-safe pagination."""
     info = _get_connection(connection)
     p = tuple(params) if params else ()
+    safe_limit = min(max(1, limit), 200)
+
     if info["engine"] == "postgres":
         conn = _get_pg_client(info)
         try:
             conn.set_session(readonly=True, autocommit=False)
             with conn.cursor() as cur:
                 cur.execute(sql, p)
-                rows = cur.fetchall()
-                return {"connection": info["name"], "database": info["database"], "rowCount": len(rows), "rows": rows}
+                fetched = cur.fetchmany(safe_limit + 1)
+                has_more = len(fetched) > safe_limit
+                display_rows = fetched[:safe_limit]
+                cleaned_rows = [_truncate_row(r, max_cell_chars) for r in display_rows]
+
+                result: Dict[str, Any] = {
+                    "connection": info["name"],
+                    "database": info["database"],
+                    "returned_rows": len(cleaned_rows),
+                    "has_more": has_more,
+                    "rows": cleaned_rows,
+                }
+                if has_more:
+                    result["notice"] = (
+                        f"... [TRUNCATED: Showing first {safe_limit} rows. Additional rows omitted to protect "
+                        f"context window. Use SQL LIMIT / OFFSET or WHERE clauses to query specific subsets] ..."
+                    )
+                return result
         finally:
             conn.rollback()
             conn.close()
@@ -562,10 +637,27 @@ def read_query(sql: str, params: Optional[List[Any]] = None, connection: Optiona
         try:
             with conn.cursor() as cur:
                 cur.execute(sql, p)
-                rows = cur.fetchall()
-                return {"connection": info["name"], "database": info["database"], "rowCount": len(rows), "rows": rows}
+                fetched = cur.fetchmany(safe_limit + 1)
+                has_more = len(fetched) > safe_limit
+                display_rows = fetched[:safe_limit]
+                cleaned_rows = [_truncate_row(r, max_cell_chars) for r in display_rows]
+
+                result: Dict[str, Any] = {
+                    "connection": info["name"],
+                    "database": info["database"],
+                    "returned_rows": len(cleaned_rows),
+                    "has_more": has_more,
+                    "rows": cleaned_rows,
+                }
+                if has_more:
+                    result["notice"] = (
+                        f"... [TRUNCATED: Showing first {safe_limit} rows. Additional rows omitted to protect "
+                        f"context window. Use SQL LIMIT / OFFSET or WHERE clauses to query specific subsets] ..."
+                    )
+                return result
         finally:
             conn.close()
+
 
 
 @mcp.tool()

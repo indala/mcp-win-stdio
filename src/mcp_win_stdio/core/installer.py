@@ -129,10 +129,10 @@ def safe_apply_to_desktop(server_name: str, env_vars: Optional[Dict[str, str]] =
 
 
 def safe_apply_to_cli(server_name: str, env_vars: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
-    """Safely register into Claude Code CLI."""
+    """Safely register into Claude Code CLI using the official `claude mcp add` command."""
     python_exe, args = get_server_exec_args(server_name)
-    
-    # Try running `claude mcp add` CLI command
+    cmd_str = generate_claude_cli_command(server_name, env_vars)
+
     cmd = ["claude", "mcp", "add", "-s", "user"]
     if env_vars:
         for k, v in env_vars.items():
@@ -143,31 +143,13 @@ def safe_apply_to_cli(server_name: str, env_vars: Optional[Dict[str, str]] = Non
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if res.returncode == 0:
             return True, f"Successfully registered '{server_name}' in Claude Code CLI via `claude mcp add`"
-    except Exception:
-        pass
-
-    # Direct fallback to ~/.claude.json
-    cli_path = get_claude_cli_config_path() or (Path.home() / ".claude.json")
-    try:
-        cli_data = {}
-        if cli_path.exists():
-            with open(cli_path, "r", encoding="utf-8") as f:
-                try:
-                    cli_data = json.load(f)
-                except Exception:
-                    cli_data = {}
-
-        if "mcpServers" not in cli_data:
-            cli_data["mcpServers"] = {}
-
-        cli_data["mcpServers"][server_name] = generate_claude_desktop_snippet(server_name, env_vars)
-
-        with open(cli_path, "w", encoding="utf-8") as f:
-            json.dump(cli_data, f, indent=2)
-
-        return True, f"Successfully written directly to {cli_path}"
+        else:
+            err = res.stderr or res.stdout
+            return False, f"`claude mcp add` exited with error: {err.strip()}\nPlease run manually:\n    {cmd_str}"
+    except FileNotFoundError:
+        return False, f"Claude Code CLI (`claude`) not found on PATH. Please run manually:\n    {cmd_str}"
     except Exception as e:
-        return False, f"Failed to configure Claude CLI: {str(e)}"
+        return False, f"Failed to execute `claude mcp add`: {str(e)}\nPlease run manually:\n    {cmd_str}"
 
 
 def remove_server_from_desktop(server_name: str) -> Tuple[bool, str]:
@@ -189,7 +171,7 @@ def remove_server_from_desktop(server_name: str) -> Tuple[bool, str]:
 
 
 def remove_server_from_cli(server_name: str) -> Tuple[bool, str]:
-    """Remove server from Claude CLI."""
+    """Remove server from Claude CLI using the official `claude mcp remove` command."""
     try:
         res = subprocess.run(
             ["claude", "mcp", "remove", "-s", "user", server_name],
@@ -199,20 +181,10 @@ def remove_server_from_cli(server_name: str) -> Tuple[bool, str]:
         )
         if res.returncode == 0:
             return True, f"Removed '{server_name}' from Claude Code CLI."
-    except Exception:
-        pass
+        else:
+            return False, f"Could not remove '{server_name}': {res.stderr or res.stdout}"
+    except FileNotFoundError:
+        return False, "Claude Code CLI (`claude`) not found on PATH."
+    except Exception as e:
+        return False, f"Failed to remove from Claude CLI: {str(e)}"
 
-    cli_path = get_claude_cli_config_path()
-    if cli_path and cli_path.exists():
-        try:
-            with open(cli_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "mcpServers" in data and server_name in data["mcpServers"]:
-                del data["mcpServers"][server_name]
-                with open(cli_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                return True, f"Removed '{server_name}' from {cli_path}"
-        except Exception:
-            pass
-
-    return False, "Failed to remove from Claude CLI (or claude command not available)."
