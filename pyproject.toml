@@ -69,11 +69,16 @@ all = [
 mcp-win-stdio = "mcp_win_stdio.cli:main"
 mws = "mcp_win_stdio.cli:main"
 mws-excel = "mcp_win_stdio.excel.cli:main"
+mcp-win-stdio-excel = "mcp_win_stdio.excel.cli:main"
 mws-word = "mcp_win_stdio.word.cli:main"
+mcp-win-stdio-word = "mcp_win_stdio.word.cli:main"
 mws-explorer = "mcp_win_stdio.explorer.cli:main"
+mcp-win-stdio-explorer = "mcp_win_stdio.explorer.cli:main"
 mws-tsc = "mcp_win_stdio.tsc.cli:main"
+mcp-win-stdio-tsc = "mcp_win_stdio.tsc.cli:main"
 mws-db = "mcp_win_stdio.db.cli:main"
 mcp-win-stdio-db = "mcp_win_stdio.db.cli:main"
+
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_win_stdio"]
