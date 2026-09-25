@@ -61,8 +61,9 @@ mws
 Output:
 ```text
 ============================================================================
-   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.1.0)
+   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.2.1)
 ============================================================================
+
  Single-Source Hub:      C:\Users\User\.mcp-win-stdio
  Claude Desktop Config:  C:\Users\User\AppData\Roaming\Claude\claude_desktop_config.json
  Claude Code CLI Config: C:\Users\User\.claude.json
@@ -103,6 +104,14 @@ mws setup db
 | `mws guide <server>` | Prints complete tool reference, parameters, and prompt recipes for Claude (`excel`, `word`, `explorer`, `tsc`, `db`). |
 | `mws doctor` | Runs diagnostic health checks (Python runtime, PyWin32 Excel/Word COM readiness, Node/tsc tools, PostgreSQL/MySQL drivers & native dump utilities). |
 | `mws run <server>` | Launches the MCP server over stdio (e.g. `mws run db`, `mws run word`, `mws run tsc`). |
+
+> [!TIP]
+> If `mws` is not recognized (for example, if your Python `Scripts` directory is not yet in Windows `PATH`), all commands can be executed directly using Python's module runner:
+> ```powershell
+> python -m mcp_win_stdio run excel
+> python -m mcp_win_stdio doctor
+> python -m mcp_win_stdio setup
+> ```
 
 ---
 

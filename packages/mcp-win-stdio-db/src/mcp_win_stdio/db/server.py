@@ -4,17 +4,22 @@ Unified Database MCP Server for PostgreSQL and MySQL
 Part of mcp-win-stdio.
 """
 
+import decimal
 import os
 import sys
 import json
 import re
 import subprocess
-from datetime import datetime
+import uuid
+from datetime import datetime, date, time
 from pathlib import Path
 from typing import Any, Optional, List, Dict, Union
 from urllib.parse import urlparse, unquote
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.fastmcp import FastMCP
 
 # Database drivers
 import psycopg2
@@ -198,11 +203,25 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
 
 
 def _truncate_cell(val: Any, max_chars: int = 500) -> Any:
-    """Truncate massive strings or raw binary data to prevent context window exhaustion."""
-    if isinstance(val, str) and len(val) > max_chars:
-        return val[:max_chars] + f"... [truncated {len(val) - max_chars} chars]"
-    elif isinstance(val, (bytes, bytearray)):
+    """Truncate massive strings or raw binary data and serialize rich DB types (Decimal, UUID, datetime)."""
+    if val is None:
+        return None
+    if isinstance(val, (bytes, bytearray, memoryview)):
         return f"<binary data: {len(val)} bytes>"
+    if isinstance(val, decimal.Decimal):
+        return float(val) if val.is_finite() else str(val)
+    if isinstance(val, (datetime, date, time)):
+        return val.isoformat()
+    if isinstance(val, uuid.UUID):
+        return str(val)
+    if isinstance(val, (set, tuple)):
+        return [_truncate_cell(x, max_chars) for x in val]
+    if isinstance(val, dict):
+        return {k: _truncate_cell(v, max_chars) for k, v in val.items()}
+    if isinstance(val, str):
+        if len(val) > max_chars:
+            return val[:max_chars] + f"... [truncated {len(val) - max_chars} chars]"
+        return val
     return val
 
 
@@ -807,11 +826,13 @@ def create_database(database: str, server: Optional[str] = None, encoding: Optio
     if info["engine"] == "postgres":
         admin_conn = _get_pg_client(info, dbname="postgres")
         admin_conn.autocommit = True
+        db_esc = database.replace('"', '""')
         try:
             with admin_conn.cursor() as cur:
-                sql = f'CREATE DATABASE "{database}"'
+                sql = f'CREATE DATABASE "{db_esc}"'
                 if template:
-                    sql += f' TEMPLATE "{template}"'
+                    tpl_esc = template.replace('"', '""')
+                    sql += f' TEMPLATE "{tpl_esc}"'
                 if encoding:
                     sql += f" ENCODING '{encoding}'"
                 cur.execute(sql)
@@ -824,9 +845,10 @@ def create_database(database: str, server: Optional[str] = None, encoding: Optio
         return {"success": True, "message": f"Database '{database}' successfully created on PostgreSQL server ({info['host']}:{info['port']}).", "database": database, "engine": "postgres"}
     else:
         conn = _get_mysql_client(info)
+        db_esc = database.replace("`", "``")
         try:
             with conn.cursor() as cur:
-                sql = f"CREATE DATABASE IF NOT EXISTS `{database}`"
+                sql = f"CREATE DATABASE IF NOT EXISTS `{db_esc}`"
                 if encoding:
                     sql += f" CHARACTER SET {encoding}"
                 cur.execute(sql)
@@ -860,22 +882,24 @@ def drop_database(database: str, confirmName: str, force: bool = False, server: 
     if info["engine"] == "postgres":
         admin_conn = _get_pg_client(info, dbname="postgres")
         admin_conn.autocommit = True
+        db_esc = database.replace('"', '""')
         try:
             with admin_conn.cursor() as cur:
                 if force:
                     cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();", (database,))
-                    cur.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE);')
+                    cur.execute(f'DROP DATABASE IF EXISTS "{db_esc}" WITH (FORCE);')
                 else:
-                    cur.execute(f'DROP DATABASE "{database}";')
+                    cur.execute(f'DROP DATABASE "{db_esc}";')
         finally:
             admin_conn.close()
 
         return {"success": True, "message": f"Database '{database}' successfully dropped on PostgreSQL server ({info['host']}:{info['port']}).", "activeConnectionNow": _ACTIVE_CONNECTION}
     else:
         conn = _get_mysql_client(info)
+        db_esc = database.replace("`", "``")
         try:
             with conn.cursor() as cur:
-                cur.execute(f"DROP DATABASE IF EXISTS `{database}`;")
+                cur.execute(f"DROP DATABASE IF EXISTS `{db_esc}`;")
         finally:
             conn.close()
 
@@ -889,18 +913,20 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
     if info["engine"] == "postgres":
         admin_conn = _get_pg_client(info, dbname="postgres")
         admin_conn.autocommit = True
+        src_esc = sourceDatabase.replace('"', '""')
+        tgt_esc = targetDatabase.replace('"', '""')
         try:
             with admin_conn.cursor() as cur:
                 try:
-                    cur.execute(f'ALTER DATABASE "{sourceDatabase}" WITH ALLOW_CONNECTIONS = false;')
+                    cur.execute(f'ALTER DATABASE "{src_esc}" WITH ALLOW_CONNECTIONS = false;')
                 except Exception:
                     pass
                 cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();", (sourceDatabase,))
-                cur.execute(f'CREATE DATABASE "{targetDatabase}" WITH TEMPLATE "{sourceDatabase}";')
+                cur.execute(f'CREATE DATABASE "{tgt_esc}" WITH TEMPLATE "{src_esc}";')
         finally:
             try:
                 with admin_conn.cursor() as cur:
-                    cur.execute(f'ALTER DATABASE "{sourceDatabase}" WITH ALLOW_CONNECTIONS = true;')
+                    cur.execute(f'ALTER DATABASE "{src_esc}" WITH ALLOW_CONNECTIONS = true;')
             except Exception:
                 pass
             admin_conn.close()
@@ -911,14 +937,17 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
         return {"success": True, "message": f"Database '{sourceDatabase}' cloned to '{targetDatabase}' successfully via native template cloning.", "source": sourceDatabase, "target": targetDatabase}
     else:
         conn = _get_mysql_client(info)
+        src_esc = sourceDatabase.replace("`", "``")
+        tgt_esc = targetDatabase.replace("`", "``")
         try:
             with conn.cursor() as cur:
-                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{targetDatabase}`;")
+                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{tgt_esc}`;")
                 cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s;", (sourceDatabase,))
                 tables = [r.get("table_name", next(iter(r.values()))) for r in cur.fetchall()]
                 for t in tables:
-                    cur.execute(f"CREATE TABLE `{targetDatabase}`.`{t}` LIKE `{sourceDatabase}`.`{t}`;")
-                    cur.execute(f"INSERT INTO `{targetDatabase}`.`{t}` SELECT * FROM `{sourceDatabase}`.`{t}`;")
+                    t_esc = str(t).replace("`", "``")
+                    cur.execute(f"CREATE TABLE `{tgt_esc}`.`{t_esc}` LIKE `{src_esc}`.`{t_esc}`;")
+                    cur.execute(f"INSERT INTO `{tgt_esc}`.`{t_esc}` SELECT * FROM `{src_esc}`.`{t_esc}`;")
         finally:
             conn.close()
 
@@ -1087,9 +1116,25 @@ def restore_database(database: str, dumpFilePath: str, server: Optional[str] = N
             "message": f"PostgreSQL database '{database}' successfully restored from '{dumpFilePath}'."
         }
     else:
+        cmd = [
+            "mysql",
+            "-h", str(info["host"]),
+            "-P", str(info["port"]),
+            "-u", str(info["user"]),
+        ]
+        if info.get("password"):
+            cmd.append(f"-p{info['password']}")
+        cmd.append(database)
+
+        with open(fpath, "r", encoding="utf-8", errors="replace") as dump_in:
+            res = subprocess.run(cmd, stdin=dump_in, capture_output=True, text=True)
+
+        if res.returncode != 0:
+            raise RuntimeError(f"mysql restore failed: {res.stderr}")
+
         return {
             "success": True,
-            "message": f"MySQL dump file validated for '{database}'. Ready for execution.",
+            "message": f"MySQL database '{database}' successfully restored from '{dumpFilePath}'.",
             "dumpFilePath": str(fpath)
         }
 

@@ -10,7 +10,10 @@ import sys
 import json
 import re
 from typing import Optional, List, Dict, Any
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.fastmcp import FastMCP
 import docx
 from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
@@ -60,18 +63,37 @@ def load_document(file_path: str) -> docx.Document:
     if clean_path.lower().endswith(".doc") and not clean_path.lower().endswith(".docx"):
         try:
             import win32com.client
-            word = win32com.client.Dispatch("Word.Application")
-            word.Visible = False
-            doc = word.Documents.Open(clean_path)
-            temp_docx = clean_path + "x"
-            doc.SaveAs2(temp_docx, FileFormat=16)
-            doc.Close()
-            word.Quit()
-            return docx.Document(temp_docx)
+            import pythoncom
+            pythoncom.CoInitialize()
+            word = None
+            doc = None
+            try:
+                word = win32com.client.Dispatch("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = False
+                doc = word.Documents.Open(clean_path)
+                temp_docx = clean_path + "x"
+                doc.SaveAs2(temp_docx, FileFormat=16)
+                doc.Close(False)
+                doc = None
+                return docx.Document(temp_docx)
+            finally:
+                if doc:
+                    try:
+                        doc.Close(False)
+                    except Exception:
+                        pass
+                if word:
+                    try:
+                        word.Quit()
+                    except Exception:
+                        pass
+                pythoncom.CoUninitialize()
         except Exception as e:
             raise RuntimeError(f"Could not convert legacy .doc file using MS Word: {e}")
 
     return docx.Document(clean_path)
+
 
 def extract_run_formatting(run, paragraph_style=None) -> Dict[str, Any]:
     """Extract font name, size (pt), color (hex/theme), highlight, and bold/italic."""
@@ -791,9 +813,13 @@ def get_document_metadata(file_path: str) -> str:
         total_paras = len(doc.paragraphs)
         total_words = sum(len(p.text.split()) for p in doc.paragraphs)
         for t in doc.tables:
+            seen_cells = set()
             for row in t.rows:
                 for cell in row.cells:
-                    total_words += len(cell.text.split())
+                    if cell not in seen_cells:
+                        seen_cells.add(cell)
+                        total_words += len(cell.text.split())
+
 
         meta = {
             "file_path": os.path.abspath(file_path),

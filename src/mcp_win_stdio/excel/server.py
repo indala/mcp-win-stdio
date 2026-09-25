@@ -9,7 +9,10 @@ import math
 from typing import Any, Optional, List, Dict, Union
 import pandas as pd
 import openpyxl
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.fastmcp import FastMCP
 
 # Try importing pywin32 for native Windows Excel COM automation
 HAS_WIN32 = False
@@ -29,6 +32,21 @@ except ImportError:
     HAS_RAPIDFUZZ = False
 
 mcp = FastMCP("excel-tools")
+
+
+def _df_to_clean_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Convert DataFrame to JSON-safe records, cleanly handling NaT, NaN, Timestamps, and dates."""
+    clean = df.astype(object).where(pd.notnull(df), None)
+    records = clean.to_dict(orient="records")
+    for row in records:
+        for k, v in row.items():
+            if pd.isna(v):
+                row[k] = None
+            elif hasattr(v, "isoformat"):
+                row[k] = v.isoformat()
+            elif isinstance(v, (float, int)) and (math.isnan(v) or math.isinf(v)):
+                row[k] = None
+    return records
 
 
 # ==========================================
@@ -88,14 +106,14 @@ def preview_sheet(
 
     nrows = max(1, min(nrows, 200))
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows)
-    clean_df = df.where(pd.notnull(df), None)
+    rows = _df_to_clean_records(df)
 
     return {
         "sheet_name": sheet_name or "First Sheet",
-        "preview_row_count": len(clean_df),
+        "preview_row_count": len(rows),
         "columns": list(df.columns),
         "column_types": {col: str(dtype) for col, dtype in df.dtypes.items()},
-        "rows": clean_df.to_dict(orient="records"),
+        "rows": rows,
     }
 
 
@@ -128,16 +146,17 @@ def query_rows(
 
     total_matches = len(df)
     paginated_df = df.iloc[offset : offset + limit]
-    clean_df = paginated_df.where(pd.notnull(paginated_df), None)
+    rows = _df_to_clean_records(paginated_df)
 
     return {
         "total_matches": total_matches,
         "offset": offset,
         "limit": limit,
-        "returned_rows": len(clean_df),
+        "returned_rows": len(rows),
         "columns": list(df.columns),
-        "rows": clean_df.to_dict(orient="records"),
+        "rows": rows,
     }
+
 
 
 @mcp.tool()
@@ -174,14 +193,15 @@ def read_range(
             usecols=columns,
         )
 
-    clean_df = df.where(pd.notnull(df), None)
+    rows = _df_to_clean_records(df)
     return {
         "start_row": start_row,
-        "end_row": start_row + len(clean_df) - 1,
-        "row_count": len(clean_df),
+        "end_row": start_row + len(rows) - 1,
+        "row_count": len(rows),
         "columns": list(df.columns),
-        "rows": clean_df.to_dict(orient="records"),
+        "rows": rows,
     }
+
 
 
 @mcp.tool()
@@ -252,7 +272,8 @@ def search_text(
     results = []
 
     for idx in matched_indices:
-        row_data = df.iloc[idx].where(pd.notnull(df.iloc[idx]), None).to_dict()
+        cleaned_row_list = _df_to_clean_records(df.iloc[[idx]])
+        row_data = cleaned_row_list[0] if cleaned_row_list else {}
         matching_cols = [col for col in df.columns if str(search_term).lower() in str(df.at[idx, col]).lower()]
         results.append({
             "excel_row_number": idx + 2,
@@ -281,8 +302,13 @@ def create_workbook(
     if not data:
         raise ValueError("Data list cannot be empty.")
 
+    out_dir = os.path.dirname(os.path.abspath(file_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     df = pd.DataFrame(data)
     with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+
         df.to_excel(writer, sheet_name=sheet_name, index=False)
         ws = writer.sheets[sheet_name]
         for col in ws.columns:
@@ -492,8 +518,14 @@ def export_to_csv(
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
+    out_dir = os.path.dirname(os.path.abspath(output_csv_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0)
     df.to_csv(output_csv_path, index=False)
+
 
     return {
         "status": "success",
@@ -790,6 +822,10 @@ def reconcile_and_merge(
         all_unmatched.append(r)
     df_unmatched = pd.DataFrame(all_unmatched) if all_unmatched else pd.DataFrame([{"Message": "No unmatched exceptions"}])
 
+    out_dir = os.path.dirname(os.path.abspath(output_file_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     with pd.ExcelWriter(output_file_path, engine="openpyxl") as writer:
         df_reconciled.to_excel(writer, sheet_name="1_Reconciled_Matches", index=False)
         df_fuzzy.to_excel(writer, sheet_name="2_Probable_Fuzzy_Matches", index=False)
@@ -840,22 +876,33 @@ def recalculate_and_save(file_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"File not found: {abs_path}")
 
     pythoncom.CoInitialize()
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
-
+    excel = None
+    wb = None
     try:
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
         wb = excel.Workbooks.Open(abs_path)
         excel.CalculateFull()
         wb.Save()
         wb.Close()
+        wb = None
         return {
             "status": "success",
             "message": "Workbook formulas recalculated and saved using native Microsoft Excel.",
             "file_path": abs_path,
         }
     finally:
-        excel.Quit()
+        if wb:
+            try:
+                wb.Close(False)
+            except Exception:
+                pass
+        if excel:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
         pythoncom.CoUninitialize()
 
 
@@ -878,12 +925,17 @@ def export_to_pdf(
     if not os.path.exists(abs_input):
         raise FileNotFoundError(f"Input file not found: {abs_input}")
 
-    pythoncom.CoInitialize()
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
+    out_dir = os.path.dirname(abs_output)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
+    pythoncom.CoInitialize()
+    excel = None
+    wb = None
     try:
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
         wb = excel.Workbooks.Open(abs_input)
         # xlTypePDF = 0
         if sheet_name and sheet_name in [s.Name for s in wb.Sheets]:
@@ -893,13 +945,23 @@ def export_to_pdf(
             wb.ExportAsFixedFormat(0, abs_output)
 
         wb.Close(False)
+        wb = None
         return {
             "status": "success",
             "message": f"Successfully exported to PDF: {abs_output}",
             "pdf_path": abs_output,
         }
     finally:
-        excel.Quit()
+        if wb:
+            try:
+                wb.Close(False)
+            except Exception:
+                pass
+        if excel:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
         pythoncom.CoUninitialize()
 
 
@@ -917,24 +979,36 @@ def refresh_data_and_pivots(file_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"File not found: {abs_path}")
 
     pythoncom.CoInitialize()
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
-
+    excel = None
+    wb = None
     try:
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
         wb = excel.Workbooks.Open(abs_path)
         wb.RefreshAll()
         excel.CalculateUntilAsyncQueriesDone()
         wb.Save()
         wb.Close()
+        wb = None
         return {
             "status": "success",
             "message": "All data connections and PivotTables refreshed successfully.",
             "file_path": abs_path,
         }
     finally:
-        excel.Quit()
+        if wb:
+            try:
+                wb.Close(False)
+            except Exception:
+                pass
+        if excel:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
         pythoncom.CoUninitialize()
+
 
 
 @mcp.tool()
@@ -954,24 +1028,36 @@ def run_vba_macro(
         raise FileNotFoundError(f"File not found: {abs_path}")
 
     pythoncom.CoInitialize()
-    excel = win32com.client.DispatchEx("Excel.Application")
-    excel.Visible = False
-    excel.DisplayAlerts = False
-
+    excel = None
+    wb = None
     try:
+        excel = win32com.client.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
         wb = excel.Workbooks.Open(abs_path)
         macro_args = args or []
         macro_res = excel.Application.Run(macro_name, *macro_args)
         wb.Save()
         wb.Close()
+        wb = None
         return {
             "status": "success",
             "macro_name": macro_name,
             "macro_result": str(macro_res) if macro_res is not None else None,
         }
     finally:
-        excel.Quit()
+        if wb:
+            try:
+                wb.Close(False)
+            except Exception:
+                pass
+        if excel:
+            try:
+                excel.Quit()
+            except Exception:
+                pass
         pythoncom.CoUninitialize()
+
 
 
 @mcp.tool()

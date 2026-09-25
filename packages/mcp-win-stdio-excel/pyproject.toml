@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-excel"
-version = "0.1.0"
+version = "0.2.1"
 description = "Windows-optimized Model Context Protocol (MCP) server for Excel: 20 tools for Pandas queries, RapidFuzz reconciliation, cell editing, and native Excel COM automation (PDF export, recalc, pivots, macros)."
 readme = "README.md"
 requires-python = ">=3.10"

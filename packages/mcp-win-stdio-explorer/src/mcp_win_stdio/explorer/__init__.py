@@ -2,4 +2,4 @@
 mcp-win-stdio-explorer: Workspace Explorer MCP Server.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"

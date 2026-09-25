@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-tsc"
-version = "0.1.0"
+version = "0.2.1"
 description = "Windows-optimized TypeScript Diagnostic Watcher MCP server: background watchers and in-memory cache for instant 0ms compiler error checks."
 readme = "README.md"
 requires-python = ">=3.10"

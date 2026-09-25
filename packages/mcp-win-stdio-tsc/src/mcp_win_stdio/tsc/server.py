@@ -18,7 +18,10 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("tsc-mcp")
 
@@ -75,16 +78,25 @@ def find_tsconfigs(base_dir: str, max_depth: int = 4) -> List[str]:
     ignore_dirs = {
         "node_modules", ".git", ".next", ".nuxt", "dist", "build",
         "out", ".output", "target", "bin", "obj", "__pycache__", ".cache",
-        "coverage", ".turbo"
+        "coverage", ".turbo", "appdata", ".vscode", ".gemini", ".cursor",
+        ".cargo", ".rustup", "venv", ".venv", "env", ".env", "site-packages",
+        "local settings", "application data"
     }
     configs = []
     base_p = Path(base_dir)
     if not base_p.exists():
         return configs
 
+    # Safety: do not deeply crawl user profile root or root drive
+    if is_home_or_root_dir(base_dir):
+        direct_cfg = base_p / "tsconfig.json"
+        if direct_cfg.exists():
+            return [str(direct_cfg)]
+        return configs
+
     for root, dirs, files in os.walk(base_dir):
         # Prune ignored directories in-place
-        dirs[:] = [d for d in dirs if d.lower() not in ignore_dirs]
+        dirs[:] = [d for d in dirs if d.lower() not in ignore_dirs and not d.startswith(".")]
         rel_depth = len(Path(root).relative_to(base_p).parts)
         if rel_depth > max_depth:
             dirs.clear()
@@ -472,3 +484,8 @@ def restart_tsc_watcher() -> Dict[str, Any]:
         "restarted_configs": configs,
         "message": f"Restarted watchers for {len(configs)} project(s).",
     }
+
+
+if __name__ == "__main__":
+    mcp.run()
+

@@ -19,7 +19,10 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.mcpserver import MCPServer as FastMCP
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.fastmcp import FastMCP
 import pathspec
 from rapidfuzz import fuzz, process
 
@@ -194,6 +197,21 @@ def _load_gitignore_spec(root: Path) -> Optional[pathspec.PathSpec]:
         return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
     except Exception:
         return None
+
+
+def _matches_gitignore(gi_spec: Optional[pathspec.PathSpec], rel_posix: str, is_dir: bool = False) -> bool:
+    """Accurately match relative path against gitignore spec, supporting trailing slashes on directory patterns."""
+    if not gi_spec:
+        return False
+    try:
+        if gi_spec.match_file(rel_posix):
+            return True
+        if is_dir and gi_spec.match_file(rel_posix.rstrip("/") + "/"):
+            return True
+    except Exception:
+        pass
+    return False
+
 
 
 # ==========================================
@@ -375,7 +393,7 @@ def get_directory_tree(
                     continue
 
                 # Gitignore check
-                if gi_spec and gi_spec.match_file(rel_posix):
+                if _matches_gitignore(gi_spec, rel_posix, is_dir=e.is_dir()):
                     if not (e.is_dir() and collapse_heavy_dirs):
                         continue
 
@@ -408,6 +426,8 @@ def get_directory_tree(
                         if ignore_mode in ("smart", "git_only") and name in GIT_DIRS:
                             should_collapse = True
                         elif ignore_mode == "smart" and name in HEAVY_BUILD_DIRS:
+                            should_collapse = True
+                        elif _matches_gitignore(gi_spec, rel_posix, is_dir=True):
                             should_collapse = True
 
                     if should_collapse:
@@ -456,13 +476,15 @@ def get_directory_tree(
 
                     if _is_hidden(e_path) and entry.name not in GIT_DIRS:
                         continue
-                    if gi_spec and gi_spec.match_file(rel_posix) and not entry.is_dir():
-                        continue
+                    if _matches_gitignore(gi_spec, rel_posix, is_dir=entry.is_dir()):
+                        if not (entry.is_dir() and collapse_heavy_dirs):
+                            continue
 
                     if entry.is_dir():
                         nodes_count[0] += 1
                         is_heavy = (ignore_mode == "smart" and entry.name in HEAVY_BUILD_DIRS) or (entry.name in GIT_DIRS)
-                        if collapse_heavy_dirs and is_heavy:
+                        is_gi_ignored = _matches_gitignore(gi_spec, rel_posix, is_dir=True)
+                        if collapse_heavy_dirs and (is_heavy or is_gi_ignored):
                             c_items, c_bytes = _get_collapsed_summary(e_path)
                             node["children"].append({
                                 "name": entry.name,
@@ -556,7 +578,10 @@ def find_files(
         if ignore_mode == "smart":
             dirnames[:] = [
                 d for d in dirnames
-                if d not in HEAVY_BUILD_DIRS and d not in GIT_DIRS and not _is_hidden(current_p / d)
+                if d not in HEAVY_BUILD_DIRS
+                and d not in GIT_DIRS
+                and not _is_hidden(current_p / d)
+                and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True)
             ]
         elif ignore_mode == "git_only":
             dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
@@ -567,7 +592,7 @@ def find_files(
                 total_scanned += 1
                 d_path = current_p / d
                 rel_posix = str(d_path.relative_to(root)).replace("\\", "/")
-                if gi_spec and gi_spec.match_file(rel_posix):
+                if _matches_gitignore(gi_spec, rel_posix, is_dir=True):
                     continue
                 if pattern and not fnmatch.fnmatch(d, pattern):
                     continue
@@ -603,7 +628,7 @@ def find_files(
 
                 if _is_hidden(f_path):
                     continue
-                if gi_spec and gi_spec.match_file(rel_posix):
+                if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
                     continue
                 if pattern and not fnmatch.fnmatch(f, pattern):
                     continue
@@ -690,7 +715,13 @@ def fuzzy_find(
     for dirpath, dirnames, filenames in os.walk(root):
         current_p = Path(dirpath)
         if ignore_mode == "smart":
-            dirnames[:] = [d for d in dirnames if d not in HEAVY_BUILD_DIRS and d not in GIT_DIRS and not _is_hidden(current_p / d)]
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in HEAVY_BUILD_DIRS
+                and d not in GIT_DIRS
+                and not _is_hidden(current_p / d)
+                and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+            ]
         elif ignore_mode == "git_only":
             dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
 
@@ -699,7 +730,7 @@ def fuzzy_find(
             if _is_hidden(f_path):
                 continue
             rel_posix = str(f_path.relative_to(root)).replace("\\", "/")
-            if gi_spec and gi_spec.match_file(rel_posix):
+            if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
                 continue
             if ext_set and f_path.suffix.lower() not in ext_set:
                 continue
@@ -800,7 +831,13 @@ def grep_search(
         for dirpath, dirnames, filenames in os.walk(target):
             current_p = Path(dirpath)
             if ignore_mode == "smart":
-                dirnames[:] = [d for d in dirnames if d not in HEAVY_BUILD_DIRS and d not in GIT_DIRS and not _is_hidden(current_p / d)]
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in HEAVY_BUILD_DIRS
+                    and d not in GIT_DIRS
+                    and not _is_hidden(current_p / d)
+                    and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(target)).replace("\\", "/"), is_dir=True)
+                ]
             elif ignore_mode == "git_only":
                 dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
 
@@ -809,7 +846,7 @@ def grep_search(
                 if _is_hidden(f_path):
                     continue
                 rel_posix = str(f_path.relative_to(target)).replace("\\", "/")
-                if gi_spec and gi_spec.match_file(rel_posix):
+                if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
                     continue
                 if file_patterns and not any(fnmatch.fnmatch(f, pat) for pat in file_patterns):
                     continue
@@ -1226,7 +1263,13 @@ def workspace_summary(
     for dirpath, dirnames, filenames in os.walk(root):
         current_p = Path(dirpath)
         if ignore_mode == "smart":
-            dirnames[:] = [d for d in dirnames if d not in HEAVY_BUILD_DIRS and d not in GIT_DIRS and not _is_hidden(current_p / d)]
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in HEAVY_BUILD_DIRS
+                and d not in GIT_DIRS
+                and not _is_hidden(current_p / d)
+                and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+            ]
         elif ignore_mode == "git_only":
             dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
 
@@ -1237,7 +1280,7 @@ def workspace_summary(
             if _is_hidden(f_path):
                 continue
             rel_posix = str(f_path.relative_to(root)).replace("\\", "/")
-            if gi_spec and gi_spec.match_file(rel_posix):
+            if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
                 continue
 
             try:
@@ -1336,6 +1379,7 @@ def export_tree_to_file(
         out_p = root / f"workspace_map.{ext}"
 
     try:
+        out_p.parent.mkdir(parents=True, exist_ok=True)
         if format == "json":
             tree_data = get_directory_tree(
                 path=str(root),

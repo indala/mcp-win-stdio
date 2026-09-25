@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio"
-version = "0.1.0"
+version = "0.2.1"
 description = "Windows-optimized Model Context Protocol (MCP) suite & interactive CLI hub for Claude Desktop & Claude Code CLI (Excel COM, Word layouts, Workspace Explorer, and TypeScript diagnostic watcher)."
 readme = "README.md"
 requires-python = ">=3.10"

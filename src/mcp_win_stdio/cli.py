@@ -275,6 +275,28 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     py_status = "OK" if sys.version_info >= (3, 10) else "FAIL (Requires Python 3.10+)"
     print(f"[{py_status}] Python Runtime: {py_ver} ({sys.executable})")
 
+    # 1b. Scripts & PATH Check
+    import sysconfig
+    scripts_dir = sysconfig.get_path("scripts")
+    path_env = os.environ.get("PATH", "")
+    in_path = False
+    if scripts_dir:
+        in_path = any(
+            os.path.normcase(os.path.normpath(scripts_dir)) == os.path.normcase(os.path.normpath(p.strip()))
+            for p in path_env.split(os.pathsep)
+            if p.strip()
+        )
+    scripts_exist = os.path.isdir(scripts_dir) if scripts_dir else False
+
+    if scripts_exist and in_path:
+        print(f"[OK] Scripts Directory: {scripts_dir} (in PATH)")
+    elif scripts_exist and not in_path:
+        print(f"[WARN] Scripts Directory: {scripts_dir} (NOT in PATH)")
+        print(f"       Tip: Add to PATH to run 'mws' directly, or run: python -m mcp_win_stdio <command>")
+    else:
+        print(f"[INFO] Scripts Directory: Not created yet ({scripts_dir})")
+        print(f"       Tip: You can always run: python -m mcp_win_stdio <command>")
+
     # 2. Python Dependencies
     deps = [
         ("mcp", "MCP Protocol Framework (Core)"),

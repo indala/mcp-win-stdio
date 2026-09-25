@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-db"
-version = "0.1.0"
+version = "0.2.1"
 description = "Unified Database Model Context Protocol (MCP) server for PostgreSQL & MySQL: 20 tools for multi-server querying, DBA operations (create, drop, clone, dump, terminate), and cross-schema auto-resolution."
 readme = "README.md"
 requires-python = ">=3.10"
