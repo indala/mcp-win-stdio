@@ -13,66 +13,91 @@ from mcp_win_stdio.core.config import PLUGINS_DIR, ensure_workspace_dirs
 BUILTIN_SERVERS = {
     "excel": {
         "name": "excel",
+        "package": "mcp-win-stdio-excel",
         "title": "Excel MCP (Windows Native + Pandas)",
         "module": "mcp_win_stdio.excel.server",
         "description": "20 tools: Pandas queries, RapidFuzz reconciliation, OpenPyXL editing, and native Excel COM automation (PDF exports, recalc, pivots, macros).",
         "tools_count": 20,
         "is_builtin": True,
-        "required_pip": ["pandas>=2.0.0", "openpyxl>=3.1.0", "rapidfuzz>=3.0.0", "pywin32>=306"],
+        "required_pip": ["mcp-win-stdio-excel"],
         "dependencies": ["pandas", "openpyxl", "rapidfuzz"],
         "optional_dependencies": ["win32com"],
     },
     "word": {
         "name": "word",
+        "package": "mcp-win-stdio-word",
         "title": "Word MCP (Advanced Layout & Typography)",
         "module": "mcp_win_stdio.word.server",
         "description": "10 tools: multi-unit margins (in, cm, mm, pt), multi-column layout, paragraph spacing/indentation, typography (fonts, sizes, colors), images, tables.",
         "tools_count": 10,
         "is_builtin": True,
-        "required_pip": ["python-docx>=1.1.0", "pywin32>=306"],
+        "required_pip": ["mcp-win-stdio-word"],
         "dependencies": ["docx"],
         "optional_dependencies": ["win32com"],
     },
     "explorer": {
         "name": "explorer",
+        "package": "mcp-win-stdio-explorer",
         "title": "Workspace Explorer MCP (Smart Tree & Grep)",
         "module": "mcp_win_stdio.explorer.server",
         "description": "11 tools: token-safe collapsible directory trees, .gitignore resolution, in-file grep, RapidFuzz fuzzy search, and Python/TS AST outline.",
         "tools_count": 11,
         "is_builtin": True,
-        "required_pip": ["pathspec>=0.12.0", "rapidfuzz>=3.0.0"],
+        "required_pip": ["mcp-win-stdio-explorer"],
         "dependencies": ["pathspec", "rapidfuzz"],
         "optional_dependencies": [],
     },
     "tsc": {
         "name": "tsc",
+        "package": "mcp-win-stdio-tsc",
         "title": "TypeScript Watcher MCP (0ms Diagnostic Cache)",
         "module": "mcp_win_stdio.tsc.server",
         "description": "6 tools: background tsc compiler watchers, in-memory diagnostic cache, 0ms error checks, and dynamic project switching.",
         "tools_count": 6,
         "is_builtin": True,
-        "required_pip": ["mcp>=1.2.0"],
+        "required_pip": ["mcp-win-stdio-tsc"],
         "dependencies": ["mcp"],
         "optional_dependencies": [],
     },
     "db": {
         "name": "db",
+        "package": "mcp-win-stdio-db",
         "title": "Unified Database MCP (PostgreSQL & MySQL)",
         "module": "mcp_win_stdio.db.server",
         "description": "20 tools: polyglot multi-server pooling, cross-schema resolution, DBA management (create, drop, clone, dump), and 0ms connection caching.",
         "tools_count": 20,
         "is_builtin": True,
-        "required_pip": ["psycopg2-binary>=2.9.0", "pymysql>=1.1.0"],
+        "required_pip": ["mcp-win-stdio-db"],
         "dependencies": ["psycopg2", "pymysql"],
+        "optional_dependencies": [],
+    },
+    "git": {
+        "name": "git",
+        "package": "mcp-win-stdio-git",
+        "title": "Unified Git & GitHub MCP (Local Git + gh CLI)",
+        "module": "mcp_win_stdio.git.server",
+        "description": "26 tools: Local Git branching, commits, diffs, conflicts, and remote GitHub PRs, issues, Actions, with hybrid synergy workflows.",
+        "tools_count": 26,
+        "is_builtin": True,
+        "required_pip": ["mcp-win-stdio-git"],
+        "dependencies": ["mcp"],
         "optional_dependencies": [],
     },
 }
 
 
 def check_server_installed(server_info: Dict[str, Any]) -> bool:
-    """Check if all mandatory dependencies for a server are importable."""
+    """Check if the standalone server package and its dependencies are installed and importable."""
     if not server_info.get("is_builtin"):
         return Path(server_info.get("path", "")).exists()
+
+    mod = server_info.get("module")
+    if mod:
+        try:
+            if not importlib.util.find_spec(mod):
+                return False
+        except Exception:
+            return False
 
     for dep in server_info.get("dependencies", []):
         try:

@@ -39,6 +39,7 @@ from mcp_win_stdio.guides.explorer_guide import print_explorer_guide
 from mcp_win_stdio.guides.tsc_guide import print_tsc_guide
 from mcp_win_stdio.guides.word_guide import print_word_guide
 from mcp_win_stdio.guides.db_guide import print_db_guide
+from mcp_win_stdio.guides.git_guide import print_git_guide
 
 
 
@@ -71,11 +72,12 @@ def print_dashboard() -> None:
 
     print("-" * 76)
     print(" 💡 Quick Commands:")
-    print("   mws setup <server>    -> Install dependencies & show Claude config")
-    print("   mws guide <server>    -> View complete tool reference & Claude prompts")
-    print("   mws doctor            -> Run health checks (Office COM, Python, Node)")
-    print("   mws run <server>      -> Launch MCP server over stdio")
-    print("   mws list              -> List all servers and custom plugins")
+    print("   mws install <server|all> -> Install server packages from PyPI")
+    print("   mws setup <server>       -> Configure Claude Desktop & Claude Code CLI")
+    print("   mws guide <server>       -> View complete tool reference & Claude prompts")
+    print("   mws doctor               -> Run health checks (COM, Python, DB, Git)")
+    print("   mws run <server>         -> Launch MCP server over stdio")
+    print("   mws list                 -> List all servers and custom plugins")
     print("=" * 76 + "\n")
 
 
@@ -98,9 +100,83 @@ def cmd_guide(args: argparse.Namespace) -> None:
         print_tsc_guide()
     if target in ("db", "database", "all"):
         print_db_guide()
+    if target in ("git", "github", "all"):
+        print_git_guide()
 
-    if target not in ("excel", "word", "explorer", "workspace-explorer", "tsc", "db", "database", "all"):
-        print(f"No built-in guide for '{target}'. Built-in guides: 'excel', 'word', 'explorer', 'tsc', 'db'.")
+    if target not in ("excel", "word", "explorer", "workspace-explorer", "tsc", "db", "database", "git", "github", "all"):
+        print(f"No built-in guide for '{target}'. Built-in guides: 'excel', 'word', 'explorer', 'tsc', 'db', 'git'.")
+
+
+def cmd_install(args: argparse.Namespace) -> None:
+    """Install standalone server package(s) and dependencies from PyPI."""
+    target = (args.server or "").lower()
+
+    if not target:
+        if sys.stdin.isatty():
+            print("\n=== 📦 mcp-win-stdio Package Installer ===")
+            print("Select an MCP server package to install from PyPI:")
+            print("  [1] excel     -> pip install mcp-win-stdio-excel (Pandas, OpenPyXL, RapidFuzz, Office COM)")
+            print("  [2] word      -> pip install mcp-win-stdio-word (python-docx, Typography, Office COM)")
+            print("  [3] explorer  -> pip install mcp-win-stdio-explorer (PathSpec, RapidFuzz, AST outlines)")
+            print("  [4] tsc       -> pip install mcp-win-stdio-tsc (TypeScript diagnostic watcher)")
+            print("  [5] db        -> pip install mcp-win-stdio-db (PostgreSQL & MySQL DBA manager)")
+            print("  [6] git       -> pip install mcp-win-stdio-git (Local Git + GitHub CLI)")
+            print("  [7] all       -> pip install \"mcp-win-stdio[all]\" (All 6 servers)")
+            print("  [8] Exit")
+            choice = input("\nEnter choice (1-8) [default: 7]: ").strip() or "7"
+            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "git", "7": "all"}
+            if choice not in mapping:
+                print("Installation cancelled.")
+                return
+            target = mapping[choice]
+        else:
+            target = "all"
+
+    selected_servers = ["excel", "word", "explorer", "tsc", "db", "git"] if target == "all" else [target]
+
+    if target == "all":
+        print("\n==> 🚀 Installing full suite via 'pip install \"mcp-win-stdio[all]\"'...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "mcp-win-stdio[all]"])
+    else:
+        for srv_name in selected_servers:
+            srv = get_server_info(srv_name)
+            if not srv:
+                print(f"[ERROR] Unknown server: '{srv_name}'. Run 'mws list' to see available servers.")
+                continue
+            pkg = srv.get("package", f"mcp-win-stdio-{srv_name}")
+            print(f"\n==> 📦 Installing '{srv['title']}' via 'pip install {pkg}'...")
+            subprocess.run([sys.executable, "-m", "pip", "install", pkg])
+
+    # Special check for git / gh system tools
+    if "git" in selected_servers:
+        if not shutil.which("git"):
+            print("\n[MISSING] Git CLI not found on PATH.")
+            print("👉 Install Git: winget install --id Git.Git -e")
+            if sys.stdin.isatty():
+                do_git = input("Would you like to install Git now via winget? [Y/n]: ").strip().lower()
+                if do_git not in ("n", "no"):
+                    subprocess.run(["winget", "install", "--id", "Git.Git", "-e"])
+
+        name_check = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True).stdout.strip()
+        email_check = subprocess.run(["git", "config", "user.email"], capture_output=True, text=True).stdout.strip()
+        if not name_check or not email_check:
+            print("\n[WARN] Git author identity is not configured.")
+            if sys.stdin.isatty():
+                u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (name_check or "Developer")
+                u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (email_check or "developer@example.com")
+                subprocess.run(["git", "config", "--global", "user.name", u_name])
+                subprocess.run(["git", "config", "--global", "user.email", u_email])
+                print(f"[OK] Configured Git author: {u_name} <{u_email}>")
+
+        if not shutil.which("gh"):
+            print("\n[INFO] GitHub CLI ('gh') is not installed (optional: unlocks PR, Issue, and Actions tools).")
+            print("👉 Install GitHub CLI: winget install --id GitHub.cli -e")
+            if sys.stdin.isatty():
+                do_gh = input("Would you like to install GitHub CLI now via winget? [y/N]: ").strip().lower()
+                if do_gh in ("y", "yes"):
+                    subprocess.run(["winget", "install", "--id", "GitHub.cli", "-e"])
+
+    print("\n✅ Installation complete! Run 'mws list' to verify status or 'mws setup <server>' to configure Claude.\n")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -120,10 +196,11 @@ def cmd_setup(args: argparse.Namespace) -> None:
             print("  [3] explorer  (11 tools: Token-safe tree, .gitignore, regex grep, AST outline)")
             print("  [4] tsc       (6 tools: TypeScript diagnostic watcher, 0ms cache)")
             print("  [5] db        (20 tools: Polyglot PostgreSQL & MySQL DBA manager)")
-            print("  [6] all       (Configure all servers)")
-            print("  [7] Exit")
-            choice = input("\nEnter choice (1-7) [default: 1]: ").strip() or "1"
-            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "all"}
+            print("  [6] git       (26 tools: Local Git branching, commits, diffs, conflicts, & GitHub PRs)")
+            print("  [7] all       (Configure all servers)")
+            print("  [8] Exit")
+            choice = input("\nEnter choice (1-8) [default: 1]: ").strip() or "1"
+            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "git", "7": "all"}
             if choice not in mapping:
                 print("Setup cancelled.")
                 return
@@ -131,7 +208,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    selected_servers = ["excel", "word", "explorer", "tsc", "db"] if target.lower() == "all" else [target.lower()]
+    selected_servers = ["excel", "word", "explorer", "tsc", "db", "git"] if target.lower() == "all" else [target.lower()]
 
     for srv_name in selected_servers:
         srv = get_server_info(srv_name)
@@ -179,6 +256,41 @@ def cmd_setup(args: argparse.Namespace) -> None:
                 if chosen_servers:
                     env_vars["SERVERS"] = chosen_servers
 
+        # Special guidance for Git & GitHub CLI
+        if srv_name == "git":
+            if not shutil.which("git"):
+                print("\n[MISSING] Git CLI not found on PATH.")
+                print("👉 Install Git: winget install --id Git.Git -e")
+                if sys.stdin.isatty():
+                    do_git = input("Would you like to install Git now via winget? [Y/n]: ").strip().lower()
+                    if do_git not in ("n", "no"):
+                        subprocess.run(["winget", "install", "--id", "Git.Git", "-e"])
+
+            # Check git identity
+            name_check = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True).stdout.strip()
+            email_check = subprocess.run(["git", "config", "user.email"], capture_output=True, text=True).stdout.strip()
+            if not name_check or not email_check:
+                print("\n[WARN] Git author identity is not configured.")
+                if sys.stdin.isatty():
+                    u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (name_check or "Developer")
+                    u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (email_check or "developer@example.com")
+                    subprocess.run(["git", "config", "--global", "user.name", u_name])
+                    subprocess.run(["git", "config", "--global", "user.email", u_email])
+                    print(f"[OK] Configured Git author: {u_name} <{u_email}>")
+
+            if not shutil.which("gh"):
+                print("\n[INFO] GitHub CLI ('gh') is not installed (optional: unlocks PR, Issue, and Actions tools).")
+                print("👉 Install GitHub CLI: winget install --id GitHub.cli -e")
+                if sys.stdin.isatty():
+                    do_gh = input("Would you like to install GitHub CLI now via winget? [y/N]: ").strip().lower()
+                    if do_gh in ("y", "yes"):
+                        subprocess.run(["winget", "install", "--id", "GitHub.cli", "-e"])
+            else:
+                auth_res = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
+                if "Logged in to" not in (auth_res.stderr or auth_res.stdout):
+                    print("\n[INFO] GitHub CLI is installed but not authenticated.")
+                    print("👉 Run 'gh auth login' in your terminal to connect your GitHub account.")
+
         # 2. Transparent Configuration Guidance
         snippet_dict = generate_claude_desktop_snippet(srv_name, env_vars if env_vars else None)
         snippet_json = json.dumps({srv_name: snippet_dict}, indent=2)
@@ -222,7 +334,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     target = args.server.lower()
     client = args.client.lower()
 
-    servers_to_remove = ["excel", "word", "explorer", "tsc", "db"] if target == "all" else [target]
+    servers_to_remove = ["excel", "word", "explorer", "tsc", "db", "git"] if target == "all" else [target]
 
     for srv_name in servers_to_remove:
         print(f"\nRemoving '{srv_name}'...")
@@ -354,7 +466,49 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     tsc_bin = shutil.which("tsc")
     print(f"[{'OK' if tsc_bin else 'INFO'}] Global tsc: {tsc_bin or 'Not found on PATH (will check local projects)'}")
 
-    # 6. Claude Config Files
+    # 6. Version Control & GitHub CLI
+    print("\n--- Version Control & GitHub CLI ---")
+    git_bin = shutil.which("git")
+    if git_bin:
+        try:
+            ver = subprocess.run(["git", "--version"], capture_output=True, text=True, check=True).stdout.strip()
+            print(f"[OK] Git CLI: {ver} ({git_bin})")
+        except Exception:
+            print(f"[OK] Git CLI: Found at {git_bin}")
+
+        name = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True).stdout.strip()
+        email = subprocess.run(["git", "config", "user.email"], capture_output=True, text=True).stdout.strip()
+        if name and email:
+            print(f"[OK] Git Identity: {name} <{email}>")
+        else:
+            print(f"[WARN] Git Identity: Not configured (missing user.name or user.email)")
+            print(f"       👉 Run: git config --global user.name \"Your Name\"")
+            print(f"       👉 Run: git config --global user.email \"you@example.com\"")
+    else:
+        print(f"[FAIL] Git CLI: Not found on PATH")
+        print(f"       👉 Install Git: winget install --id Git.Git -e")
+
+    gh_bin = shutil.which("gh")
+    if gh_bin:
+        try:
+            ver_line = subprocess.run(["gh", "--version"], capture_output=True, text=True, check=True).stdout.splitlines()[0]
+            print(f"[OK] GitHub CLI: {ver_line} ({gh_bin})")
+        except Exception:
+            print(f"[OK] GitHub CLI: Found at {gh_bin}")
+
+        auth_res = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        auth_out = auth_res.stderr or auth_res.stdout
+        if "Logged in to" in auth_out:
+            first_account = [ln.strip() for ln in auth_out.splitlines() if "Logged in to" in ln]
+            account_str = first_account[0] if first_account else "Active"
+            account_str = account_str.replace("✓", "").replace("âœ“", "").strip()
+            print(f"[OK] GitHub Auth: Logged in ({account_str})")
+        else:
+            print(f"[INFO] GitHub Auth: Not logged in (Run 'gh auth login' to connect)")
+    else:
+        print(f"[INFO] GitHub CLI: Not installed (optional: winget install --id GitHub.cli -e)")
+
+    # 7. Claude Config Files
 
     print("\n--- Claude Configuration Targets ---")
     desktop_cfg = get_claude_desktop_config_path()
@@ -388,12 +542,17 @@ def main() -> None:
 
     # guide
     sub_guide = subparsers.add_parser("guide", help="View usage guide, tool specs, and LLM prompts")
-    sub_guide.add_argument("server", nargs="?", default="all", help="Server name ('excel', 'word', 'explorer', 'tsc', 'all')")
+    sub_guide.add_argument("server", nargs="?", default="all", help="Server name ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
     sub_guide.set_defaults(func=cmd_guide)
+
+    # install
+    sub_install = subparsers.add_parser("install", help="Install standalone MCP server package(s) from PyPI")
+    sub_install.add_argument("server", nargs="?", default=None, help="Server package to install ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_install.set_defaults(func=cmd_install)
 
     # setup
     sub_setup = subparsers.add_parser("setup", help="Configure server(s) into Claude Desktop and CLI")
-    sub_setup.add_argument("server", nargs="?", default=None, help="Server to install ('excel', 'word', 'explorer', 'tsc', 'all')")
+    sub_setup.add_argument("server", nargs="?", default=None, help="Server to configure ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
     sub_setup.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_setup.set_defaults(func=cmd_setup)
 

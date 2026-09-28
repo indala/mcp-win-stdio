@@ -878,12 +878,19 @@ def grep_search(
                     ctx_snippet = []
                     for c_idx in range(start_ctx, end_ctx):
                         prefix = " > " if c_idx == idx else "   "
-                        ctx_snippet.append(f"{c_idx + 1:4d}{prefix}{lines[c_idx]}")
+                        raw_c = lines[c_idx]
+                        if len(raw_c) > 200:
+                            raw_c = raw_c[:200] + "... [line truncated]"
+                        ctx_snippet.append(f"{c_idx + 1:4d}{prefix}{raw_c}")
+
+                    line_c = line.strip()
+                    if len(line_c) > 200:
+                        line_c = line_c[:200] + "... [line truncated]"
 
                     matches.append({
                         "file": str(f_path),
                         "line_number": line_no,
-                        "line_content": line.strip(),
+                        "line_content": line_c,
                         "context": "\n".join(ctx_snippet),
                     })
 
@@ -894,7 +901,7 @@ def grep_search(
         except Exception:
             continue
 
-    return {
+    res_grep: Dict[str, Any] = {
         "query": query,
         "is_regex": is_regex,
         "total_files_scanned": total_scanned_files,
@@ -903,6 +910,9 @@ def grep_search(
         "limit_reached": len(matches) >= max_matches,
         "matches": matches,
     }
+    if len(matches) >= max_matches:
+        res_grep["notice"] = f"... [TRUNCATED: Reached limit of {max_matches} matches. Narrow your query or file_patterns to see more] ..."
+    return res_grep
 
 
 # ==========================================
@@ -1000,7 +1010,7 @@ def get_code_outline(
                 if isinstance(data, dict):
                     symbols = [
                         {"key": k, "type": type(v).__name__, "length": len(v) if isinstance(v, (list, dict)) else None}
-                        for k in data.keys()
+                        for k, v in data.items()
                     ]
                 elif isinstance(data, list):
                     symbols = [{"total_array_items": len(data), "sample_element_type": type(data[0]).__name__ if data else None}]
@@ -1028,7 +1038,7 @@ def read_file(
     start_line: Optional[int] = None,
     end_line: Optional[int] = None,
     line_numbers: bool = True,
-    max_lines: int = 500,
+    max_lines: int = 250,
     encoding: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -1040,7 +1050,7 @@ def read_file(
         start_line: First line to read (1-indexed, inclusive). Default is 1.
         end_line: Last line to read (1-indexed, inclusive). Default is min(start + max_lines, total).
         line_numbers: Prepend line numbers to the output lines (default True).
-        max_lines: Safety cap on number of lines returned (default 500, max 2000).
+        max_lines: Safety cap on number of lines returned (default 250, max 500).
         encoding: Optional explicit character encoding. Auto-detects if None.
     """
     p = Path(file_path).resolve()
@@ -1061,7 +1071,7 @@ def read_file(
             "message": "File appears to be binary. Content reading was skipped to protect context window.",
         }
 
-    max_lines = min(max(1, max_lines), 2000)
+    max_lines = min(max(1, max_lines), 500)
 
     try:
         if encoding:
@@ -1088,7 +1098,7 @@ def read_file(
         else:
             output_lines = selected
 
-        return {
+        res: Dict[str, Any] = {
             "path": str(p),
             "total_lines": total_lines,
             "start_line": s_line,
@@ -1098,6 +1108,9 @@ def read_file(
             "encoding": detected_enc,
             "content": "\n".join(output_lines),
         }
+        if e_line < total_lines:
+            res["notice"] = f"... [TRUNCATED: Showing lines {s_line}-{e_line} of {total_lines}. Use start_line={e_line+1} to view next window] ..."
+        return res
     except Exception as e:
         return {"error": f"Failed to read file: {str(e)}"}
 
@@ -1414,6 +1427,372 @@ def export_tree_to_file(
         }
     except Exception as e:
         return {"error": f"Failed to export tree to file: {str(e)}"}
+
+
+# ==========================================
+# 12. ADVANCED EXPLORER TOOLS
+# ==========================================
+
+@mcp.tool()
+def find_symbol(
+    path: str,
+    symbol_name: str,
+    exact_match: bool = False,
+    language: Optional[str] = None,
+    max_results: int = 50,
+) -> Dict[str, Any]:
+    """
+    Search for symbol definitions (functions, classes, methods, interfaces, types) across codebase files.
+    Honors .gitignore and smart ignore rules.
+    
+    Args:
+        path: Workspace or directory root to search.
+        symbol_name: Name of symbol (e.g. 'UserService', 'calculate_tax', 'handle_request').
+        exact_match: If True, requires exact case-sensitive match; if False, case-insensitive substring match.
+        language: Optional language filter ('python', 'typescript', 'javascript', 'go', 'rust').
+        max_results: Max results to return (default 50, max 150).
+    """
+    root = Path(path).resolve()
+    if not root.exists():
+        return {"error": f"Path not found: {root}"}
+
+    safe_max = min(max(1, max_results), 150)
+    gi_spec = _load_gitignore_spec(root) if root.is_dir() else None
+
+    # Extension mapping
+    lang_exts = {
+        "python": {".py"},
+        "typescript": {".ts", ".tsx"},
+        "javascript": {".js", ".jsx", ".mjs"},
+        "go": {".go"},
+        "rust": {".rs"},
+    }
+    allowed_exts: Optional[Set[str]] = None
+    if language:
+        allowed_exts = lang_exts.get(language.lower(), {f".{language.lower().lstrip('.')}"})
+
+    files_to_scan = []
+    if root.is_file():
+        files_to_scan.append(root)
+    else:
+        for dirpath, dirnames, filenames in os.walk(root):
+            curr = Path(dirpath)
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in HEAVY_BUILD_DIRS
+                and d not in GIT_DIRS
+                and not _is_hidden(curr / d)
+                and not _matches_gitignore(gi_spec, str((curr / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+            ]
+            for f in filenames:
+                fp = curr / f
+                if _is_hidden(fp) or _is_binary_file(fp):
+                    continue
+                rel_posix = str(fp.relative_to(root)).replace("\\", "/")
+                if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
+                    continue
+                ext = fp.suffix.lower()
+                if allowed_exts and ext not in allowed_exts:
+                    continue
+                if ext in {".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".go", ".rs", ".c", ".cpp", ".h"}:
+                    try:
+                        if fp.stat().st_size <= 2 * 1024 * 1024:
+                            files_to_scan.append(fp)
+                    except Exception:
+                        pass
+
+    symbols_found = []
+    sym_query = symbol_name if exact_match else symbol_name.lower()
+
+    for fp in files_to_scan:
+        ext = fp.suffix.lower()
+        try:
+            content, _ = _read_file_text_with_fallback(fp)
+            lines = content.splitlines()
+
+            # Python AST parsing
+            if ext == ".py":
+                try:
+                    tree = ast.parse(content, filename=str(fp))
+                    for node in ast.walk(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            n_name = node.name
+                            matches = (n_name == sym_query) if exact_match else (sym_query in n_name.lower())
+                            if matches:
+                                kind = "class" if isinstance(node, ast.ClassDef) else ("async_function" if isinstance(node, ast.AsyncFunctionDef) else "function")
+                                symbols_found.append({
+                                    "file": str(fp),
+                                    "name": n_name,
+                                    "kind": kind,
+                                    "line": node.lineno,
+                                    "language": "python"
+                                })
+                                if len(symbols_found) >= safe_max:
+                                    break
+                except Exception:
+                    pass
+
+            # JS/TS regex parsing
+            elif ext in {".ts", ".tsx", ".js", ".jsx", ".mjs"}:
+                pat = re.compile(r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(class|function|interface|type|enum|const)\s+([A-Za-z0-9_$]+)", re.MULTILINE)
+                for idx, line in enumerate(lines):
+                    m = pat.match(line)
+                    if m:
+                        kind, n_name = m.group(1), m.group(2)
+                        matches = (n_name == sym_query) if exact_match else (sym_query in n_name.lower())
+                        if matches:
+                            symbols_found.append({
+                                "file": str(fp),
+                                "name": n_name,
+                                "kind": kind,
+                                "line": idx + 1,
+                                "signature": line.strip()[:120],
+                                "language": "typescript" if "ts" in ext else "javascript"
+                            })
+                            if len(symbols_found) >= safe_max:
+                                break
+
+            # Go / Rust / C regex
+            elif ext in {".go", ".rs", ".c", ".cpp", ".h"}:
+                pat = re.compile(r"^\s*(?:pub\s+)?(?:fn|func|struct|enum|trait|type|class)\s+([A-Za-z0-9_]+)", re.MULTILINE)
+                for idx, line in enumerate(lines):
+                    m = pat.match(line)
+                    if m:
+                        n_name = m.group(1)
+                        matches = (n_name == sym_query) if exact_match else (sym_query in n_name.lower())
+                        if matches:
+                            symbols_found.append({
+                                "file": str(fp),
+                                "name": n_name,
+                                "kind": "declaration",
+                                "line": idx + 1,
+                                "signature": line.strip()[:120],
+                                "language": ext.lstrip(".")
+                            })
+                            if len(symbols_found) >= safe_max:
+                                break
+
+            if len(symbols_found) >= safe_max:
+                break
+        except Exception:
+            continue
+
+    has_more = len(symbols_found) >= safe_max
+    res: Dict[str, Any] = {
+        "query": symbol_name,
+        "exact_match": exact_match,
+        "total_matches": len(symbols_found),
+        "limit_reached": has_more,
+        "symbols": symbols_found,
+    }
+    if has_more:
+        res["notice"] = f"... [TRUNCATED: Showing first {safe_max} symbol matches. Specify language or exact_match to narrow results] ..."
+    return res
+
+
+@mcp.tool()
+def get_code_stats(
+    path: str,
+    respect_gitignore: bool = True,
+    max_file_size_mb: float = 2.0,
+) -> Dict[str, Any]:
+    """
+    Compute lines of code (LOC), comments, blank lines, and file counts aggregated by programming language.
+    Honors .gitignore and smart ignore rules.
+    
+    Args:
+        path: Workspace or directory root to analyze.
+        respect_gitignore: Whether to ignore files in .gitignore (default True).
+        max_file_size_mb: Skip files larger than this threshold (default 2MB).
+    """
+    root = Path(path).resolve()
+    if not root.exists() or not root.is_dir():
+        return {"error": f"Invalid directory: {root}"}
+
+    gi_spec = _load_gitignore_spec(root) if respect_gitignore else None
+    max_bytes = int(max_file_size_mb * 1024 * 1024)
+
+    ext_to_lang = {
+        ".py": "Python",
+        ".ts": "TypeScript",
+        ".tsx": "TypeScript (React)",
+        ".js": "JavaScript",
+        ".jsx": "JavaScript (React)",
+        ".mjs": "JavaScript",
+        ".json": "JSON",
+        ".html": "HTML",
+        ".css": "CSS",
+        ".scss": "SCSS",
+        ".md": "Markdown",
+        ".yaml": "YAML",
+        ".yml": "YAML",
+        ".sql": "SQL",
+        ".sh": "Shell",
+        ".bash": "Shell",
+        ".ps1": "PowerShell",
+        ".go": "Go",
+        ".rs": "Rust",
+        ".c": "C",
+        ".cpp": "C++",
+        ".h": "C/C++ Header",
+        ".toml": "TOML",
+    }
+
+    stats: Dict[str, Dict[str, int]] = {}
+    total_files = 0
+    total_lines = 0
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        curr = Path(dirpath)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in HEAVY_BUILD_DIRS
+            and d not in GIT_DIRS
+            and not _is_hidden(curr / d)
+            and not _matches_gitignore(gi_spec, str((curr / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+        ]
+        for f in filenames:
+            fp = curr / f
+            if _is_hidden(fp) or _is_binary_file(fp):
+                continue
+            rel_posix = str(fp.relative_to(root)).replace("\\", "/")
+            if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
+                continue
+
+            ext = fp.suffix.lower()
+            lang = ext_to_lang.get(ext)
+            if not lang:
+                continue
+
+            try:
+                if fp.stat().st_size > max_bytes:
+                    continue
+                content, _ = _read_file_text_with_fallback(fp)
+                lines = content.splitlines()
+            except Exception:
+                continue
+
+            if lang not in stats:
+                stats[lang] = {"files": 0, "total_lines": 0, "code_lines": 0, "comment_lines": 0, "blank_lines": 0}
+
+            lang_stat = stats[lang]
+            lang_stat["files"] += 1
+            total_files += 1
+
+            for line in lines:
+                total_lines += 1
+                lang_stat["total_lines"] += 1
+                stripped = line.strip()
+                if not stripped:
+                    lang_stat["blank_lines"] += 1
+                elif stripped.startswith(("#", "//", "--", ";", "/*", "*")):
+                    lang_stat["comment_lines"] += 1
+                else:
+                    lang_stat["code_lines"] += 1
+
+    sorted_langs = sorted(stats.items(), key=lambda item: item[1]["total_lines"], reverse=True)
+
+    return {
+        "workspace": str(root),
+        "total_files_analyzed": total_files,
+        "total_lines_of_code": total_lines,
+        "languages": {k: v for k, v in sorted_langs},
+    }
+
+
+@mcp.tool()
+def find_duplicate_files(
+    path: str,
+    min_size_bytes: int = 512,
+    max_results: int = 30,
+) -> Dict[str, Any]:
+    """
+    Find duplicate files in a workspace by analyzing file sizes and SHA256 checksums.
+    Honors .gitignore and smart ignore rules.
+    
+    Args:
+        path: Workspace or directory root to search.
+        min_size_bytes: Minimum file size in bytes to consider (default 512).
+        max_results: Maximum duplicate groups to return (default 30).
+    """
+    root = Path(path).resolve()
+    if not root.exists() or not root.is_dir():
+        return {"error": f"Invalid directory: {root}"}
+
+    safe_max = min(max(1, max_results), 100)
+    gi_spec = _load_gitignore_spec(root)
+
+    # Step 1: Bucket by size
+    size_buckets: Dict[int, List[Path]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        curr = Path(dirpath)
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in HEAVY_BUILD_DIRS
+            and d not in GIT_DIRS
+            and not _is_hidden(curr / d)
+            and not _matches_gitignore(gi_spec, str((curr / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+        ]
+        for f in filenames:
+            fp = curr / f
+            if _is_hidden(fp):
+                continue
+            rel_posix = str(fp.relative_to(root)).replace("\\", "/")
+            if _matches_gitignore(gi_spec, rel_posix, is_dir=False):
+                continue
+            try:
+                sz = fp.stat().st_size
+                if sz >= min_size_bytes:
+                    size_buckets.setdefault(sz, []).append(fp)
+            except Exception:
+                continue
+
+    # Step 2: Hash only sizes with >= 2 files
+    duplicate_groups = []
+    total_wasted_bytes = 0
+
+    for sz, paths in size_buckets.items():
+        if len(paths) < 2:
+            continue
+
+        hash_buckets: Dict[str, List[str]] = {}
+        for p in paths:
+            try:
+                hasher = hashlib.sha256()
+                with open(p, "rb") as fh:
+                    while chunk := fh.read(65536):
+                        hasher.update(chunk)
+                h = hasher.hexdigest()
+                hash_buckets.setdefault(h, []).append(str(p))
+            except Exception:
+                continue
+
+        for h, dup_paths in hash_buckets.items():
+            if len(dup_paths) > 1:
+                wasted = sz * (len(dup_paths) - 1)
+                total_wasted_bytes += wasted
+                duplicate_groups.append({
+                    "sha256": h[:16] + "...",
+                    "file_size_bytes": sz,
+                    "file_size_formatted": _format_size(sz),
+                    "wasted_space_formatted": _format_size(wasted),
+                    "duplicate_count": len(dup_paths),
+                    "files": dup_paths,
+                })
+                if len(duplicate_groups) >= safe_max:
+                    break
+        if len(duplicate_groups) >= safe_max:
+            break
+
+    duplicate_groups.sort(key=lambda g: g["file_size_bytes"] * (g["duplicate_count"] - 1), reverse=True)
+
+    return {
+        "workspace": str(root),
+        "total_duplicate_groups": len(duplicate_groups),
+        "total_wasted_space_formatted": _format_size(total_wasted_bytes),
+        "limit_reached": len(duplicate_groups) >= safe_max,
+        "duplicates": duplicate_groups[:safe_max],
+    }
 
 
 if __name__ == "__main__":

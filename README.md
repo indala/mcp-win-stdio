@@ -13,6 +13,7 @@ Windows-optimized **Model Context Protocol (MCP)** suite and interactive CLI hub
 * **Workspace Explorer MCP (11 Tools)**: Token-safe directory exploration, collapsible heavy folders (`node_modules`, `.next`, `.git`), dynamic `.gitignore` parsing, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outline extraction.
 * **TypeScript Diagnostic Watcher MCP (6 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection across multi-tsconfig projects.
 * **Polyglot Database MCP (20 Tools)**: Unified PostgreSQL & MySQL database manager with cross-database switching, cross-schema auto-resolution, fast JSON queries, DBA administrative operations (safety-guarded DROP, CREATE, CLONE), active connection monitoring, and native dump/restore utilities.
+* **Git & GitHub MCP (26 Tools)**: Unified local Git repository management and remote GitHub CLI (`gh`) operations with hybrid synergy workflows (PR quickstart, issue branch start, 360° repo overview), token-safe diffs/logs, and Windows CRLF filtering.
 * **Extensible User Plugins**: Drop any standalone Python MCP script into `~/.mcp-win-stdio/plugins/` and it is immediately discovered, runnable, and configurable.
 
 ---
@@ -37,6 +38,9 @@ pip install "mcp-win-stdio[explorer]"
 
 # Database MCP (psycopg2-binary + pymysql)
 pip install "mcp-win-stdio[db]"
+
+# Git & GitHub MCP
+pip install "mcp-win-stdio[git]"
 
 # All modules & dependencies
 pip install "mcp-win-stdio[all]"
@@ -75,6 +79,7 @@ word         [Installed]      10       10 tools: multi-unit margins (in, cm...
 explorer     [Installed]      11       11 tools: token-safe collapsible tree...
 tsc          [Installed]      6        6 tools: background tsc compiler...
 db           [Installed]      20       20 tools: polyglot multi-server p...
+git          [Installed]      26       26 tools: Local Git branching, co...
 ----------------------------------------------------------------------------
  💡 Quick Commands:
    mws setup <server>    -> Install dependencies & show Claude config

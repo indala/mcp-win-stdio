@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-word"
-version = "0.2.1"
+version = "0.2.2"
 description = "Windows-optimized Model Context Protocol (MCP) server for Word documents: 10 tools for multi-unit margins, multi-column layout, paragraph spacing/indentation, typography, images, and tables."
 readme = "README.md"
 requires-python = ">=3.10"

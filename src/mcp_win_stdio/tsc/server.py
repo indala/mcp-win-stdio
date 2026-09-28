@@ -288,15 +288,26 @@ if os.path.isdir(_initial_root):
 # ==========================================
 
 @mcp.tool()
-def get_tsc_errors(project_path: Optional[str] = None, tsconfig_path: Optional[str] = None) -> Dict[str, Any]:
+def get_tsc_errors(
+    project_path: Optional[str] = None,
+    tsconfig_path: Optional[str] = None,
+    limit: int = 50
+) -> Dict[str, Any]:
     """
-    Get all active TypeScript compiler errors across watched projects (0ms latency from memory).
-    Can filter by specific project directory or tsconfig.json path.
+    Get active TypeScript compiler errors across watched projects (0ms latency from memory cache).
+    Features automatic context window protection with error code and file aggregation.
+    
+    Args:
+        project_path: Optional filter by project directory substring.
+        tsconfig_path: Optional filter by specific tsconfig.json file path.
+        limit: Maximum number of detailed error objects to return (default 50, max 100).
     """
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
             return {
+                "success": True,
                 "total_errors": 0,
+                "returned_errors": 0,
                 "projects": [],
                 "errors": [],
                 "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first, or configure TSC_WATCH_DIR.",
@@ -305,6 +316,7 @@ def get_tsc_errors(project_path: Optional[str] = None, tsconfig_path: Optional[s
         all_errors = []
         projects_summary = []
         initializing_count = 0
+        safe_limit = min(max(1, limit), 100)
 
         for cfg_path, data in WATCHED_PROJECTS.items():
             if tsconfig_path and normalize_path(tsconfig_path) != cfg_path:
@@ -326,15 +338,215 @@ def get_tsc_errors(project_path: Optional[str] = None, tsconfig_path: Optional[s
                 "last_updated": data["last_updated"],
             })
 
+        # Calculate high-level breakdown
+        code_counts: Dict[str, int] = {}
+        file_counts: Dict[str, int] = {}
+        for e in all_errors:
+            c = e.get("code", "UNKNOWN")
+            f = e.get("relative_path") or e.get("file", "UNKNOWN")
+            code_counts[c] = code_counts.get(c, 0) + 1
+            file_counts[f] = file_counts.get(f, 0) + 1
+
+        total_errs = len(all_errors)
+        display_errors = all_errors[:safe_limit]
+        has_more = total_errs > safe_limit
+
         result: Dict[str, Any] = {
-            "total_errors": len(all_errors),
+            "success": True,
+            "total_errors": total_errs,
+            "returned_errors": len(display_errors),
+            "truncated": has_more,
+            "error_codes_breakdown": dict(sorted(code_counts.items(), key=lambda x: x[1], reverse=True)[:10]),
+            "top_affected_files": dict(sorted(file_counts.items(), key=lambda x: x[1], reverse=True)[:8]),
             "projects": projects_summary,
-            "errors": all_errors,
+            "errors": display_errors,
         }
+
+        if has_more:
+            result["notice"] = (
+                f"... [CAPPED: Showing first {safe_limit} of {total_errs} errors to protect context window. "
+                f"Filter by file using 'get_file_errors' or use 'suggest_error_fixes' for resolution advice] ..."
+            )
+
         if initializing_count > 0:
-            result["notice"] = f"{initializing_count} project(s) still compiling initial pass. Errors may update in a few seconds."
+            result["status_notice"] = f"{initializing_count} project(s) still compiling initial pass. Errors will update in 1-2 seconds."
 
         return result
+
+
+@mcp.tool()
+def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[str, Any]:
+    """
+    [Advanced Tool] Instant actionable fix recommendations and code patterns for common TypeScript compiler errors.
+    
+    Args:
+        error_code: The TypeScript error code (e.g. 'TS2304', 'TS2322', 'TS2339', 'TS7016').
+        message: Optional compiler error message for deeper context analysis.
+    """
+    code = error_code.strip().upper()
+    if not code.startswith("TS"):
+        code = f"TS{code}"
+
+    knowledge_base = {
+        "TS2304": {
+            "title": "Cannot find name 'X'",
+            "category": "Missing Declaration / Global",
+            "common_causes": [
+                "Missing import statement for a module or type.",
+                "Using browser/node globals (e.g. 'process', 'window', 'document') without appropriate types installed (@types/node).",
+                "Typo in variable or class name."
+            ],
+            "resolutions": [
+                "Add import statement: import { X } from './module';",
+                "If using Node globals: run 'npm install --save-dev @types/node' and add 'node' to compilerOptions.types in tsconfig.json.",
+                "If ambient library global: declare global variable: declare const X: any;"
+            ]
+        },
+        "TS2322": {
+            "title": "Type 'A' is not assignable to type 'B'",
+            "category": "Type Mismatch",
+            "common_causes": [
+                "Passing a null or undefined value to a strictly typed property (strictNullChecks).",
+                "Object is missing required fields defined in an interface/type.",
+                "Incompatible primitive types (e.g. string passed where number is expected)."
+            ],
+            "resolutions": [
+                "Check for null/undefined: provide default fallback (val ?? defaultValue) or use optional type (B | null).",
+                "Ensure all mandatory fields of interface 'B' are populated.",
+                "Use explicit type narrowing (typeof, instanceof, in operator) before assignment."
+            ]
+        },
+        "TS2339": {
+            "title": "Property 'X' does not exist on type 'Y'",
+            "category": "Property Access Error",
+            "common_causes": [
+                "Accessing property on union type where not all union members have property 'X'.",
+                "Accessing property on 'unknown' or 'never' type.",
+                "Missing property definition on interface or class."
+            ],
+            "resolutions": [
+                "Use optional chaining: object?.X",
+                "Narrow union type using type guards: if ('X' in obj) { obj.X }",
+                "If 'unknown' type: cast or validate before access: (obj as Record<string, any>).X",
+                "Extend interface definition with optional or required field: X?: string;"
+            ]
+        },
+        "TS2554": {
+            "title": "Expected N arguments, but got M",
+            "category": "Function Signature Mismatch",
+            "common_causes": [
+                "Calling function with too few or too many arguments.",
+                "Function definition changed without updating callers."
+            ],
+            "resolutions": [
+                "Provide all mandatory arguments, or make unused arguments optional in function declaration: fn(a: string, b?: number).",
+                "Use object destructuring for parameter lists: fn({ a, b = defaultVal }: Options)."
+            ]
+        },
+        "TS7016": {
+            "title": "Could not find a declaration file for module 'X'",
+            "category": "Missing Type Definitions",
+            "common_causes": [
+                "Third-party npm package lacks bundled TypeScript declaration (.d.ts) files."
+            ],
+            "resolutions": [
+                "Install DefinitelyTyped types: npm install --save-dev @types/X",
+                "If no @types exists: create a ambient declaration file (e.g. 'src/declarations.d.ts') with: declare module 'X';"
+            ]
+        },
+        "TS18048": {
+            "title": "'X' is possibly 'undefined'",
+            "category": "Strict Null Checks",
+            "common_causes": [
+                "Accessing a property on an object that could be undefined (e.g. find() result, dictionary lookup)."
+            ],
+            "resolutions": [
+                "Use optional chaining: obj?.prop",
+                "Use nullish coalescing default: const val = obj?.prop ?? fallback;",
+                "Use early guard return: if (!obj) return;"
+            ]
+        }
+    }
+
+    advice = knowledge_base.get(code)
+    if advice:
+        return {
+            "success": True,
+            "error_code": code,
+            "matched_error": advice["title"],
+            "category": advice["category"],
+            "common_causes": advice["common_causes"],
+            "recommended_resolutions": advice["resolutions"],
+            "provided_message": message
+        }
+
+    return {
+        "success": True,
+        "error_code": code,
+        "category": "General TypeScript Error",
+        "guidance": "Check TypeScript documentation for error code " + code + ". Ensure types match interface declarations and strict null checks are satisfied.",
+        "provided_message": message
+    }
+
+
+@mcp.tool()
+def get_error_category_breakdown() -> Dict[str, Any]:
+    """
+    [Advanced Tool] Get an architectural aggregate breakdown of active errors grouped by semantic category
+    (Missing Imports, Type Mismatches, Property Errors, Nullability, Syntax) to plan refactors.
+    """
+    with CACHE_LOCK:
+        if not WATCHED_PROJECTS:
+            return {"success": True, "total_errors": 0, "categories": {}, "message": "No active projects watched."}
+
+        categories: Dict[str, List[Dict[str, Any]]] = {
+            "missing_imports_or_types": [],
+            "type_mismatches": [],
+            "property_access_errors": [],
+            "nullability_and_undefined": [],
+            "function_signature_mismatches": [],
+            "other": []
+        }
+
+        total = 0
+        for data in WATCHED_PROJECTS.values():
+            for e in data.get("errors", []):
+                total += 1
+                c = e.get("code", "")
+                item = {
+                    "code": c,
+                    "file": e.get("relative_path") or e.get("file"),
+                    "line": e.get("line"),
+                    "message": e.get("message")
+                }
+
+                if c in ("TS2304", "TS7016", "TS2307", "TS2686"):
+                    categories["missing_imports_or_types"].append(item)
+                elif c in ("TS2322", "TS2345", "TS2769"):
+                    categories["type_mismatches"].append(item)
+                elif c in ("TS2339", "TS2551"):
+                    categories["property_access_errors"].append(item)
+                elif c in ("TS2531", "TS2532", "TS18048"):
+                    categories["nullability_and_undefined"].append(item)
+                elif c in ("TS2554", "TS2555"):
+                    categories["function_signature_mismatches"].append(item)
+                else:
+                    categories["other"].append(item)
+
+        # Cap lists in categories to 10 each to avoid bloating context
+        capped_cats = {}
+        for cat_name, items in categories.items():
+            capped_cats[cat_name] = {
+                "count": len(items),
+                "sample_errors": items[:8]
+            }
+
+        return {
+            "success": True,
+            "total_errors": total,
+            "category_summary": {k: v["count"] for k, v in capped_cats.items()},
+            "details": capped_cats
+        }
 
 
 @mcp.tool()

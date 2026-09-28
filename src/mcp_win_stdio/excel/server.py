@@ -6,7 +6,10 @@ and Native Windows Microsoft Excel (COM Automation via PyWin32).
 
 import os
 import math
-from typing import Any, Optional, List, Dict, Union
+import json
+import re
+import sqlite3
+from typing import Any, Optional, List, Dict, Union, Literal
 import pandas as pd
 import openpyxl
 try:
@@ -34,19 +37,37 @@ except ImportError:
 mcp = FastMCP("excel-tools")
 
 
+def _clean_val(v: Any) -> Any:
+    """Helper to convert individual cell values to JSON-safe primitives."""
+    if pd.isna(v):
+        return None
+    elif hasattr(v, "isoformat"):
+        return v.isoformat()
+    elif isinstance(v, (float, int)) and (math.isnan(v) or math.isinf(v)):
+        return None
+    return v
+
+
 def _df_to_clean_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """Convert DataFrame to JSON-safe records, cleanly handling NaT, NaN, Timestamps, and dates."""
     clean = df.astype(object).where(pd.notnull(df), None)
     records = clean.to_dict(orient="records")
     for row in records:
         for k, v in row.items():
-            if pd.isna(v):
-                row[k] = None
-            elif hasattr(v, "isoformat"):
-                row[k] = v.isoformat()
-            elif isinstance(v, (float, int)) and (math.isnan(v) or math.isinf(v)):
-                row[k] = None
+            row[k] = _clean_val(v)
     return records
+
+
+def _format_dataframe_output(df: pd.DataFrame, format_type: str = "records") -> Any:
+    """Format DataFrame into token-safe output (records, compact list of lists, or tsv)."""
+    if format_type == "compact":
+        clean = df.astype(object).where(pd.notnull(df), None)
+        return [[_clean_val(val) for val in row] for row in clean.itertuples(index=False, name=None)]
+    elif format_type == "tsv":
+        clean = df.astype(object).where(pd.notnull(df), "")
+        return clean.to_csv(sep="\t", index=False)
+    else:
+        return _df_to_clean_records(df)
 
 
 # ==========================================
@@ -96,24 +117,36 @@ def get_workbook_info(file_path: str) -> Dict[str, Any]:
 def preview_sheet(
     file_path: str,
     sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
     nrows: int = 10,
+    format: Literal["records", "compact", "tsv"] = "records",
 ) -> Dict[str, Any]:
     """
-    Preview the first N rows of a sheet. Loads only the requested rows for speed.
+    Preview the first N rows of a sheet. Loads only requested rows for speed and minimal token consumption.
+    
+    Args:
+        file_path: Path to the Excel file (.xlsx, .xls, .xlsm).
+        sheet_name: Sheet name or index (default is first sheet).
+        header_row: 0-indexed row number containing headers (e.g. 5 if header is row 6).
+        nrows: Number of preview rows (default 10, max 50).
+        format: 'records' (list of dicts), 'compact' (list of lists), or 'tsv'.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    nrows = max(1, min(nrows, 200))
-    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows)
-    rows = _df_to_clean_records(df)
+    nrows = max(1, min(nrows, 50))
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows, header=h_idx)
+    data = _format_dataframe_output(df, format)
 
     return {
         "sheet_name": sheet_name or "First Sheet",
-        "preview_row_count": len(rows),
-        "columns": list(df.columns),
-        "column_types": {col: str(dtype) for col, dtype in df.dtypes.items()},
-        "rows": rows,
+        "preview_row_count": len(df),
+        "columns": [str(c) for c in df.columns],
+        "column_types": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+        "format": format,
+        "rows": data if format != "tsv" else None,
+        "data": data,
     }
 
 
@@ -123,20 +156,42 @@ def query_rows(
     sheet_name: Optional[str] = None,
     query: Optional[str] = None,
     columns: Optional[List[str]] = None,
+    header_row: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
+    format: Literal["records", "compact", "tsv"] = "records",
 ) -> Dict[str, Any]:
     """
     Query, filter, and paginate through Excel rows using Pandas vectorized expressions.
-    Example query: "Age > 30 and Status == 'Active'" or "Department in ['Sales', 'Engineering']"
+    To protect chat context window from credit-draining token bloat, responses are safety-capped.
+    For bulk data (>100 rows), use 'get_column_values', 'compare_column_values', 'export_to_csv', or format='compact' / 'tsv'.
+    
+    Args:
+        file_path: Path to the Excel file.
+        sheet_name: Sheet name or index.
+        query: Pandas query filter expression (e.g. "Age > 30 and Status == 'Active'").
+        columns: Specific column names to load.
+        header_row: 0-indexed row number containing headers (e.g. 5 if header is row 6).
+        limit: Max rows to return (default 50; capped at 100 for 'records', 200 for 'compact', 300 for 'tsv').
+        offset: Number of rows to skip.
+        format: 'records' (list of dicts), 'compact' (list of lists, saves 60% tokens), or 'tsv' (saves 75% tokens).
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    limit = max(1, min(limit, 500))
+    # Safety caps based on format to prevent context bloat
+    if format == "tsv":
+        max_allowed = 300
+    elif format == "compact":
+        max_allowed = 200
+    else:
+        max_allowed = 100
+
+    limit = max(1, min(limit, max_allowed))
     offset = max(0, offset)
 
-    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns)
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns, header=h_idx)
 
     if query:
         try:
@@ -146,17 +201,28 @@ def query_rows(
 
     total_matches = len(df)
     paginated_df = df.iloc[offset : offset + limit]
-    rows = _df_to_clean_records(paginated_df)
+    data = _format_dataframe_output(paginated_df, format)
 
-    return {
+    result: Dict[str, Any] = {
         "total_matches": total_matches,
         "offset": offset,
         "limit": limit,
-        "returned_rows": len(rows),
-        "columns": list(df.columns),
-        "rows": rows,
+        "returned_rows": len(paginated_df),
+        "columns": [str(c) for c in df.columns],
+        "format": format,
+        "rows": data if format != "tsv" else None,
+        "data": data,
     }
 
+    if total_matches > (offset + limit):
+        result["context_protection_notice"] = (
+            f"Returned {len(paginated_df)} of {total_matches} rows. Capped at {limit} to protect your LLM context window. "
+            f"DO NOT paginate through thousands of rows in batches through chat, as it will exhaust your token and message limits! "
+            f"Instead: 1) Use 'get_column_values' if you only need IDs/codes; 2) Use 'compare_column_values' to compare with DB or other data; "
+            f"3) Use 'export_to_csv' to process files on disk locally."
+        )
+
+    return result
 
 
 @mcp.tool()
@@ -166,9 +232,21 @@ def read_range(
     start_row: int = 1,
     end_row: int = 50,
     columns: Optional[List[str]] = None,
+    header_row: Optional[int] = None,
+    format: Literal["records", "compact", "tsv"] = "records",
 ) -> Dict[str, Any]:
     """
-    Read a specific slice of rows (e.g. rows 100 to 200) without loading the entire spreadsheet.
+    Read a specific slice of rows (e.g. rows 100 to 150) without loading the entire spreadsheet.
+    Capped to prevent context window bloat.
+    
+    Args:
+        file_path: Path to the Excel file.
+        sheet_name: Sheet name or index.
+        start_row: First row to read (1-indexed).
+        end_row: Last row to read (1-indexed).
+        columns: Specific columns to load.
+        header_row: Row containing column headers (0-indexed).
+        format: 'records', 'compact', or 'tsv'.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -178,28 +256,174 @@ def read_range(
     if end_row < start_row:
         raise ValueError(f"end_row ({end_row}) must be >= start_row ({start_row})")
 
-    nrows = min(end_row - start_row + 1, 1000)
+    max_allowed = 300 if format == "tsv" else (200 if format == "compact" else 100)
+    nrows = min(end_row - start_row + 1, max_allowed)
 
-    if start_row <= 1:
-        df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows, usecols=columns)
+    h_idx = header_row if header_row is not None else 0
+    if start_row <= (h_idx + 1):
+        df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows, usecols=columns, header=h_idx)
     else:
-        header_df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=0, usecols=columns)
+        header_df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=0, usecols=columns, header=h_idx)
         df = pd.read_excel(
             file_path,
             sheet_name=sheet_name or 0,
-            skiprows=range(1, start_row),
+            skiprows=range(h_idx + 1, start_row),
             nrows=nrows,
             names=header_df.columns,
             usecols=columns,
         )
 
-    rows = _df_to_clean_records(df)
-    return {
+    data = _format_dataframe_output(df, format)
+    res_range: Dict[str, Any] = {
         "start_row": start_row,
-        "end_row": start_row + len(rows) - 1,
-        "row_count": len(rows),
-        "columns": list(df.columns),
-        "rows": rows,
+        "end_row": start_row + len(df) - 1,
+        "row_count": len(df),
+        "columns": [str(c) for c in df.columns],
+        "format": format,
+        "rows": data if format != "tsv" else None,
+        "data": data,
+    }
+    if (end_row - start_row + 1) > max_allowed:
+        res_range["context_protection_notice"] = (
+            f"Requested {end_row - start_row + 1} rows capped at {max_allowed} to protect your LLM context window. "
+            f"Use start_row/end_row to page through specific slices or export_to_csv to process on disk."
+        )
+    return res_range
+
+
+@mcp.tool()
+def get_column_values(
+    file_path: str,
+    column: str,
+    sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
+    distinct_only: bool = True,
+    dropna: bool = True,
+    limit: int = 500,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """
+    Extract values from a single column in an Excel sheet with minimal token consumption.
+    Ideal for extracting ID lists, SAP codes, SKUs, or status values without dumping full rows into chat.
+    
+    Args:
+        file_path: Path to the Excel file.
+        column: Column name to extract.
+        sheet_name: Sheet name or index.
+        header_row: Row containing headers (0-indexed, default 0).
+        distinct_only: Only return unique values (deduplicated, default True).
+        dropna: Exclude empty/null values (default True).
+        limit: Max values to return (default 500, max 1000).
+        offset: Offset into the values list.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    limit = max(1, min(limit, 1000))
+    offset = max(0, offset)
+
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name or 0,
+        usecols=[column],
+        header=h_idx,
+    )
+    series = df[column]
+    if dropna:
+        series = series.dropna()
+
+    total_count = len(series)
+    if distinct_only:
+        unique_series = series.drop_duplicates()
+        total_unique = len(unique_series)
+        sliced = unique_series.iloc[offset : offset + limit]
+    else:
+        total_unique = series.nunique()
+        sliced = series.iloc[offset : offset + limit]
+
+    values = [_clean_val(v) for v in sliced]
+
+    return {
+        "column": column,
+        "total_rows": total_count,
+        "unique_count": total_unique,
+        "offset": offset,
+        "limit": limit,
+        "returned_count": len(values),
+        "has_more": (offset + limit) < (total_unique if distinct_only else total_count),
+        "values": values,
+    }
+
+
+@mcp.tool()
+def compare_column_values(
+    file_path: str,
+    column: str,
+    candidate_values: List[Union[str, int, float]],
+    sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
+    case_sensitive: bool = False,
+    max_sample_items: int = 50,
+) -> Dict[str, Any]:
+    """
+    Compare values in an Excel column against an external candidate list (e.g. from database query).
+    Performs instant in-memory set diffing on the server without dumping thousands of rows into LLM context!
+    Returns match statistics, count of missing items in candidate list, and count of new items.
+    
+    Args:
+        file_path: Path to the Excel file.
+        column: Column name to compare.
+        candidate_values: List of values to check against (e.g. IDs from database query).
+        sheet_name: Sheet name or index.
+        header_row: Header row index (0-indexed, default 0).
+        case_sensitive: Case sensitivity for string comparison (default False).
+        max_sample_items: Number of sample missing/new items to display in result (default 50).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(
+        file_path,
+        sheet_name=sheet_name or 0,
+        usecols=[column],
+        header=h_idx,
+    )
+    excel_series = df[column].dropna().astype(str)
+
+    if not case_sensitive:
+        excel_norm_map = {val.strip().lower(): val.strip() for val in excel_series if val.strip()}
+        cand_norm_map = {str(val).strip().lower(): str(val).strip() for val in candidate_values if str(val).strip()}
+    else:
+        excel_norm_map = {val.strip(): val.strip() for val in excel_series if val.strip()}
+        cand_norm_map = {str(val).strip(): str(val).strip() for val in candidate_values if str(val).strip()}
+
+    excel_set = set(excel_norm_map.keys())
+    cand_set = set(cand_norm_map.keys())
+
+    matching_keys = excel_set.intersection(cand_set)
+    in_excel_only_keys = excel_set - cand_set
+    in_candidates_only_keys = cand_set - excel_set
+
+    in_excel_only = [excel_norm_map[k] for k in list(in_excel_only_keys)[:max_sample_items]]
+    in_candidates_only = [cand_norm_map[k] for k in list(in_candidates_only_keys)[:max_sample_items]]
+
+    return {
+        "column": column,
+        "excel_total_items": len(excel_series),
+        "excel_unique_items": len(excel_set),
+        "candidate_unique_items": len(cand_set),
+        "matched_count": len(matching_keys),
+        "new_in_excel_count": len(in_excel_only_keys),
+        "missing_from_excel_count": len(in_candidates_only_keys),
+        "sample_new_in_excel": in_excel_only,
+        "sample_missing_from_excel": in_candidates_only,
+        "summary": (
+            f"Comparison Complete: {len(matching_keys)} matched. "
+            f"{len(in_excel_only_keys)} new items in Excel not in candidate list. "
+            f"{len(in_candidates_only_keys)} items in candidate list not in Excel."
+        )
     }
 
 
@@ -511,9 +735,19 @@ def export_to_csv(
     file_path: str,
     output_csv_path: str,
     sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
+    columns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Export an Excel sheet to a clean CSV file in chunks for fast external processing.
+    Export an Excel sheet to a clean CSV file on disk for fast external or Python/SQL processing.
+    Avoids consuming any LLM context window tokens while handling massive datasets (10,000+ rows).
+    
+    Args:
+        file_path: Path to the Excel file.
+        output_csv_path: Destination path for the CSV.
+        sheet_name: Sheet name or index.
+        header_row: Row containing column headers (0-indexed, default 0).
+        columns: Specific columns to export (default all).
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -522,17 +756,223 @@ def export_to_csv(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-
-    df = pd.read_excel(file_path, sheet_name=sheet_name or 0)
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns, header=h_idx)
     df.to_csv(output_csv_path, index=False)
-
 
     return {
         "status": "success",
         "input_excel": file_path,
         "output_csv": output_csv_path,
         "rows_exported": len(df),
+        "columns_exported": [str(c) for c in df.columns],
+        "message": f"Successfully exported {len(df)} rows directly to disk at '{output_csv_path}'.",
     }
+
+
+@mcp.tool()
+def export_to_json(
+    file_path: str,
+    output_json_path: str,
+    sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
+    columns: Optional[List[str]] = None,
+    orient: Literal["records", "split", "index", "columns"] = "records",
+    indent: Optional[int] = 2,
+) -> Dict[str, Any]:
+    """
+    Export an Excel sheet directly to a JSON file on disk.
+    Allows LLMs and scripts to process structured JSON locally without bloating chat context window.
+    
+    Args:
+        file_path: Path to the Excel file.
+        output_json_path: Destination path for the exported .json file.
+        sheet_name: Sheet name or index (default first sheet).
+        header_row: Row containing column headers (0-indexed, default 0).
+        columns: Specific column names to export.
+        orient: Format of JSON structure ('records', 'split', 'index', or 'columns'). Default 'records'.
+        indent: JSON indentation formatting (default 2, None for minified).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    out_dir = os.path.dirname(os.path.abspath(output_json_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns, header=h_idx)
+
+    clean_records = _df_to_clean_records(df)
+    with open(output_json_path, "w", encoding="utf-8") as f:
+        if orient == "records":
+            json.dump(clean_records, f, indent=indent)
+        else:
+            df.to_json(f, orient=orient, indent=indent, date_format="iso")
+
+    file_size_kb = round(os.path.getsize(output_json_path) / 1024, 2)
+    return {
+        "status": "success",
+        "input_excel": file_path,
+        "output_json": output_json_path,
+        "rows_exported": len(df),
+        "columns_exported": [str(c) for c in df.columns],
+        "file_size_kb": file_size_kb,
+        "orient": orient,
+        "message": f"Successfully exported {len(df)} rows directly to '{output_json_path}' ({file_size_kb} KB) with zero token bloat.",
+    }
+
+
+@mcp.tool()
+def profile_sheet(
+    file_path: str,
+    sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Generate an instant high-level statistical profile and data quality audit of an entire Excel sheet.
+    Provides complete analytics (null rates, unique counts, top frequent values, numeric distributions)
+    in a single compact response (~400 tokens) without dumping raw rows into the chat context.
+    
+    Args:
+        file_path: Path to the Excel file.
+        sheet_name: Sheet name or index (default first sheet).
+        header_row: Row containing column headers (0-indexed, default 0).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, header=h_idx)
+    total_rows = len(df)
+    total_cols = len(df.columns)
+
+    col_profiles = {}
+    for col in df.columns:
+        series = df[col]
+        null_count = int(series.isnull().sum())
+        non_null_count = total_rows - null_count
+        null_pct = round((null_count / max(total_rows, 1)) * 100, 2)
+        unique_count = int(series.nunique())
+
+        profile: Dict[str, Any] = {
+            "dtype": str(series.dtype),
+            "non_null_count": non_null_count,
+            "null_count": null_count,
+            "null_pct": null_pct,
+            "unique_count": unique_count,
+        }
+
+        if pd.api.types.is_numeric_dtype(series):
+            valid = series.dropna()
+            if len(valid) > 0:
+                profile["numeric_stats"] = {
+                    "min": float(valid.min()),
+                    "max": float(valid.max()),
+                    "mean": round(float(valid.mean()), 2),
+                    "sum": round(float(valid.sum()), 2),
+                }
+        else:
+            top_vals = series.dropna().value_counts().head(5).to_dict()
+            profile["top_frequent"] = {str(k)[:40]: int(v) for k, v in top_vals.items()}
+
+        col_profiles[str(col)] = profile
+
+    return {
+        "file_path": file_path,
+        "sheet_name": sheet_name or "First Sheet",
+        "total_rows": total_rows,
+        "total_columns": total_cols,
+        "columns": [str(c) for c in df.columns],
+        "column_profiles": col_profiles,
+    }
+
+
+@mcp.tool()
+def query_excel_sql(
+    file_path: str,
+    sql_query: str,
+    sheet_name: Optional[str] = None,
+    header_row: Optional[int] = None,
+    limit: int = 50,
+    format: Literal["records", "compact", "tsv"] = "records",
+) -> Dict[str, Any]:
+    """
+    Execute arbitrary SQL queries (GROUP BY, JOIN, AGGREGATE, WHERE, HAVING, ORDER BY)
+    directly on an Excel sheet using an in-memory SQL engine (SQLite).
+    Allows powerful analytics, deduplication, and filtering on the server with minimal token consumption!
+    The Excel table is exposed as 'sheet' (and 'data'). Column names are sanitized to valid SQL identifiers (spaces -> underscores).
+    
+    Args:
+        file_path: Path to the Excel file.
+        sql_query: SQL query to execute (e.g. "SELECT prefix, COUNT(*), MAX(code) FROM sheet GROUP BY prefix").
+        sheet_name: Sheet name or index (default first sheet).
+        header_row: Row containing headers (0-indexed, default 0).
+        limit: Max rows to return (default 50, max 100 for records, 200 for compact, 300 for tsv).
+        format: Output format ('records', 'compact', or 'tsv').
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    h_idx = header_row if header_row is not None else 0
+    df = pd.read_excel(file_path, sheet_name=sheet_name or 0, header=h_idx)
+
+    # Sanitize column names for SQLite
+    sanitized_map = {}
+    for col in df.columns:
+        s = re.sub(r"\W+", "_", str(col)).strip("_")
+        sanitized_map[col] = s or "col"
+
+    df_sql = df.rename(columns=sanitized_map)
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        df_sql.to_sql("sheet", conn, index=False)
+        df_sql.to_sql("data", conn, index=False)
+
+        # Safety caps
+        max_allowed = 300 if format == "tsv" else (200 if format == "compact" else 100)
+        safe_limit = max(1, min(limit, max_allowed))
+
+        # Check if query already has a LIMIT
+        q_clean = sql_query.strip().rstrip(";")
+        if "limit " not in q_clean.lower():
+            exec_query = f"{q_clean} LIMIT {safe_limit + 1}"
+        else:
+            exec_query = q_clean
+
+        cur = conn.cursor()
+        cur.execute(exec_query)
+        col_names = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchall()
+
+        has_more = len(rows) > safe_limit
+        display_rows = rows[:safe_limit]
+
+        df_res = pd.DataFrame(display_rows, columns=col_names)
+        data = _format_dataframe_output(df_res, format)
+
+        result: Dict[str, Any] = {
+            "sql_query": sql_query,
+            "total_returned": len(display_rows),
+            "columns": col_names,
+            "available_table_columns": list(sanitized_map.values()),
+            "format": format,
+            "rows": data if format != "tsv" else None,
+            "data": data,
+        }
+
+        if has_more:
+            result["notice"] = (
+                f"Showing first {safe_limit} rows. Additional rows omitted to protect LLM context window. "
+                f"Use SQL WHERE or specific aggregations to narrow results."
+            )
+
+        return result
+    except Exception as e:
+        raise ValueError(f"SQL execution error: {str(e)}. Table columns available: {list(sanitized_map.values())}")
+    finally:
+        conn.close()
 
 
 # ==========================================================
@@ -1091,6 +1531,204 @@ def get_active_excel_window() -> Dict[str, Any]:
         }
     finally:
         pythoncom.CoUninitialize()
+
+
+# ==========================================================
+# 5. ADVANCED EXCEL AUDITING & MODIFICATION TOOLS
+# ==========================================================
+
+@mcp.tool()
+def audit_formulas(
+    file_path: str,
+    sheet_name: Optional[str] = None,
+    max_errors: int = 50,
+) -> Dict[str, Any]:
+    """
+    Audit an Excel workbook for broken formulas, cell error values, and reference faults (#REF!, #VALUE!, #N/A, #DIV/0!, #NAME?, #NUM!, #NULL!).
+    
+    Args:
+        file_path: Path to the Excel file.
+        sheet_name: Optional sheet name to inspect. If omitted, checks all sheets.
+        max_errors: Maximum error instances to return (default 50, max 200).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    safe_max = min(max(1, max_errors), 200)
+    error_tokens = {"#REF!", "#VALUE!", "#N/A", "#DIV/0!", "#NAME?", "#NUM!", "#NULL!"}
+
+    wb_formulas = openpyxl.load_workbook(file_path, data_only=False)
+    try:
+        wb_values = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception:
+        wb_values = None
+
+    sheets_to_check = [sheet_name] if sheet_name and sheet_name in wb_formulas.sheetnames else wb_formulas.sheetnames
+    errors_found = []
+    total_formulas_checked = 0
+
+    for s_name in sheets_to_check:
+        ws_f = wb_formulas[s_name]
+        ws_v = wb_values[s_name] if wb_values and s_name in wb_values.sheetnames else None
+
+        for row in ws_f.iter_rows():
+            for cell in row:
+                f_val = cell.value
+                if f_val is None:
+                    continue
+
+                f_str = str(f_val).strip()
+                is_formula = f_str.startswith("=")
+                if is_formula:
+                    total_formulas_checked += 1
+
+                # Check 1: Explicit error in formula itself (e.g. =SUM(#REF!))
+                found_error_type = None
+                for err in error_tokens:
+                    if err in f_str:
+                        found_error_type = err
+                        break
+
+                # Check 2: Evaluated value in data_only workbook is an error
+                if not found_error_type and ws_v:
+                    try:
+                        v_cell = ws_v[cell.coordinate]
+                        v_str = str(v_cell.value).strip() if v_cell.value is not None else ""
+                        if v_str in error_tokens:
+                            found_error_type = v_str
+                    except Exception:
+                        pass
+
+                if found_error_type:
+                    errors_found.append({
+                        "sheet": s_name,
+                        "cell": cell.coordinate,
+                        "formula": f_str,
+                        "error_type": found_error_type,
+                    })
+                    if len(errors_found) >= safe_max:
+                        break
+            if len(errors_found) >= safe_max:
+                break
+        if len(errors_found) >= safe_max:
+            break
+
+    wb_formulas.close()
+    if wb_values:
+        wb_values.close()
+
+    res: Dict[str, Any] = {
+        "file_path": file_path,
+        "sheets_audited": sheets_to_check,
+        "total_formulas_checked": total_formulas_checked,
+        "total_errors_found": len(errors_found),
+        "limit_reached": len(errors_found) >= safe_max,
+        "errors": errors_found,
+    }
+    if len(errors_found) >= safe_max:
+        res["notice"] = f"... [TRUNCATED: Showing first {safe_max} errors. Increase max_errors to see more] ..."
+    return res
+
+
+@mcp.tool()
+def search_and_replace_cells(
+    file_path: str,
+    search_val: str,
+    replace_val: str,
+    sheet_name: Optional[str] = None,
+    match_case: bool = False,
+    exact_match: bool = False,
+    dry_run: bool = True,
+    output_path: Optional[str] = None,
+    max_replacements: int = 500,
+) -> Dict[str, Any]:
+    """
+    Search and replace text within spreadsheet cells.
+    Defaults to dry_run=True to preview changes safely before modifying files.
+    
+    Args:
+        file_path: Path to the target Excel file.
+        search_val: String to search for.
+        replace_val: String to replace with.
+        sheet_name: Sheet name to target (default: all sheets).
+        match_case: Case-sensitive matching (default False).
+        exact_match: Match entire cell text instead of substring (default False).
+        dry_run: If True, previews changes without saving to disk (default True).
+        output_path: Optional path to save modified file. If omitted and dry_run=False, updates original file.
+        max_replacements: Safety cap on replacements (default 500).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path, data_only=False)
+    sheets_to_process = [sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.sheetnames
+
+    replacements = []
+    flags = 0 if match_case else re.IGNORECASE
+    pattern = re.compile(re.escape(search_val), flags)
+
+    for s_name in sheets_to_process:
+        ws = wb[s_name]
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value is None or not isinstance(cell.value, str):
+                    continue
+
+                orig_val = cell.value
+                # Do not replace inside formula expressions unless requested
+                if orig_val.startswith("="):
+                    continue
+
+                matched = False
+                new_val = orig_val
+
+                if exact_match:
+                    if (orig_val == search_val) if match_case else (orig_val.lower() == search_val.lower()):
+                        matched = True
+                        new_val = replace_val
+                else:
+                    if pattern.search(orig_val):
+                        matched = True
+                        new_val = pattern.sub(replace_val, orig_val)
+
+                if matched and new_val != orig_val:
+                    replacements.append({
+                        "sheet": s_name,
+                        "cell": cell.coordinate,
+                        "old_value": orig_val[:100],
+                        "new_value": new_val[:100],
+                    })
+                    if not dry_run:
+                        cell.value = new_val
+
+                    if len(replacements) >= max_replacements:
+                        break
+            if len(replacements) >= max_replacements:
+                break
+        if len(replacements) >= max_replacements:
+            break
+
+    save_path = None
+    if not dry_run and replacements:
+        save_path = output_path or file_path
+        wb.save(save_path)
+    wb.close()
+
+    return {
+        "file_path": file_path,
+        "saved_path": save_path,
+        "dry_run": dry_run,
+        "search_val": search_val,
+        "replace_val": replace_val,
+        "total_matches": len(replacements),
+        "limit_reached": len(replacements) >= max_replacements,
+        "replacements_preview": replacements[:100],
+        "message": (
+            f"Dry run complete: {len(replacements)} matching cells found. Set dry_run=False to apply changes."
+            if dry_run
+            else f"Successfully replaced {len(replacements)} cells and saved to '{save_path}'."
+        ),
+    }
 
 
 if __name__ == "__main__":

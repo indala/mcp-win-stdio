@@ -63,18 +63,37 @@ def load_document(file_path: str) -> docx.Document:
     if clean_path.lower().endswith(".doc") and not clean_path.lower().endswith(".docx"):
         try:
             import win32com.client
-            word = win32com.client.Dispatch("Word.Application")
-            word.Visible = False
-            doc = word.Documents.Open(clean_path)
-            temp_docx = clean_path + "x"
-            doc.SaveAs2(temp_docx, FileFormat=16)
-            doc.Close()
-            word.Quit()
-            return docx.Document(temp_docx)
+            import pythoncom
+            pythoncom.CoInitialize()
+            word = None
+            doc = None
+            try:
+                word = win32com.client.Dispatch("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = False
+                doc = word.Documents.Open(clean_path)
+                temp_docx = clean_path + "x"
+                doc.SaveAs2(temp_docx, FileFormat=16)
+                doc.Close(False)
+                doc = None
+                return docx.Document(temp_docx)
+            finally:
+                if doc:
+                    try:
+                        doc.Close(False)
+                    except Exception:
+                        pass
+                if word:
+                    try:
+                        word.Quit()
+                    except Exception:
+                        pass
+                pythoncom.CoUninitialize()
         except Exception as e:
             raise RuntimeError(f"Could not convert legacy .doc file using MS Word: {e}")
 
     return docx.Document(clean_path)
+
 
 def extract_run_formatting(run, paragraph_style=None) -> Dict[str, Any]:
     """Extract font name, size (pt), color (hex/theme), highlight, and bold/italic."""
@@ -244,7 +263,7 @@ def extract_drawing_info(element, location: str, part=None) -> List[Dict[str, An
 
 
 @mcp.tool()
-def get_document_layout(file_path: str) -> str:
+def get_document_layout(file_path: str) -> Dict[str, Any]:
     """
     Extract comprehensive page layout geometry, exact margins across multiple units (in, cm, mm, pt, twips),
     multi-column layout (IEEE/Journal), printable area, section break types, and header/footer distances.
@@ -405,29 +424,30 @@ def get_document_layout(file_path: str) -> str:
                 }
             })
 
-        return json.dumps({
+        return {
             "file_path": os.path.abspath(file_path),
             "total_sections": len(doc.sections),
             "sections": sections_info
-        }, indent=2)
+        }
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 40) -> str:
+def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 40) -> Dict[str, Any]:
     """
     Extract detailed paragraph spacing (line spacing, space before/after in pt), indentation (first-line indent, left/right margins in inches), and alignment.
     
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
-        max_paragraphs: Number of paragraphs to analyze (default: 40).
+        max_paragraphs: Number of paragraphs to analyze (default: 40, max: 100).
     """
     try:
         doc = load_document(file_path)
+        safe_max = min(max(1, max_paragraphs), 100)
         paragraphs_info = []
 
-        for idx, p in enumerate(doc.paragraphs[:max_paragraphs]):
+        for idx, p in enumerate(doc.paragraphs[:safe_max]):
             text = p.text.strip()
             if not text:
                 continue
@@ -482,25 +502,33 @@ def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 
                 }
             })
 
-        return json.dumps({
+        has_more = len(doc.paragraphs) > safe_max
+        res: Dict[str, Any] = {
             "file_path": os.path.abspath(file_path),
+            "total_paragraphs": len(doc.paragraphs),
             "analyzed_paragraphs_count": len(paragraphs_info),
+            "has_more": has_more,
             "paragraphs": paragraphs_info
-        }, indent=2)
+        }
+        if has_more:
+            res["notice"] = f"... [TRUNCATED: Showing first {safe_max} paragraphs. Increase max_paragraphs (up to 100) to see more] ..."
+        return res
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def get_document_typography(file_path: str) -> str:
+def get_document_typography(file_path: str, max_paragraphs: int = 40) -> Dict[str, Any]:
     """
-    Extract all typography details (font families, font sizes, colors, headings, styles, and alignments) across the entire Word document.
+    Extract all typography details (font families, font sizes, colors, headings, styles, and alignments) across the Word document.
     
     Args:
         file_path: Path to the .docx or .doc file.
+        max_paragraphs: Maximum paragraph styles to detail (default: 40, max: 100).
     """
     try:
         doc = load_document(file_path)
+        safe_max = min(max(1, max_paragraphs), 100)
         
         distinct_fonts = set()
         distinct_sizes = set()
@@ -527,7 +555,7 @@ def get_document_typography(file_path: str) -> str:
                         "formatting": fmt
                     })
 
-            if runs_data:
+            if runs_data and len(styles_summary) < safe_max:
                 styles_summary.append({
                     "paragraph_index": p_idx + 1,
                     "style": style_name,
@@ -552,7 +580,7 @@ def get_document_typography(file_path: str) -> str:
                             "formatting": runs
                         })
 
-        return json.dumps({
+        return {
             "file_path": os.path.abspath(file_path),
             "summary": {
                 "font_families_used": sorted(list(distinct_fonts)),
@@ -560,22 +588,25 @@ def get_document_typography(file_path: str) -> str:
                 "colors_used": sorted(list(distinct_colors))
             },
             "header_typography": headers_typography,
-            "paragraphs_typography": styles_summary[:30]
-        }, indent=2)
+            "paragraphs_typography": styles_summary,
+            "has_more": len(doc.paragraphs) > safe_max
+        }
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def get_document_images(file_path: str) -> str:
+def get_document_images(file_path: str, max_images: int = 50) -> Dict[str, Any]:
     """
     Extract all images and graphics from headers, footers, body paragraphs, and tables along with exact placement, alignment, dimensions, and coordinates.
     
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
+        max_images: Maximum images to detail (default: 50, max: 100).
     """
     try:
         doc = load_document(file_path)
+        safe_max = min(max(1, max_images), 100)
         all_images = []
 
         for s_idx, sec in enumerate(doc.sections, 1):
@@ -605,20 +636,28 @@ def get_document_images(file_path: str) -> str:
                     cell_images = extract_drawing_info(cell._tc, f"Table {t_idx}, Cell ({r_idx + 1}, {c_idx + 1})", doc.part)
                     all_images.extend(cell_images)
 
-        return json.dumps({
+        has_more = len(all_images) > safe_max
+        displayed_images = all_images[:safe_max]
+
+        res: Dict[str, Any] = {
             "file_path": os.path.abspath(file_path),
             "total_images_found": len(all_images),
+            "returned_images_count": len(displayed_images),
             "header_images_count": sum(1 for img in all_images if "Header" in img["location"]),
             "footer_images_count": sum(1 for img in all_images if "Footer" in img["location"]),
             "body_images_count": sum(1 for img in all_images if "Body" in img["location"] or "Table" in img["location"]),
-            "images": all_images
-        }, indent=2)
+            "has_more": has_more,
+            "images": displayed_images
+        }
+        if has_more:
+            res["notice"] = f"... [TRUNCATED: Showing first {safe_max} images. Increase max_images (up to 100) to see more] ..."
+        return res
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def get_headers_and_footers(file_path: str) -> str:
+def get_headers_and_footers(file_path: str) -> Dict[str, Any]:
     """
     Extract all headers and footers from each section of a Word document, including text, typography (fonts, sizes, colors), tables, and images.
     
@@ -671,48 +710,61 @@ def get_headers_and_footers(file_path: str) -> str:
                 "even_page_footer": even_f
             })
 
-        return json.dumps({
+        return {
             "file_path": os.path.abspath(file_path),
             "sections": sections_hf
-        }, indent=2)
+        }
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def get_document_tables(file_path: str, format: str = "markdown") -> str:
+def get_document_tables(file_path: str, format: str = "markdown", max_tables: int = 10, max_rows: int = 30) -> Any:
     """
-    Extract all tables from a Word document as structured JSON or readable Markdown.
+    Extract tables from a Word document as structured JSON or readable Markdown with safe limits.
     
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
         format: Output format ('markdown' or 'json'). Default is 'markdown'.
+        max_tables: Maximum tables to extract (default: 10, max: 25).
+        max_rows: Maximum rows per table to extract (default: 30, max: 100).
     """
     try:
         doc = load_document(file_path)
         tables_data = []
+        safe_max_tables = min(max(1, max_tables), 25)
+        safe_max_rows = min(max(1, max_rows), 100)
 
-        for t_idx, table in enumerate(doc.tables, 1):
+        for t_idx, table in enumerate(doc.tables[:safe_max_tables], 1):
             table_rows = []
-            for row in table.rows:
+            for row in table.rows[:safe_max_rows]:
                 row_cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
                 table_rows.append(row_cells)
 
             tables_data.append({
                 "table_index": t_idx,
                 "total_rows": len(table.rows),
+                "returned_rows": len(table_rows),
                 "total_columns": len(table.columns),
+                "rows_truncated": len(table.rows) > safe_max_rows,
                 "rows": table_rows
             })
 
-        if format.lower() == "json":
-            return json.dumps({
-                "file_path": os.path.abspath(file_path),
-                "total_tables": len(tables_data),
-                "tables": tables_data
-            }, indent=2)
+        has_more_tables = len(doc.tables) > safe_max_tables
 
-        md_lines = [f"# Tables in {os.path.basename(file_path)}", f"Total Tables: {len(tables_data)}\n"]
+        if format.lower() == "json":
+            res_dict: Dict[str, Any] = {
+                "file_path": os.path.abspath(file_path),
+                "total_tables": len(doc.tables),
+                "returned_tables": len(tables_data),
+                "has_more_tables": has_more_tables,
+                "tables": tables_data
+            }
+            if has_more_tables:
+                res_dict["notice"] = f"... [TRUNCATED: Showing {len(tables_data)} of {len(doc.tables)} tables. Increase max_tables to view more] ..."
+            return res_dict
+
+        md_lines = [f"# Tables in {os.path.basename(file_path)}", f"Total Tables: {len(doc.tables)} (Showing {len(tables_data)})\n"]
         for t in tables_data:
             md_lines.append(f"### Table {t['table_index']} ({t['total_rows']} rows x {t['total_columns']} cols)")
             rows = t["rows"]
@@ -726,23 +778,32 @@ def get_document_tables(file_path: str, format: str = "markdown") -> str:
             for r in rows[1:]:
                 cells = r + [""] * (len(header) - len(r))
                 md_lines.append("| " + " | ".join(cells[:len(header)]) + " |")
+            if t["rows_truncated"]:
+                md_lines.append(f"\n*... [{t['total_rows'] - len(rows)} rows truncated. Increase max_rows to inspect more] ...*\n")
             md_lines.append("\n")
+
+        if has_more_tables:
+            md_lines.append(f"\n*... [TRUNCATED: {len(doc.tables) - safe_max_tables} additional tables omitted to protect context window] ...*\n")
 
         return "\n".join(md_lines)
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        if format.lower() == "json":
+            return {"error": str(e)}
+        return f"Error extracting tables: {str(e)}"
 
 
 @mcp.tool()
-def get_document_outline(file_path: str) -> str:
+def get_document_outline(file_path: str, max_headings: int = 100) -> Dict[str, Any]:
     """
     Extract the heading hierarchy and table of contents tree (H1, H2, H3, H4) with paragraph positions.
     
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
+        max_headings: Maximum headings to extract (default: 100, max: 200).
     """
     try:
         doc = load_document(file_path)
+        safe_max = min(max(1, max_headings), 200)
         headings = []
 
         for p_idx, p in enumerate(doc.paragraphs):
@@ -770,17 +831,25 @@ def get_document_outline(file_path: str) -> str:
                     "text": text
                 })
 
-        return json.dumps({
+        has_more = len(headings) > safe_max
+        displayed = headings[:safe_max]
+
+        res: Dict[str, Any] = {
             "file_path": os.path.abspath(file_path),
-            "heading_count": len(headings),
-            "outline": headings
-        }, indent=2)
+            "total_headings": len(headings),
+            "returned_headings": len(displayed),
+            "has_more": has_more,
+            "outline": displayed
+        }
+        if has_more:
+            res["notice"] = f"... [TRUNCATED: Showing first {safe_max} headings of {len(headings)}. Increase max_headings to see more] ..."
+        return res
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def get_document_metadata(file_path: str) -> str:
+def get_document_metadata(file_path: str) -> Dict[str, Any]:
     """
     Retrieve document properties, author, title, revision, word count, and timestamp metadata.
     
@@ -794,11 +863,14 @@ def get_document_metadata(file_path: str) -> str:
         total_paras = len(doc.paragraphs)
         total_words = sum(len(p.text.split()) for p in doc.paragraphs)
         for t in doc.tables:
+            seen_cells = set()
             for row in t.rows:
                 for cell in row.cells:
-                    total_words += len(cell.text.split())
+                    if cell not in seen_cells:
+                        seen_cells.add(cell)
+                        total_words += len(cell.text.split())
 
-        meta = {
+        meta: Dict[str, Any] = {
             "file_path": os.path.abspath(file_path),
             "title": props.title or "",
             "author": props.author or "",
@@ -817,9 +889,9 @@ def get_document_metadata(file_path: str) -> str:
                 "estimated_word_count": total_words
             }
         }
-        return json.dumps(meta, indent=2)
+        return meta
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
 
 
 @mcp.tool()
@@ -828,21 +900,24 @@ def read_word_document(
     include_tables: bool = True,
     include_headers_footers: bool = True,
     output_format: str = "markdown",
-    max_chars: int = 30000
+    max_paragraphs: int = 80,
+    max_chars: int = 25000
 ) -> str:
     """
     Read and extract the content of a Word document formatted as Markdown or structured JSON.
-    Includes token-safe truncation for large documents.
+    Includes token-safe truncation for large documents to prevent LLM context bloating.
     
     Args:
         file_path: Path to the .docx or .doc file.
         include_tables: Whether to include table contents (default: True).
         include_headers_footers: Whether to include header and footer text (default: True).
         output_format: Output format ('markdown' or 'json'). Default is 'markdown'.
-        max_chars: Maximum characters to return before truncating (default: 30000, ~7500 tokens).
+        max_paragraphs: Maximum body paragraphs to extract (default: 80, max: 300).
+        max_chars: Maximum characters to return before truncating (default: 25000, ~6000 tokens).
     """
     try:
         doc = load_document(file_path)
+        safe_max_paras = min(max(1, max_paragraphs), 300)
 
         if output_format.lower() == "json":
             paragraphs_data = []
@@ -863,9 +938,9 @@ def read_word_document(
                         "runs": runs
                     })
 
-            has_more = len(paragraphs_data) > 100
-            display_paras = paragraphs_data[:100]
-            result = {
+            has_more = len(paragraphs_data) > safe_max_paras
+            display_paras = paragraphs_data[:safe_max_paras]
+            result: Dict[str, Any] = {
                 "file_path": os.path.abspath(file_path),
                 "total_paragraphs": len(paragraphs_data),
                 "returned_paragraphs": len(display_paras),
@@ -873,11 +948,11 @@ def read_word_document(
                 "paragraphs": display_paras,
             }
             if has_more:
-                result["notice"] = "... [TRUNCATED: Showing first 100 paragraphs to protect context window] ..."
+                result["notice"] = f"... [TRUNCATED: Showing first {safe_max_paras} paragraphs of {len(paragraphs_data)} to protect context window] ..."
             if include_tables:
                 tables_res = []
-                for t in doc.tables[:20]:
-                    rows = [[cell.text.strip() for cell in r.cells] for r in t.rows]
+                for t in doc.tables[:10]:
+                    rows = [[cell.text.strip() for cell in r.cells] for r in t.rows[:25]]
                     tables_res.append(rows)
                 result["tables"] = tables_res
             return json.dumps(result, indent=2)
@@ -891,11 +966,18 @@ def read_word_document(
             if header_text:
                 md.append(f"> **Header**: {header_text}\n")
 
+        paras_processed = 0
+        truncated_by_paras = False
+
         for p in doc.paragraphs:
+            if paras_processed >= safe_max_paras:
+                truncated_by_paras = True
+                break
             text = p.text.strip()
             if not text:
                 continue
 
+            paras_processed += 1
             style = p.style.name if p.style else "Normal"
             if style.startswith("Heading 1"):
                 md.append(f"\n# {text}\n")
@@ -926,18 +1008,18 @@ def read_word_document(
 
         if include_tables and doc.tables:
             md.append("\n## Embedded Tables\n")
-            for t_idx, table in enumerate(doc.tables[:15], 1):
+            for t_idx, table in enumerate(doc.tables[:10], 1):
                 md.append(f"### Table {t_idx}")
                 rows = [[cell.text.strip().replace("\n", " ") for cell in r.cells] for r in table.rows]
                 if rows:
                     header = rows[0]
                     md.append("| " + " | ".join(header) + " |")
                     md.append("| " + " | ".join(["---"] * len(header)) + " |")
-                    for r in rows[1:50]:
+                    for r in rows[1:25]:
                         cells = r + [""] * (len(header) - len(r))
                         md.append("| " + " | ".join(cells[:len(header)]) + " |")
-                    if len(rows) > 50:
-                        md.append(f"\n*... [{len(rows) - 50} table rows truncated] ...*\n")
+                    if len(rows) > 25:
+                        md.append(f"\n*... [{len(rows) - 25} table rows truncated] ...*\n")
                 md.append("\n")
 
         if include_headers_footers and doc.sections:
@@ -950,6 +1032,8 @@ def read_word_document(
         if len(full_output) > max_chars:
             notice = f"\n\n... [TRUNCATED: Document exceeds {max_chars} characters. Use get_document_outline or search_word_document to inspect specific sections] ..."
             return full_output[:max_chars] + notice
+        elif truncated_by_paras:
+            full_output += f"\n\n... [TRUNCATED: Showing first {safe_max_paras} paragraphs of {len(doc.paragraphs)}. Increase max_paragraphs or use search_word_document to explore further] ..."
         return full_output
     except Exception as e:
         return f"Error reading Word document: {str(e)}"
@@ -961,7 +1045,7 @@ def search_word_document(
     search_term: str,
     match_case: bool = False,
     max_matches: int = 50
-) -> str:
+) -> Dict[str, Any]:
     """
     Search for a text term or pattern across paragraphs, headers, footers, and table cells in a Word document.
     
@@ -969,7 +1053,7 @@ def search_word_document(
         file_path: Path to the .docx or .doc file.
         search_term: String or pattern to search for.
         match_case: Case-sensitive search flag (default: False).
-        max_matches: Maximum number of matches to return (default: 50).
+        max_matches: Maximum number of matches to return (default: 50, max: 200).
     """
     try:
         doc = load_document(file_path)
@@ -1025,9 +1109,203 @@ def search_word_document(
         if len(matches) >= safe_max:
             result_dict["notice"] = f"... [TRUNCATED: Showing first {safe_max} matches. Narrow your search term for more specific results] ..."
 
-        return json.dumps(result_dict, indent=2)
+        return result_dict
     except Exception as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def edit_paragraph(
+    file_path: str,
+    paragraph_index: int,
+    new_text: str,
+    output_path: Optional[str] = None,
+    overwrite: bool = False
+) -> Dict[str, Any]:
+    """
+    Safely edit the text of a specific paragraph (1-indexed) in a Word document, preserving its style and formatting.
+    
+    Args:
+        file_path: Path to the .docx file.
+        paragraph_index: 1-based index of the paragraph to edit.
+        new_text: Replacement text for the paragraph.
+        output_path: Optional destination path to save modified document. If omitted and overwrite=True, modifies original file.
+        overwrite: Safety confirmation flag required if modifying the file directly without output_path.
+    """
+    try:
+        doc = load_document(file_path)
+        if paragraph_index < 1 or paragraph_index > len(doc.paragraphs):
+            return {
+                "error": f"Invalid paragraph_index {paragraph_index}. Document has {len(doc.paragraphs)} paragraphs (1-indexed)."
+            }
+
+        target_para = doc.paragraphs[paragraph_index - 1]
+        old_text = target_para.text
+
+        if target_para.runs:
+            target_para.runs[0].text = new_text
+            for extra_run in target_para.runs[1:]:
+                extra_run.text = ""
+        else:
+            target_para.text = new_text
+
+        save_dest = output_path if output_path else file_path
+        if not output_path and not overwrite:
+            return {
+                "error": "Overwriting the original file requires 'overwrite=True' or specifying an 'output_path'."
+            }
+
+        doc.save(save_dest)
+        return {
+            "status": "success",
+            "file_path": os.path.abspath(save_dest),
+            "paragraph_index": paragraph_index,
+            "old_text_preview": old_text[:100] + ("..." if len(old_text) > 100 else ""),
+            "new_text_preview": new_text[:100] + ("..." if len(new_text) > 100 else "")
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def insert_table(
+    file_path: str,
+    headers: List[str],
+    rows: List[List[str]],
+    style: str = "Table Grid",
+    output_path: Optional[str] = None,
+    overwrite: bool = False
+) -> Dict[str, Any]:
+    """
+    Insert a structured table into a Word document.
+    
+    Args:
+        file_path: Path to the target .docx file.
+        headers: Column header names.
+        rows: 2D list of row cell values.
+        style: Word table style (default: 'Table Grid').
+        output_path: Optional destination path. If omitted and overwrite=True, modifies original file.
+        overwrite: Safety confirmation flag required if modifying the file directly without output_path.
+    """
+    try:
+        if not headers:
+            return {"error": "Headers list cannot be empty."}
+
+        doc = load_document(file_path)
+        num_cols = len(headers)
+
+        if len(rows) > 500:
+            return {"error": "Maximum 500 rows allowed per insert_table call to prevent corruption/bloat."}
+
+        table = doc.add_table(rows=1 + len(rows), cols=num_cols)
+        try:
+            table.style = style
+        except Exception:
+            pass
+
+        hdr_cells = table.rows[0].cells
+        for col_idx, header_text in enumerate(headers):
+            hdr_cells[col_idx].text = str(header_text)
+
+        for row_idx, row_data in enumerate(rows):
+            row_cells = table.rows[row_idx + 1].cells
+            for col_idx in range(num_cols):
+                val = row_data[col_idx] if col_idx < len(row_data) else ""
+                row_cells[col_idx].text = str(val)
+
+        save_dest = output_path if output_path else file_path
+        if not output_path and not overwrite:
+            return {
+                "error": "Overwriting the original file requires 'overwrite=True' or specifying an 'output_path'."
+            }
+
+        doc.save(save_dest)
+        return {
+            "status": "success",
+            "file_path": os.path.abspath(save_dest),
+            "columns": num_cols,
+            "rows_inserted": len(rows),
+            "table_index": len(doc.tables)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[str, Any]:
+    """
+    Extract author comments, tracked insertions, and tracked deletions from a Word document (.docx).
+    
+    Args:
+        file_path: Path to the .docx or .doc file.
+        max_items: Maximum items to extract per category (default: 50, max: 100).
+    """
+    try:
+        doc = load_document(file_path)
+        safe_max = min(max(1, max_items), 100)
+        comments = []
+        insertions = []
+        deletions = []
+
+        # 1. Search for comments in docx package parts
+        try:
+            import xml.etree.ElementTree as ET
+            for part in doc.part.package.parts:
+                if "comments" in part.partname:
+                    root = ET.fromstring(part.blob)
+                    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                    for c_elem in root.findall(".//w:comment", ns):
+                        cid = c_elem.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}id", "")
+                        author = c_elem.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author", "")
+                        date = c_elem.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}date", "")
+                        text = "".join(c_elem.itertext()).strip()
+                        comments.append({
+                            "id": cid,
+                            "author": author,
+                            "date": date,
+                            "text": text[:200]
+                        })
+                        if len(comments) >= safe_max:
+                            break
+        except Exception:
+            pass
+
+        # 2. Search for tracked changes in body elements
+        try:
+            for ins in doc._element.xpath("//*[local-name()='ins']")[:safe_max]:
+                author = ins.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author", "")
+                date = ins.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}date", "")
+                text = "".join(ins.itertext()).strip()
+                if text:
+                    insertions.append({
+                        "author": author,
+                        "date": date,
+                        "text": text[:150]
+                    })
+            for d in doc._element.xpath("//*[local-name()='del']")[:safe_max]:
+                author = d.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author", "")
+                date = d.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}date", "")
+                text = "".join(d.itertext()).strip()
+                if text:
+                    deletions.append({
+                        "author": author,
+                        "date": date,
+                        "text": text[:150]
+                    })
+        except Exception:
+            pass
+
+        return {
+            "file_path": os.path.abspath(file_path),
+            "total_comments": len(comments),
+            "total_insertions": len(insertions),
+            "total_deletions": len(deletions),
+            "comments": comments,
+            "tracked_insertions": insertions,
+            "tracked_deletions": deletions
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 
