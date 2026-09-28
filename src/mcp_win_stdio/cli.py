@@ -20,6 +20,17 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# In monorepo development, dynamically discover packages/*/src if present
+_repo_packages = Path(__file__).resolve().parent.parent.parent / "packages"
+if _repo_packages.is_dir():
+    import pkgutil
+    for _sub in _repo_packages.glob("*/src"):
+        _s = str(_sub.resolve())
+        if _s not in sys.path:
+            sys.path.insert(0, _s)
+    if "mcp_win_stdio" in sys.modules:
+        sys.modules["mcp_win_stdio"].__path__ = pkgutil.extend_path(sys.modules["mcp_win_stdio"].__path__, "mcp_win_stdio")
+
 from mcp_win_stdio import __version__
 from mcp_win_stdio.core.config import INDALA_DIR, PLUGINS_DIR, ensure_workspace_dirs, load_config, save_config
 from mcp_win_stdio.core.discovery import BUILTIN_SERVERS, get_server_info, list_available_servers
@@ -34,12 +45,6 @@ from mcp_win_stdio.core.installer import (
     safe_apply_to_cli,
     safe_apply_to_desktop,
 )
-from mcp_win_stdio.guides.excel_guide import print_excel_guide
-from mcp_win_stdio.guides.explorer_guide import print_explorer_guide
-from mcp_win_stdio.guides.tsc_guide import print_tsc_guide
-from mcp_win_stdio.guides.word_guide import print_word_guide
-from mcp_win_stdio.guides.db_guide import print_db_guide
-from mcp_win_stdio.guides.git_guide import print_git_guide
 
 
 
@@ -87,24 +92,59 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 
 def cmd_guide(args: argparse.Namespace) -> None:
-    """Print guide and prompt recipes for a specific server."""
+    """Print guide and prompt recipes for a specific server or merged for all installed servers."""
     target = (args.server or "all").lower()
+    target_aliases = {
+        "github": "git",
+        "database": "db",
+        "workspace-explorer": "explorer",
+    }
+    target = target_aliases.get(target, target)
 
-    if target in ("excel", "all"):
-        print_excel_guide()
-    if target in ("word", "all"):
-        print_word_guide()
-    if target in ("explorer", "workspace-explorer", "all"):
-        print_explorer_guide()
-    if target in ("tsc", "all"):
-        print_tsc_guide()
-    if target in ("db", "database", "all"):
-        print_db_guide()
-    if target in ("git", "github", "all"):
-        print_git_guide()
+    known_servers = ["git", "db", "excel", "explorer", "word", "tsc"]
 
-    if target not in ("excel", "word", "explorer", "workspace-explorer", "tsc", "db", "database", "git", "github", "all"):
-        print(f"No built-in guide for '{target}'. Built-in guides: 'excel', 'word', 'explorer', 'tsc', 'db', 'git'.")
+    def _get_guide_func(srv_name: str):
+        # Look for guide function in server package or legacy guides module
+        for mod_path, func_name in [
+            (f"mcp_win_stdio.{srv_name}.guide", f"print_{srv_name}_guide"),
+            (f"mcp_win_stdio.guides.{srv_name}_guide", f"print_{srv_name}_guide"),
+        ]:
+            try:
+                mod = importlib.import_module(mod_path)
+                fn = getattr(mod, func_name, None)
+                if callable(fn):
+                    return fn
+            except (ImportError, ModuleNotFoundError):
+                continue
+        return None
+
+    if target == "all":
+        installed_count = 0
+        uninstalled = []
+        for srv in known_servers:
+            fn = _get_guide_func(srv)
+            if fn:
+                fn()
+                installed_count += 1
+            else:
+                uninstalled.append(srv)
+
+        if uninstalled:
+            print("\n" + "-" * 80)
+            print("💡 Additional Uninstalled MCP Modules:")
+            for u in uninstalled:
+                print(f"   • mcp-win-stdio-{u:<8} -> Install with: mws install {u}")
+            print("-" * 80 + "\n")
+    elif target in known_servers:
+        fn = _get_guide_func(target)
+        if fn:
+            fn()
+        else:
+            print(f"\n[!] Server '{target}' (mcp-win-stdio-{target}) is not currently installed.")
+            print(f"    -> Run: mws install {target}")
+            print(f"       (or: pip install mcp-win-stdio-{target})\n")
+    else:
+        print(f"Unknown server '{target}'. Known servers: {', '.join(known_servers)}.")
 
 
 def cmd_install(args: argparse.Namespace) -> None:
@@ -570,6 +610,14 @@ def main() -> None:
     # doctor
     sub_doctor = subparsers.add_parser("doctor", help="Check system health, dependencies, and COM readiness")
     sub_doctor.set_defaults(func=cmd_doctor)
+
+    # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
+    known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc"}
+    known_cmds = {"guide", "run", "setup", "doctor", "remove", "install"}
+    if len(sys.argv) >= 3 and sys.argv[1].lower() in known_srvs and sys.argv[2].lower() in known_cmds:
+        srv_token = sys.argv[1].lower()
+        cmd_token = sys.argv[2].lower()
+        sys.argv = [sys.argv[0], cmd_token, srv_token] + sys.argv[3:]
 
     args = parser.parse_args()
     if not args.command:

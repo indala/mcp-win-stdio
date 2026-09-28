@@ -33,16 +33,20 @@ def get_claude_cli_config_path() -> Optional[Path]:
 
 
 def get_server_exec_args(server_name: str) -> Tuple[str, List[str]]:
-    """Return the executable path and arguments for a given server."""
+    """Return guaranteed absolute executable path and arguments for a given server."""
     srv = get_server_info(server_name)
     if not srv:
         raise ValueError(f"Server '{server_name}' not found.")
 
-    python_exe = sys.executable.replace("\\", "/")
+    # 1. Prefer absolute path to mws executable if present on PATH
+    mws_bin = shutil.which("mws")
+    if mws_bin and Path(mws_bin).is_file():
+        return str(Path(mws_bin).resolve()).replace("\\", "/"), ["run", server_name]
 
+    # 2. Fallback to absolute Python interpreter executable
+    python_exe = str(Path(sys.executable).resolve()).replace("\\", "/")
     if srv["is_builtin"]:
-        # Execute via module runner
-        args = ["-m", srv["module"].rsplit(".", 1)[0]]  # e.g. -m mcp_win_stdio.excel
+        args = ["-m", "mcp_win_stdio.cli", "run", server_name]
     else:
         args = [srv["path"].replace("\\", "/")]
 

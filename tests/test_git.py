@@ -4,9 +4,11 @@ Unit and integration tests for mcp-win-stdio Git & GitHub MCP server.
 
 import os
 import sys
-sys.path.insert(0, os.path.abspath("src"))
-
 from pathlib import Path
+
+for p in Path("packages").glob("*/src"):
+    sys.path.insert(0, str(p.resolve()))
+sys.path.insert(0, os.path.abspath("src"))
 import shutil
 import subprocess
 import tempfile
