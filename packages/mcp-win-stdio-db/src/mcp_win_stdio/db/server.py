@@ -451,8 +451,16 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
     return {"schema": s or "public", "table": t, "notFound": True}
 
 
-def _truncate_cell(val: Any, max_chars: int = 500) -> Any:
-    """Truncate massive strings or raw binary data and serialize rich DB types (Decimal, UUID, datetime)."""
+PII_COLUMN_PATTERN = re.compile(
+    r"^(.*_)?(password|passwd|secret|hash|salt|token|auth|api_key|private_key|card_number|credit_card|cvv|cvc|ssn|pin|access_token)(_.*)?$",
+    re.IGNORECASE
+)
+
+
+def _truncate_cell(val: Any, max_chars: int = 500, is_sensitive: bool = False) -> Any:
+    """Truncate massive strings or raw binary data and serialize rich DB types (Decimal, UUID, datetime). Masks PII if flagged."""
+    if is_sensitive and val is not None:
+        return "[REDACTED_SENSITIVE]"
     if val is None:
         return None
     if isinstance(val, (bytes, bytearray, memoryview)):
@@ -464,9 +472,9 @@ def _truncate_cell(val: Any, max_chars: int = 500) -> Any:
     if isinstance(val, uuid.UUID):
         return str(val)
     if isinstance(val, (set, tuple)):
-        return [_truncate_cell(x, max_chars) for x in val]
+        return [_truncate_cell(x, max_chars, is_sensitive) for x in val]
     if isinstance(val, dict):
-        return {k: _truncate_cell(v, max_chars) for k, v in val.items()}
+        return {k: _truncate_cell(v, max_chars, is_sensitive) for k, v in val.items()}
     if isinstance(val, str):
         if len(val) > max_chars:
             return val[:max_chars] + f"... [truncated {len(val) - max_chars} chars]"
@@ -474,9 +482,13 @@ def _truncate_cell(val: Any, max_chars: int = 500) -> Any:
     return val
 
 
-def _truncate_row(row: Dict[str, Any], max_chars: int = 500) -> Dict[str, Any]:
-    """Truncate all values in a single row dictionary."""
-    return {k: _truncate_cell(v, max_chars) for k, v in row.items()}
+def _truncate_row(row: Dict[str, Any], max_chars: int = 500, mask_sensitive: bool = False) -> Dict[str, Any]:
+    """Truncate all values in a single row dictionary, optionally masking PII / sensitive credentials."""
+    res = {}
+    for k, v in row.items():
+        is_sens = mask_sensitive and bool(PII_COLUMN_PATTERN.match(k))
+        res[k] = _truncate_cell(v, max_chars, is_sensitive=is_sens)
+    return res
 
 
 # ==========================================
@@ -772,6 +784,168 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
 
 
 @mcp.tool()
+def get_table_ddl(
+    tableName: str,
+    schema: Optional[str] = None,
+    connection: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Reconstruct and return the complete, ground-truth CREATE TABLE DDL statement for a table.
+    Includes all column types, defaults, nullability, primary keys, foreign keys (with ON DELETE/ON UPDATE actions),
+    unique/check constraints, and separate table indexes.
+    
+    Args:
+        tableName: Name of the table.
+        schema: Optional schema name (defaults to 'public' or auto-resolves in PostgreSQL).
+        connection: Optional connection name (defaults to active connection).
+    """
+    try:
+        info = _get_connection(connection)
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                with conn.cursor() as cur:
+                    resolved = _resolve_pg_table(cur, tableName, schema)
+                    if resolved.get("notFound"):
+                        return {
+                            "error": True,
+                            "code": "42P01",
+                            "message": f"Table '{tableName}' not found in schema '{resolved['schema']}' or any user schema."
+                        }
+                    s = resolved["schema"]
+                    t = resolved["table"]
+
+                    # Columns
+                    cur.execute("""
+                    SELECT
+                        column_name,
+                        data_type,
+                        udt_name,
+                        character_maximum_length,
+                        numeric_precision,
+                        numeric_scale,
+                        is_nullable,
+                        column_default
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY ordinal_position;
+                    """, (s, t))
+                    cols = cur.fetchall()
+                    if not cols:
+                        return {"error": True, "message": f"Table '{s}.{t}' has no columns."}
+
+                    col_defs = []
+                    for c in cols:
+                        c_name = c["column_name"]
+                        d_type = c["data_type"]
+                        udt = c["udt_name"]
+                        char_len = c["character_maximum_length"]
+                        num_prec = c["numeric_precision"]
+                        num_scale = c["numeric_scale"]
+                        nullable = c["is_nullable"] == "YES"
+                        default = c["column_default"]
+
+                        if d_type == "character varying":
+                            type_str = f"varchar({char_len})" if char_len else "varchar"
+                        elif d_type == "character":
+                            type_str = f"char({char_len})" if char_len else "char"
+                        elif d_type == "numeric":
+                            if num_prec and num_scale:
+                                type_str = f"numeric({num_prec},{num_scale})"
+                            elif num_prec:
+                                type_str = f"numeric({num_prec})"
+                            else:
+                                type_str = "numeric"
+                        elif d_type == "USER-DEFINED":
+                            type_str = udt
+                        elif d_type == "ARRAY":
+                            type_str = f"{udt.lstrip('_')}[]"
+                        else:
+                            type_str = d_type
+
+                        parts = [f'"{c_name}" {type_str}']
+                        if not nullable:
+                            parts.append("NOT NULL")
+                        if default:
+                            parts.append(f"DEFAULT {default}")
+                        col_defs.append("    " + " ".join(parts))
+
+                    # Constraints (PK, Unique, Check, FK)
+                    cur.execute("""
+                    SELECT
+                        con.conname AS constraint_name,
+                        con.contype AS constraint_type,
+                        pg_get_constraintdef(con.oid, true) AS definition
+                    FROM pg_constraint con
+                    JOIN pg_class rel ON rel.oid = con.conrelid
+                    JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                    WHERE nsp.nspname = %s AND rel.relname = %s
+                    ORDER BY con.contype, con.conname;
+                    """, (s, t))
+                    constraints = cur.fetchall()
+
+                    for con in constraints:
+                        con_name = con["constraint_name"]
+                        con_def = con["definition"]
+                        col_defs.append(f'    CONSTRAINT "{con_name}" {con_def}')
+
+                    body = ",\n".join(col_defs)
+                    ddl = f'CREATE TABLE "{s}"."{t}" (\n{body}\n);'
+
+                    # Indexes (excluding those already generated by PK/UQ constraints)
+                    cur.execute("""
+                    SELECT indexname, indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = %s AND tablename = %s
+                      AND indexname NOT IN (
+                          SELECT conname FROM pg_constraint con
+                          JOIN pg_class rel ON rel.oid = con.conrelid
+                          JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                          WHERE nsp.nspname = %s AND rel.relname = %s AND con.contype IN ('p', 'u')
+                      )
+                    ORDER BY indexname;
+                    """, (s, t, s, t))
+                    idx_rows = cur.fetchall()
+                    indexes = [r["indexdef"] + ";" for r in idx_rows]
+                    if indexes:
+                        full_ddl = ddl + "\n\n-- Indexes\n" + "\n".join(indexes)
+                    else:
+                        full_ddl = ddl
+
+                    return {
+                        "connection": info["name"],
+                        "database": info["database"],
+                        "schema": s,
+                        "table": t,
+                        "engine": "postgres",
+                        "ddl": full_ddl,
+                        "indexesCount": len(indexes),
+                        "constraintsCount": len(constraints)
+                    }
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SHOW CREATE TABLE `{tableName}`;")
+                    row = cur.fetchone()
+                    ddl = row.get("Create Table") or row.get("CREATE TABLE") or str(row)
+                    return {
+                        "connection": info["name"],
+                        "database": info["database"],
+                        "table": tableName,
+                        "engine": "mysql",
+                        "ddl": ddl + ";"
+                    }
+            finally:
+                conn.close()
+    except Exception as e:
+        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        return _format_db_error(e, engine)
+
+
+@mcp.tool()
 def schema_overview(
     schema: Optional[str] = "public",
     connection: Optional[str] = None,
@@ -860,8 +1034,167 @@ def schema_overview(
 
 
 @mcp.tool()
-def get_table_sample(tableName: str, limit: int = 5, schema: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
-    """Fetch sample rows from a table along with column metadata and row count estimate."""
+def compact_schema_overview(
+    schema: Optional[str] = "public",
+    connection: Optional[str] = None,
+    max_tables: int = 80
+) -> Dict[str, Any]:
+    """
+    Token-optimized compact schema overview returning ultra-concise 1-line table definitions.
+    Example: '• props_management.materials (id: uuid PK, material_number: varchar UQ, department_id: uuid FK->departments)'
+    Condenses 50+ enterprise tables into <1000 tokens to protect context windows.
+    
+    Args:
+        schema: Target schema name or 'all' (PostgreSQL, default: 'public').
+        connection: Optional target database connection.
+        max_tables: Maximum number of tables to include (default: 80, max 150).
+    """
+    safe_max = min(max(1, max_tables), 150)
+    try:
+        info = _get_connection(connection)
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                with conn.cursor() as cur:
+                    is_all = (schema or "public").lower() == "all"
+                    sql = """
+                    SELECT n.nspname AS schema, c.relname AS table_name
+                    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind IN ('r', 'p')
+                    """
+                    params = []
+                    if is_all:
+                        sql += " AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast') AND n.nspname NOT LIKE 'pg_temp_%'"
+                    else:
+                        sql += " AND n.nspname = %s"
+                        params.append(schema or "public")
+                    sql += " ORDER BY n.nspname, c.relname;"
+                    cur.execute(sql, tuple(params))
+                    tables = cur.fetchall()
+
+                    display_tables = tables[:safe_max]
+                    compact_lines = []
+
+                    for tbl in display_tables:
+                        s_name = tbl["schema"]
+                        t_name = tbl["table_name"]
+                        cur.execute("""
+                        SELECT
+                            c.column_name,
+                            c.data_type,
+                            c.udt_name,
+                            (SELECT con.contype
+                             FROM pg_constraint con
+                             JOIN pg_class rel ON rel.oid = con.conrelid
+                             JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY(con.conkey)
+                             JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                             WHERE nsp.nspname = %s AND rel.relname = %s AND att.attname = c.column_name
+                             LIMIT 1) AS constraint_type,
+                            (SELECT pg_get_constraintdef(con.oid)
+                             FROM pg_constraint con
+                             JOIN pg_class rel ON rel.oid = con.conrelid
+                             JOIN pg_attribute att ON att.attrelid = rel.oid AND att.attnum = ANY(con.conkey)
+                             JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                             WHERE nsp.nspname = %s AND rel.relname = %s AND att.attname = c.column_name AND con.contype = 'f'
+                             LIMIT 1) AS fk_def
+                        FROM information_schema.columns c
+                        WHERE c.table_schema = %s AND c.table_name = %s
+                        ORDER BY c.ordinal_position;
+                        """, (s_name, t_name, s_name, t_name, s_name, t_name))
+                        cols = cur.fetchall()
+
+                        parts = []
+                        for col in cols:
+                            c_name = col["column_name"]
+                            c_type = col["udt_name"] if col["data_type"] == "USER-DEFINED" else col["data_type"]
+                            ctype = col.get("constraint_type")
+                            tag = ""
+                            if ctype == "p":
+                                tag = " PK"
+                            elif ctype == "u":
+                                tag = " UQ"
+                            elif ctype == "f":
+                                fk = col.get("fk_def") or ""
+                                m = re.search(r"REFERENCES\s+([^\s\(]+)", fk, re.IGNORECASE)
+                                ref_target = m.group(1).replace('"', '') if m else "FK"
+                                tag = f" FK->{ref_target}"
+                            parts.append(f"{c_name}: {c_type}{tag}")
+
+                        compact_lines.append(f"• {s_name}.{t_name} (" + ", ".join(parts) + ")")
+
+                    has_more = len(tables) > safe_max
+                    return {
+                        "connection": info["name"],
+                        "database": info["database"],
+                        "totalTables": len(tables),
+                        "returnedTables": len(compact_lines),
+                        "truncated": has_more,
+                        "compactSummary": compact_lines
+                    }
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;")
+                    tables = [r.get("table_name") or r.get("TABLE_NAME") for r in cur.fetchall()]
+
+                    display_tables = tables[:safe_max]
+                    compact_lines = []
+
+                    for t_name in display_tables:
+                        cur.execute(f"DESCRIBE `{t_name}`;")
+                        cols = cur.fetchall()
+                        parts = []
+                        for col in cols:
+                            f = col.get("Field") or col.get("field")
+                            t = col.get("Type") or col.get("type")
+                            k = col.get("Key") or col.get("key")
+                            tag = ""
+                            if k == "PRI":
+                                tag = " PK"
+                            elif k == "UNI":
+                                tag = " UQ"
+                            elif k == "MUL":
+                                tag = " IDX"
+                            parts.append(f"{f}: {t}{tag}")
+                        compact_lines.append(f"• {t_name} (" + ", ".join(parts) + ")")
+
+                    return {
+                        "connection": info["name"],
+                        "database": info["database"],
+                        "totalTables": len(tables),
+                        "returnedTables": len(compact_lines),
+                        "truncated": len(tables) > safe_max,
+                        "compactSummary": compact_lines
+                    }
+            finally:
+                conn.close()
+    except Exception as e:
+        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        return _format_db_error(e, engine)
+
+
+@mcp.tool()
+def get_table_sample(
+    tableName: str,
+    limit: int = 5,
+    schema: Optional[str] = None,
+    mask_sensitive: bool = True,
+    connection: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Fetch sample rows from a table along with column metadata and row count estimate.
+    Automatically masks PII and credentials (passwords, tokens, keys) unless mask_sensitive=False.
+    
+    Args:
+        tableName: Name of the table to sample.
+        limit: Number of sample rows to retrieve (default 5, max 100).
+        schema: Optional schema name (PostgreSQL).
+        mask_sensitive: Whether to redact sensitive columns like passwords, secrets, and tokens (default True).
+        connection: Optional target database connection.
+    """
     lim = min(max(limit, 1), 100)
     try:
         info = _get_connection(connection)
@@ -874,12 +1207,13 @@ def get_table_sample(tableName: str, limit: int = 5, schema: Optional[str] = Non
                     t = resolved["table"]
                     cur.execute(f'SELECT * FROM "{s}"."{t}" LIMIT %s;', (lim,))
                     rows = cur.fetchall()
-                    cleaned_rows = [_truncate_row(r) for r in rows]
+                    cleaned_rows = [_truncate_row(r, mask_sensitive=mask_sensitive) for r in rows]
                     return {
                         "connection": info["name"],
                         "database": info["database"],
                         "table": t,
                         "schema": s,
+                        "maskedSensitiveData": mask_sensitive,
                         "sampleCount": len(cleaned_rows),
                         "sampleRows": cleaned_rows
                     }
@@ -891,11 +1225,12 @@ def get_table_sample(tableName: str, limit: int = 5, schema: Optional[str] = Non
                 with conn.cursor() as cur:
                     cur.execute(f"SELECT * FROM `{tableName}` LIMIT %s;", (lim,))
                     rows = cur.fetchall()
-                    cleaned_rows = [_truncate_row(r) for r in rows]
+                    cleaned_rows = [_truncate_row(r, mask_sensitive=mask_sensitive) for r in rows]
                     return {
                         "connection": info["name"],
                         "database": info["database"],
                         "table": tableName,
+                        "maskedSensitiveData": mask_sensitive,
                         "sampleCount": len(cleaned_rows),
                         "sampleRows": cleaned_rows
                     }
@@ -2021,6 +2356,36 @@ def compare_schemas(
                     "type_mismatches": type_mismatches
                 })
 
+        # Generate migration SQL to bring target up to source
+        migration_sql: List[str] = []
+        sch = schema or "public"
+
+        for tbl in missing_in_target:
+            migration_sql.append(f"-- Table '{tbl}' exists in source but not in target")
+            cols_ddl = ", ".join(
+                f"{col} {typ.split(' (')[0]}"
+                for col, typ in source_tables[tbl].items()
+            )
+            migration_sql.append(f"CREATE TABLE {sch}.{tbl} ({cols_ddl});")
+
+        for disc in discrepancies:
+            tbl = disc["table"]
+            for col in disc["missing_columns_in_target"]:
+                raw_type = source_tables[tbl][col].split(" (")[0]
+                nullable = "NOT NULL" if "NOT NULL" in source_tables[tbl][col] else ""
+                migration_sql.append(
+                    f"ALTER TABLE {sch}.{tbl} ADD COLUMN {col} {raw_type} {nullable}".strip() + ";"
+                )
+            for mm in disc["type_mismatches"]:
+                src_type = mm["source_type"].split(" (")[0]
+                migration_sql.append(
+                    f"-- Type mismatch on {tbl}.{mm['column']}: "
+                    f"source={src_type}, target={mm['target_type'].split(' (')[0]}"
+                )
+                migration_sql.append(
+                    f"ALTER TABLE {sch}.{tbl} ALTER COLUMN {mm['column']} TYPE {src_type};"
+                )
+
         return {
             "source_connection": source_connection,
             "target_connection": target_connection,
@@ -2029,10 +2394,170 @@ def compare_schemas(
             "tables_only_in_target": extra_in_target,
             "common_tables_count": len(common_tables),
             "discrepancies_count": len(discrepancies),
-            "table_discrepancies": discrepancies
+            "table_discrepancies": discrepancies,
+            "migration_sql": migration_sql,
+            "migration_sql_hint": (
+                "Apply migration_sql statements to bring the target schema up to source."
+                if migration_sql else "Schemas are identical — no migration needed."
+            )
         }
     except Exception as e:
         return _format_db_error(e)
+
+
+@mcp.tool()
+def audit_database_health(
+    schema: Optional[str] = "public",
+    connection: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Comprehensive database-wide health audit for PostgreSQL.
+    Returns three categories of actionable findings:
+      1. unindexed_foreign_keys  — FK columns with no supporting index (causes slow JOINs).
+      2. unused_indexes          — Indexes with zero scans since last stats reset (candidates for DROP).
+      3. bloated_tables          — Tables with >20% dead tuples that need VACUUM.
+
+    Args:
+        schema:     Schema to audit (default: 'public'). Use '*' for all schemas.
+        connection: Named connection to use; defaults to active connection.
+    """
+    try:
+        info = _get_connection(connection)
+        if info["engine"] != "postgres":
+            return {"error": "audit_database_health requires PostgreSQL. MySQL is not supported."}
+
+        conn = _get_pg_client(info)
+        try:
+            with conn.cursor() as cur:
+                sch_filter = "" if schema == "*" else f"AND kcu.table_schema = '{schema}'"
+                sch_filter_idx = "" if schema == "*" else f"AND schemaname = '{schema}'"
+
+                # ── 1. Unindexed Foreign Keys ─────────────────────────────────────────
+                cur.execute(f"""
+                    SELECT
+                        kcu.table_schema,
+                        kcu.table_name,
+                        kcu.column_name,
+                        ccu.table_name  AS references_table,
+                        ccu.column_name AS references_column
+                    FROM information_schema.key_column_usage kcu
+                    JOIN information_schema.referential_constraints rc
+                        ON kcu.constraint_name = rc.constraint_name
+                        AND kcu.constraint_schema = rc.constraint_schema
+                    JOIN information_schema.constraint_column_usage ccu
+                        ON rc.unique_constraint_name = ccu.constraint_name
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM pg_index pi
+                        JOIN pg_class pc ON pc.oid = pi.indrelid
+                        JOIN pg_attribute pa ON pa.attrelid = pc.oid AND pa.attnum = ANY(pi.indkey)
+                        JOIN pg_namespace pn ON pn.oid = pc.relnamespace
+                        WHERE pc.relname = kcu.table_name
+                          AND pn.nspname  = kcu.table_schema
+                          AND pa.attname  = kcu.column_name
+                    )
+                    {sch_filter}
+                    ORDER BY kcu.table_schema, kcu.table_name, kcu.column_name
+                """)
+                unindexed_fks = [
+                    {
+                        "schema": r["table_schema"],
+                        "table": r["table_name"],
+                        "column": r["column_name"],
+                        "references": f"{r['references_table']}.{r['references_column']}",
+                        "fix": f"CREATE INDEX ON {r['table_schema']}.{r['table_name']}({r['column_name']});"
+                    }
+                    for r in cur.fetchall()
+                ]
+
+                # ── 2. Unused Indexes ────────────────────────────────────────────────
+                cur.execute(f"""
+                    SELECT
+                        schemaname,
+                        relname      AS table_name,
+                        indexrelname AS index_name,
+                        idx_scan,
+                        pg_size_pretty(pg_relation_size(indexrelid)) AS index_size
+                    FROM pg_stat_user_indexes
+                    WHERE idx_scan = 0
+                      AND indexrelname NOT LIKE '%_pkey'
+                    {sch_filter_idx}
+                    ORDER BY pg_relation_size(indexrelid) DESC
+                """)
+                unused_indexes = [
+                    {
+                        "schema": r["schemaname"],
+                        "table": r["table_name"],
+                        "index": r["index_name"],
+                        "scans": r["idx_scan"],
+                        "size": r["index_size"],
+                        "fix": f"DROP INDEX CONCURRENTLY {r['schemaname']}.{r['index_name']};"
+                    }
+                    for r in cur.fetchall()
+                ]
+
+                # ── 3. Bloated Tables ────────────────────────────────────────────────
+                cur.execute(f"""
+                    SELECT
+                        schemaname,
+                        relname                                          AS table_name,
+                        n_live_tup,
+                        n_dead_tup,
+                        CASE WHEN n_live_tup + n_dead_tup = 0 THEN 0
+                             ELSE ROUND(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1)
+                        END                                              AS dead_pct,
+                        pg_size_pretty(pg_total_relation_size(relid))    AS table_size,
+                        last_autovacuum,
+                        last_vacuum
+                    FROM pg_stat_user_tables
+                    WHERE n_dead_tup > 0
+                      AND (n_live_tup + n_dead_tup) > 0
+                      AND (100.0 * n_dead_tup / (n_live_tup + n_dead_tup)) > 20
+                    {sch_filter_idx}
+                    ORDER BY dead_pct DESC
+                """)
+                bloated_tables = [
+                    {
+                        "schema": r["schemaname"],
+                        "table": r["table_name"],
+                        "live_rows": r["n_live_tup"],
+                        "dead_rows": r["n_dead_tup"],
+                        "dead_pct": float(r["dead_pct"]),
+                        "size": r["table_size"],
+                        "last_autovacuum": str(r["last_autovacuum"]) if r["last_autovacuum"] else None,
+                        "last_vacuum": str(r["last_vacuum"]) if r["last_vacuum"] else None,
+                        "fix": f"VACUUM ANALYZE {r['schemaname']}.{r['table_name']};"
+                    }
+                    for r in cur.fetchall()
+                ]
+
+                overall = "healthy"
+                if unindexed_fks or unused_indexes or bloated_tables:
+                    overall = "warnings_found"
+
+                return {
+                    "connection": info["name"],
+                    "database": info["database"],
+                    "schema_filter": schema,
+                    "overall_status": overall,
+                    "summary": {
+                        "unindexed_foreign_keys": len(unindexed_fks),
+                        "unused_indexes": len(unused_indexes),
+                        "bloated_tables": len(bloated_tables)
+                    },
+                    "unindexed_foreign_keys": unindexed_fks,
+                    "unused_indexes": unused_indexes,
+                    "bloated_tables": bloated_tables,
+                    "hint": (
+                        "Each finding includes a 'fix' field with the recommended SQL statement."
+                        if overall == "warnings_found" else
+                        "No health issues detected in the audited schema."
+                    )
+                }
+        finally:
+            conn.close()
+    except Exception as e:
+        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        return _format_db_error(e, engine)
 
 
 def main():

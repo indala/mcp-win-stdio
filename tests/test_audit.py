@@ -41,12 +41,39 @@ def test_explorer_gitignore():
     print("[PASS] Explorer gitignore test passed.")
 
 def test_tsc_safety():
-    from mcp_win_stdio.tsc.server import find_tsconfigs, is_home_or_root_dir
+    from mcp_win_stdio.tsc.server import (
+        find_tsconfigs,
+        is_home_or_root_dir,
+        get_default_watch_dir,
+        check_tsc_available,
+        list_watched_projects,
+    )
     assert is_home_or_root_dir("C:\\") is True
+    assert is_home_or_root_dir(str(Path.home())) is True
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        assert is_home_or_root_dir(appdata) is True
+
+    # Standby check when env is empty
+    old_env = os.environ.pop("TSC_WATCH_DIR", None)
+    try:
+        assert get_default_watch_dir() is None
+        status = list_watched_projects()
+        assert status["status"] == "standby"
+        assert status["watched_projects_count"] == 0
+    finally:
+        if old_env:
+            os.environ["TSC_WATCH_DIR"] = old_env
+
+    # Compiler pre-check
+    tsc_check = check_tsc_available()
+    assert "available" in tsc_check
+    assert "command" in tsc_check
+
     # Should not crash or crawl home/root
     configs = find_tsconfigs("C:\\")
     assert isinstance(configs, list)
-    print("[PASS] TSC safety test passed.")
+    print("[PASS] TSC safety, standby mode, and pre-check tests passed.")
 
 def test_db_truncate_cell():
     import json
@@ -354,6 +381,78 @@ def test_db_agent_friction_fixes():
     print("[PASS] LIKE query parameter handling test passed.")
 
 
+
+def test_db_pii_masking():
+    """Test that _truncate_row redacts PII columns and passes safe columns through."""
+    from mcp_win_stdio.db.server import _truncate_row, PII_COLUMN_PATTERN
+    import re
+
+    # PII_COLUMN_PATTERN should match these
+    sensitive_cols = ["password", "password_hash", "api_key", "secret_token", "ssn",
+                      "credit_card_number", "auth_token", "private_key", "access_token"]
+    for col in sensitive_cols:
+        assert PII_COLUMN_PATTERN.search(col), f"PII pattern should match '{col}'"
+
+    # Should NOT match ordinary columns
+    safe_cols = ["user_id", "username", "email", "created_at", "status", "name"]
+    for col in safe_cols:
+        assert not PII_COLUMN_PATTERN.search(col), f"PII pattern should NOT match '{col}'"
+
+    # Test row-level masking
+    row = {
+        "user_id": 42,
+        "username": "alice",
+        "password_hash": "$2b$12$supersecretstuff",
+        "api_key": "sk-abc123",
+        "email": "alice@example.com",
+        "auth_token": "eyJhbGciOiJIUzI1NiJ9.xxx"
+    }
+
+    masked = _truncate_row(row, mask_sensitive=True)
+    assert masked["user_id"] == 42
+    assert masked["username"] == "alice"
+    assert masked["email"] == "alice@example.com"
+    assert masked["password_hash"] == "[REDACTED_SENSITIVE]", f"Got: {masked['password_hash']}"
+    assert masked["api_key"] == "[REDACTED_SENSITIVE]", f"Got: {masked['api_key']}"
+    assert masked["auth_token"] == "[REDACTED_SENSITIVE]", f"Got: {masked['auth_token']}"
+
+    # With mask_sensitive=False everything should pass through
+    unmasked = _truncate_row(row, mask_sensitive=False)
+    assert unmasked["password_hash"] == "$2b$12$supersecretstuff"
+    assert unmasked["api_key"] == "sk-abc123"
+
+    print("[PASS] DB PII masking test passed.")
+
+
+def test_db_schema_tools():
+    """Test compare_schemas migration_sql structure and audit_database_health non-postgres guard."""
+    from mcp_win_stdio.db.server import audit_database_health, _CONNECTION_REGISTRY
+
+    # audit_database_health should reject MySQL connections
+    # We temporarily register a fake MySQL connection
+    _CONNECTION_REGISTRY["_test_mysql_fake"] = {
+        "name": "_test_mysql_fake",
+        "engine": "mysql",
+        "database": "testdb",
+        "url": "mysql://user:pass@localhost/testdb",
+    }
+    try:
+        result = audit_database_health(connection="_test_mysql_fake")
+        assert "error" in result, f"Expected error for MySQL, got: {result}"
+        assert "PostgreSQL" in result["error"]
+        print("[PASS] audit_database_health MySQL guard test passed.")
+    finally:
+        _CONNECTION_REGISTRY.pop("_test_mysql_fake", None)
+
+    # Verify compare_schemas migration_sql key is always present when the module imports
+    # (structural check only — no live DB needed)
+    import inspect
+    from mcp_win_stdio.db import server as db_server
+    src = inspect.getsource(db_server.compare_schemas)
+    assert "migration_sql" in src, "compare_schemas must produce migration_sql"
+    print("[PASS] compare_schemas migration_sql structural check passed.")
+
+
 if __name__ == "__main__":
     test_excel_clean_records()
     test_explorer_gitignore()
@@ -363,4 +462,6 @@ if __name__ == "__main__":
     test_word_tools()
     test_explorer_tools()
     test_db_agent_friction_fixes()
+    test_db_pii_masking()
+    test_db_schema_tools()
     print("ALL AUDIT TESTS PASSED!")

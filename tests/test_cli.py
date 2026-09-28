@@ -38,7 +38,7 @@ def test_discovery():
     assert servers["word"]["tools_count"] == 10
     assert servers["explorer"]["tools_count"] == 11
     assert servers["tsc"]["tools_count"] == 6
-    assert servers["db"]["tools_count"] == 20
+    assert servers["db"]["tools_count"] == 23
     assert servers["git"]["tools_count"] == 26
     print("[PASS] Discovery test passed for all 6 servers.")
 

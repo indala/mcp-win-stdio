@@ -8,10 +8,12 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ## 🚀 Features (6 Tools)
 
+- **Zero Admin / AppData Crawling (Safe Standby Mode)**: If `TSC_WATCH_DIR` is not explicitly set, the server boots safely into standby mode. It never scans user profile roots (`C:\Users\admin`), `AppData`, or system directories.
+- **Compiler Pre-Flight Check**: Checks for `tsc` availability (project `node_modules`, global `tsc`, or `npx tsc`) *before* scanning the filesystem, reporting clear installation guidance if missing.
 - **0ms Diagnostic Cache**: Checks compilation errors instantly from memory without spawning slow CLI processes on each turn.
-- **Multi-Project Auto-Discovery**: Automatically scans and watches all `tsconfig.json` configurations across subdirectories.
+- **Multi-Project Auto-Discovery**: Automatically scans and watches all `tsconfig.json` configurations across project subdirectories.
 - **Token-Safe Error Summaries**: Provides high-level error counts, affected files, and top error codes (e.g. `TS2322`) to avoid flooding Claude's context window.
-- **Dynamic Watcher Management**: Add new projects on the fly or restart compiler workers without restarting the MCP server.
+- **Dynamic Watcher Management**: Add new projects on the fly (`watch_project`) or restart compiler workers without restarting the MCP server.
 
 ---
 
@@ -20,8 +22,8 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 1. `get_tsc_errors`: Returns all active compilation errors from cache (supports project/tsconfig filters).
 2. `get_file_errors`: Checks diagnostics for a specific `.ts`, `.tsx`, `.js`, or `.jsx` file.
 3. `get_error_summary`: Compact error counts per project and top 5 most common error codes.
-4. `list_watched_projects`: Lists all active `tsconfig.json` files and watcher statuses.
-5. `watch_project`: Dynamically registers and watches a new project directory at runtime.
+4. `list_watched_projects`: Lists all active `tsconfig.json` files and watcher statuses (or standby status).
+5. `watch_project`: Dynamically verifies `tsc`, scans for `tsconfig.json`, and starts background watchers for a target project directory at runtime.
 6. `restart_tsc_watcher`: Restarts compiler watchers and flushes the in-memory cache.
 
 ---
@@ -58,6 +60,9 @@ In `%APPDATA%\Claude\claude_desktop_config.json`:
   }
 }
 ```
+> [!NOTE]
+> If `TSC_WATCH_DIR` is omitted, the server starts in standby mode. You can tell Claude at any time:
+> *"Watch the project located at 'D:/projects/my-web-app'"* and Claude will use `watch_project` to begin monitoring.
 
 ---
 

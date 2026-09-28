@@ -36,37 +36,124 @@ ERROR_REGEX = re.compile(r"^([^(]+)\((\d+),(\d+)\):\s*(error|warning)\s*(TS\d+):
 
 
 def is_home_or_root_dir(p: str) -> bool:
-    """Check if path is the user home directory, root drive, or Windows system directory."""
+    """Check if path is the user home directory, root drive, or Windows system/AppData directory."""
     try:
         resolved = Path(p).resolve()
-        if resolved == Path.home().resolve() or resolved.parent == resolved:
+        home = Path.home().resolve()
+        # Home directory (e.g. C:\Users\admin) or root drive (e.g. C:\)
+        if resolved == home or resolved.parent == resolved:
             return True
-        windir = os.environ.get("WINDIR", "C:\\Windows")
-        if str(resolved).lower().startswith(windir.lower()):
+        # Parent of home (e.g. C:\Users)
+        if resolved == home.parent:
             return True
+
+        resolved_str = str(resolved).lower()
+
+        # Check against common system environment paths
+        for env_var in ("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "WINDIR", "SYSTEMROOT", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+            val = os.environ.get(env_var)
+            if val:
+                val_resolved = str(Path(val).resolve()).lower()
+                if resolved_str == val_resolved or resolved_str.startswith(val_resolved + "\\") or resolved_str.startswith(val_resolved + "/"):
+                    return True
+
+        # Check path parts directly for AppData or Windows system directories
+        parts_lower = [part.lower() for part in resolved.parts]
+        if any(part in ("appdata", "application data", "windows", "system32") for part in parts_lower):
+            return True
+
     except Exception:
         pass
     return False
 
 
-def get_default_watch_dir() -> str:
-    """Get project directory from env, config file, or current working directory."""
+def get_default_watch_dir() -> Optional[str]:
+    """
+    Get project directory from user environment variable (TSC_WATCH_DIR or PROJECT_ROOT) or stored config.
+    Returns None if not configured or if configured to a system/home/AppData directory.
+    NOTE: Does NOT default to cwd or admin home to avoid unintended scans.
+    """
     env_dir = os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT")
-    if env_dir and os.path.isdir(env_dir):
-        return os.path.abspath(env_dir)
+    if env_dir:
+        abs_env = os.path.abspath(env_dir)
+        if os.path.isdir(abs_env) and not is_home_or_root_dir(abs_env):
+            return abs_env
 
     # Check ~/.mcp-win-stdio/config.json
     try:
         from mcp_win_stdio.core.config import load_config
         cfg = load_config()
         stored_dir = cfg.get("tsc_watch_dir")
-        if stored_dir and os.path.isdir(stored_dir):
-            return os.path.abspath(stored_dir)
+        if stored_dir:
+            abs_stored = os.path.abspath(stored_dir)
+            if os.path.isdir(abs_stored) and not is_home_or_root_dir(abs_stored):
+                return abs_stored
     except Exception:
         pass
 
-    return os.path.abspath(os.getcwd())
+    return None
 
+
+def check_tsc_available(project_dir: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Check if TypeScript compiler (tsc) is available locally in project or globally on PATH.
+    Returns:
+        dict with keys: 'available' (bool), 'command' (list of str or None), 'type' (str), 'error' (str), 'guidance' (str)
+    """
+    # 1. Check local project node_modules/typescript/bin/tsc
+    if project_dir:
+        local_tsc_js = Path(project_dir) / "node_modules" / "typescript" / "bin" / "tsc"
+        if local_tsc_js.exists():
+            node_bin = shutil.which("node") or "node"
+            return {
+                "available": True,
+                "command": [node_bin, str(local_tsc_js)],
+                "type": "project_local_js",
+                "path": str(local_tsc_js),
+            }
+
+        # 2. Local node_modules/.bin/tsc.cmd on Windows
+        local_tsc_cmd = Path(project_dir) / "node_modules" / ".bin" / "tsc.cmd"
+        if local_tsc_cmd.exists():
+            return {
+                "available": True,
+                "command": [str(local_tsc_cmd)],
+                "type": "project_local_cmd",
+                "path": str(local_tsc_cmd),
+            }
+
+    # 3. Global tsc on PATH
+    global_tsc = shutil.which("tsc")
+    if global_tsc:
+        return {
+            "available": True,
+            "command": [global_tsc],
+            "type": "global_tsc",
+            "path": global_tsc,
+        }
+
+    # 4. Fallback to npx tsc
+    npx_bin = shutil.which("npx")
+    if npx_bin:
+        return {
+            "available": True,
+            "command": [npx_bin, "tsc"],
+            "type": "npx_tsc",
+            "path": npx_bin,
+        }
+
+    return {
+        "available": False,
+        "command": None,
+        "type": "missing",
+        "error": "TypeScript compiler ('tsc') not detected on system or inside project node_modules.",
+        "guidance": (
+            "To enable TypeScript diagnostics, install TypeScript:\n"
+            "  1. Project-local (recommended): npm install -D typescript\n"
+            "  2. Global: npm install -g typescript\n"
+            "  3. Ensure Node.js is installed: winget install --id OpenJS.NodeJS -e"
+        ),
+    }
 
 
 def normalize_path(p: str) -> str:
@@ -159,15 +246,17 @@ def parse_tsc_line(line: str, project_dir: str, root_dir: str) -> Optional[Dict[
     }
 
 
-def _watcher_loop(tsconfig_path: str, root_dir: str) -> None:
+def _watcher_loop(tsconfig_path: str, root_dir: str, cmd_base: Optional[List[str]] = None) -> None:
     """Worker thread running tsc --noEmit --watch in background."""
     project_dir = os.path.dirname(tsconfig_path)
-    cmd_base = resolve_tsc_command(project_dir)
+    if not cmd_base:
+        tsc_check = check_tsc_available(project_dir)
+        cmd_base = tsc_check.get("command")
 
     if not cmd_base:
         with CACHE_LOCK:
             if tsconfig_path in WATCHED_PROJECTS:
-                WATCHED_PROJECTS[tsconfig_path]["status"] = "error: tsc binary not found (install typescript)"
+                WATCHED_PROJECTS[tsconfig_path]["status"] = "error: tsc compiler not found (install typescript)"
         return
 
     full_cmd = cmd_base + ["--noEmit", "--watch", "--preserveWatchOutput", "-p", tsconfig_path]
@@ -226,9 +315,24 @@ def _watcher_loop(tsconfig_path: str, root_dir: str) -> None:
                 WATCHED_PROJECTS[tsconfig_path]["status"] = f"error: {str(e)}"
 
 
-def start_watching_project(target_dir: str) -> List[str]:
-    """Scan and start background watchers for all tsconfig.json in target_dir."""
+def start_watching_project(target_dir: str, cmd_base: Optional[List[str]] = None) -> List[str]:
+    """
+    Scan and start background watchers for all tsconfig.json in target_dir.
+    Verifies tsc compiler availability BEFORE scanning directory tree.
+    """
     abs_root = os.path.abspath(target_dir)
+
+    # Safety: Refuse to scan user home, root drive, or AppData
+    if is_home_or_root_dir(abs_root):
+        return []
+
+    # Verify tsc compiler is available BEFORE scanning filesystem
+    if not cmd_base:
+        tsc_check = check_tsc_available(abs_root)
+        if not tsc_check["available"]:
+            return []
+        cmd_base = tsc_check["command"]
+
     configs = find_tsconfigs(abs_root)
 
     for cfg in configs:
@@ -246,9 +350,10 @@ def start_watching_project(target_dir: str) -> List[str]:
                 "status": "initializing",
                 "last_updated": datetime.now(timezone.utc).isoformat(),
                 "process": None,
+                "cmd_base": cmd_base,
             }
 
-        t = threading.Thread(target=_watcher_loop, args=(norm_cfg, abs_root), daemon=True)
+        t = threading.Thread(target=_watcher_loop, args=(norm_cfg, abs_root, cmd_base), daemon=True)
         t.start()
 
     return configs
@@ -267,19 +372,15 @@ def _cleanup_watchers():
 
 atexit.register(_cleanup_watchers)
 
-# Initialize on import if explicitly configured or running in a project workspace
+# Startup initialization:
+# ONLY start watching if user explicitly configured TSC_WATCH_DIR, PROJECT_ROOT, or stored config.
+# If not configured, the watcher starts in standby mode (waiting for user/Claude to call watch_project).
+# This avoids any scanning of C:\Users\admin or AppData when spawned by Claude.
 _initial_root = get_default_watch_dir()
-if os.path.isdir(_initial_root):
-    is_explicit = bool(os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT"))
-    if not is_explicit:
-        has_project_marker = (
-            (Path(_initial_root) / "tsconfig.json").exists()
-            or (Path(_initial_root) / "package.json").exists()
-        )
-        if not is_home_or_root_dir(_initial_root) and has_project_marker:
-            start_watching_project(_initial_root)
-    else:
-        start_watching_project(_initial_root)
+if _initial_root and os.path.isdir(_initial_root) and not is_home_or_root_dir(_initial_root):
+    _tsc_status = check_tsc_available(_initial_root)
+    if _tsc_status["available"]:
+        start_watching_project(_initial_root, cmd_base=_tsc_status["command"])
 
 
 
@@ -644,6 +745,17 @@ def list_watched_projects() -> Dict[str, Any]:
                 "last_updated": data["last_updated"],
             })
 
+        if not projects:
+            return {
+                "watched_projects_count": 0,
+                "projects": [],
+                "status": "standby",
+                "message": (
+                    "Watcher is currently in standby mode (no projects being monitored). "
+                    "Define TSC_WATCH_DIR in your MCP environment or call watch_project(project_path) to start monitoring."
+                ),
+            }
+
         return {
             "watched_projects_count": len(projects),
             "projects": projects,
@@ -654,6 +766,7 @@ def list_watched_projects() -> Dict[str, Any]:
 def watch_project(project_path: str) -> Dict[str, Any]:
     """
     Dynamically add and watch a new TypeScript project or directory without restarting the MCP server.
+    First verifies TypeScript compiler availability and rejects system/AppData directories.
     """
     if not os.path.exists(project_path):
         return {"success": False, "error": f"Path not found: {project_path}"}
@@ -662,20 +775,43 @@ def watch_project(project_path: str) -> Dict[str, Any]:
     if os.path.isfile(project_path):
         project_path = os.path.dirname(project_path)
 
-    configs = start_watching_project(project_path)
+    abs_project = os.path.abspath(project_path)
+
+    # 1. Safety check: prevent crawling user home, root drive, or AppData
+    if is_home_or_root_dir(abs_project):
+        return {
+            "success": False,
+            "error": f"Refusing to watch system, user home, or AppData directory: '{abs_project}'. Please specify a specific project directory.",
+            "guidance": "Provide the path to your project folder (e.g. 'C:/Users/admin/projects/my-app').",
+        }
+
+    # 2. Check for tsc FIRST before scanning files
+    tsc_check = check_tsc_available(abs_project)
+    if not tsc_check["available"]:
+        return {
+            "success": False,
+            "error": tsc_check["error"],
+            "guidance": tsc_check["guidance"],
+            "project_path": normalize_path(abs_project),
+        }
+
+    # 3. Scan for tsconfig.json and start watchers
+    configs = start_watching_project(abs_project, cmd_base=tsc_check["command"])
     if not configs:
         return {
             "success": False,
-            "project_path": normalize_path(project_path),
+            "project_path": normalize_path(abs_project),
             "found_tsconfigs": [],
-            "error": f"No tsconfig.json found in '{project_path}' (searched up to 4 directories deep). Make sure this directory contains a TypeScript project.",
+            "error": f"No tsconfig.json found in '{abs_project}' (searched up to 4 directories deep). Make sure this directory contains a TypeScript project.",
         }
 
     return {
         "success": True,
-        "project_path": normalize_path(project_path),
+        "project_path": normalize_path(abs_project),
         "found_tsconfigs": configs,
-        "message": f"Started background TypeScript watchers for {len(configs)} configuration(s).",
+        "compiler_type": tsc_check.get("type"),
+        "compiler_command": " ".join(tsc_check.get("command", [])),
+        "message": f"Verified 'tsc' ({tsc_check.get('type')}) and started background watchers for {len(configs)} configuration(s).",
     }
 
 
@@ -690,6 +826,13 @@ def restart_tsc_watcher() -> Dict[str, Any]:
         WATCHED_PROJECTS.clear()
 
     default_root = get_default_watch_dir()
+    if not default_root:
+        return {
+            "success": True,
+            "restarted_configs": [],
+            "message": "Flushed watcher cache. Watcher is in standby mode. Set TSC_WATCH_DIR or call watch_project(project_path) to start monitoring a project.",
+        }
+
     configs = start_watching_project(default_root)
     return {
         "success": True,
