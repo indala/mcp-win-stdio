@@ -1,6 +1,27 @@
 # mcp-win-stdio-excel
 
-Windows-native **Model Context Protocol (MCP)** server for Microsoft Excel automation, Pandas querying, fuzzy reconciliation, and COM automation.
+Windows-native **Model Context Protocol (MCP)** server for Microsoft Excel: 20 tools combining high-speed Pandas querying, RapidFuzz reconciliation, OpenPyXL editing, and native Windows Excel COM automation.
+
+Part of the **`mcp-win-stdio`** Windows-optimized suite.
+
+---
+
+## 🚀 Features (20 Tools)
+
+- **Vectorized Data Queries**: High-speed Pandas slicing, filtering, and aggregation on large spreadsheets.
+- **Typo-Tolerant Reconciliation**: Pre-flight key diagnostics (`analyze_reconciliation_keys`) and fuzzy joins (`reconcile_and_merge`) producing clean 3-tab audit workbooks (`Matched`, `Unmatched_Source`, `Unmatched_Target`).
+- **OpenPyXL Direct Editing**: Safe cell updates, row appending, multi-sheet management, formula insertion, CSV/JSON export.
+- **Native Windows Excel COM Automation**: Background/visible Excel process control, formula recalculation, pivot table refreshes, PDF export, and VBA macro execution.
+
+---
+
+## 🛠️ Included Tools (20 Tools)
+
+* **Inspection**: `get_workbook_info`, `preview_sheet`, `get_column_values`, `compare_column_values`, `summarize_column`, `search_text`.
+* **Querying & Slices**: `query_rows` (Pandas vectorized expressions), `read_range`, `query_excel_sql`.
+* **Editing & Export**: `create_workbook`, `append_rows`, `update_cells`, `add_sheet`, `rename_sheet`, `delete_sheet`, `export_to_csv`, `export_to_json`.
+* **Reconciliation**: `analyze_reconciliation_keys`, `reconcile_and_merge`.
+* **Windows COM Automation**: `recalculate_and_save`, `export_to_pdf`, `refresh_data_and_pivots`, `run_vba_macro`, `get_active_excel_window`.
 
 ---
 
@@ -9,36 +30,43 @@ Windows-native **Model Context Protocol (MCP)** server for Microsoft Excel autom
 ```powershell
 pip install mcp-win-stdio-excel
 ```
-*(Pip also resolves `pip install mcp-win-stdio.excel` to this package)*.
+*(Installing this package automatically installs `mws` CLI orchestrator)*.
 
 ---
 
 ## 🚀 One-Command Claude Setup
 
 ```powershell
-mcp-win-stdio-excel setup
+mws setup excel
+# or:
+mws add excel
 ```
-Automatically configures Claude Desktop (`claude_desktop_config.json`) and Claude Code CLI (`claude mcp add`) with zero manual JSON editing.
+
+### Manual Configuration Example
+In `%APPDATA%\Claude\claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "excel": {
+      "command": "python",
+      "args": ["-m", "mcp_win_stdio.excel"]
+    }
+  }
+}
+```
 
 ---
 
-## 🛠️ Included Tools (20 Tools)
-
-* **Inspection**: `get_workbook_info`, `preview_sheet`, `summarize_column`, `search_text`
-* **Querying & Slices**: `query_rows` (Pandas vectorized expressions), `read_range`
-* **Editing**: `create_workbook`, `append_rows`, `update_cells`, `add_sheet`, `rename_sheet`, `delete_sheet`, `export_to_csv`
-* **Pre-flight & Reconciliation**: `analyze_reconciliation_keys` (pre-flight diagnostics), `reconcile_and_merge` (RapidFuzz fuzzy joins + 3-tab audit workbook)
-* **Native Windows COM**: `recalculate_and_save`, `export_to_pdf`, `refresh_data_and_pivots`, `run_vba_macro`, `get_active_excel_window`
-
----
-
-## 📖 CLI Commands
+## 📖 CLI Commands & Interactive Guide
 
 ```powershell
-mcp-win-stdio-excel setup    # Auto-add to Claude
-mcp-win-stdio-excel guide    # View prompts & tool guide
-mcp-win-stdio-excel doctor   # Verify dependencies & Excel COM readiness
-mcp-win-stdio-excel run      # Run over stdio
-mcp-win-stdio-excel remove   # Remove from Claude
+mws excel guide     # Complete tool reference & prompt recipes
+mws excel doctor    # Verify Excel COM automation, Pandas, and OpenPyXL
+mws excel setup     # Configure Claude Desktop / Claude Code
+mws excel run       # Launch server over stdio
 ```
-*(You can also use the shorthand alias `mws-excel`)*.
+
+---
+
+## 📜 License
+MIT License. Copyright (c) 2026 Mohan Kumar Indala.

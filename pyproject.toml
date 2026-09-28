@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio"
-version = "0.2.2"
+version = "0.2.3"
 description = "Windows-optimized Model Context Protocol (MCP) suite & interactive CLI hub for Claude Desktop & Claude Code CLI (Excel COM, Word layouts, Workspace Explorer, and TypeScript diagnostic watcher)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,30 +34,30 @@ dependencies = [
 
 [project.optional-dependencies]
 excel = [
-    "mcp-win-stdio-excel>=0.2.2",
+    "mcp-win-stdio-excel>=0.2.3",
 ]
 word = [
-    "mcp-win-stdio-word>=0.2.2",
+    "mcp-win-stdio-word>=0.2.3",
 ]
 explorer = [
-    "mcp-win-stdio-explorer>=0.2.2",
+    "mcp-win-stdio-explorer>=0.2.3",
 ]
 tsc = [
-    "mcp-win-stdio-tsc>=0.2.2",
+    "mcp-win-stdio-tsc>=0.2.3",
 ]
 db = [
-    "mcp-win-stdio-db>=0.2.2",
+    "mcp-win-stdio-db>=0.2.3",
 ]
 git = [
-    "mcp-win-stdio-git>=0.2.2",
+    "mcp-win-stdio-git>=0.2.3",
 ]
 all = [
-    "mcp-win-stdio-excel>=0.2.2",
-    "mcp-win-stdio-word>=0.2.2",
-    "mcp-win-stdio-explorer>=0.2.2",
-    "mcp-win-stdio-tsc>=0.2.2",
-    "mcp-win-stdio-db>=0.2.2",
-    "mcp-win-stdio-git>=0.2.2",
+    "mcp-win-stdio-excel>=0.2.3",
+    "mcp-win-stdio-word>=0.2.3",
+    "mcp-win-stdio-explorer>=0.2.3",
+    "mcp-win-stdio-tsc>=0.2.3",
+    "mcp-win-stdio-db>=0.2.3",
+    "mcp-win-stdio-git>=0.2.3",
 ]
 
 [project.scripts]
