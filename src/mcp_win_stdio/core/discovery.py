@@ -83,7 +83,18 @@ BUILTIN_SERVERS = {
         "dependencies": ["mcp"],
         "optional_dependencies": [],
     },
-
+    "ssh": {
+        "name": "ssh",
+        "package": "mcp-win-stdio-ssh",
+        "title": "Unified Multi-SSH MCP (Remote Execution & SFTP)",
+        "module": "mcp_win_stdio.ssh.server",
+        "description": "27 tools: multi-host pooling, ~/.ssh/config auto-discovery, interactive PTY shells, background jobs, systemd/docker services, package manager listing, SFTP file management, and port forwarding tunnels.",
+        "tools_count": 27,
+        "is_builtin": True,
+        "required_pip": ["mcp-win-stdio-ssh"],
+        "dependencies": ["paramiko", "cryptography"],
+        "optional_dependencies": [],
+    },
 }
 
 

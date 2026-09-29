@@ -127,7 +127,7 @@ def cmd_guide(args: argparse.Namespace) -> None:
     }
     target = target_aliases.get(target, target)
 
-    known_servers = ["git", "db", "excel", "explorer", "word", "tsc"]
+    known_servers = ["git", "db", "excel", "explorer", "word", "tsc", "ssh"]
 
     def _get_guide_func(srv_name: str):
         # Look for guide function in server package or legacy guides module
@@ -187,10 +187,11 @@ def cmd_install(args: argparse.Namespace) -> None:
             print("  [4] tsc       -> pip install mcp-win-stdio-tsc (TypeScript diagnostic watcher)")
             print("  [5] db        -> pip install mcp-win-stdio-db (PostgreSQL & MySQL DBA manager)")
             print("  [6] git       -> pip install mcp-win-stdio-git (Local Git + GitHub CLI)")
-            print("  [7] all       -> pip install \"mcp-win-stdio[all]\" (All 6 servers)")
-            print("  [8] Exit")
-            choice = input("\nEnter choice (1-8) [default: 7]: ").strip() or "7"
-            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "git", "7": "all"}
+            print("  [7] ssh       -> pip install mcp-win-stdio-ssh (Multi-host SSH, PTY, SFTP, Tunnels)")
+            print("  [8] all       -> pip install \"mcp-win-stdio[all]\" (All 7 servers)")
+            print("  [9] Exit")
+            choice = input("\nEnter choice (1-9) [default: 8]: ").strip() or "8"
+            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "git", "7": "ssh", "8": "all"}
             if choice not in mapping:
                 print("Installation cancelled.")
                 return
@@ -198,7 +199,7 @@ def cmd_install(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    selected_servers = ["excel", "word", "explorer", "tsc", "db", "git"] if target == "all" else [target]
+    selected_servers = ["excel", "word", "explorer", "tsc", "db", "git", "ssh"] if target == "all" else [target]
 
     if target == "all":
         print("\n==> 🚀 Installing full suite via 'pip install \"mcp-win-stdio[all]\"'...")
@@ -404,7 +405,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     target = args.server.lower()
     client = args.client.lower()
 
-    servers_to_remove = ["excel", "word", "explorer", "tsc", "db", "git"] if target == "all" else [target]
+    servers_to_remove = ["excel", "word", "explorer", "tsc", "db", "git", "ssh"] if target == "all" else [target]
 
     for srv_name in servers_to_remove:
         print(f"\nRemoving '{srv_name}'...")
@@ -462,10 +463,11 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             print("  [4] tsc       -> Uninstall mcp-win-stdio-tsc & remove from Claude")
             print("  [5] db        -> Uninstall mcp-win-stdio-db & remove from Claude")
             print("  [6] git       -> Uninstall mcp-win-stdio-git & remove from Claude")
-            print("  [7] all       -> Uninstall all 6 MCP servers & remove from Claude (keeps mws CLI)")
-            print("  [8] self      -> Uninstall mws CLI itself (mcp-win-stdio)")
-            print("  [9] Exit")
-            choice = input("\nEnter choice (1-9) [default: 7]: ").strip() or "7"
+            print("  [7] ssh       -> Uninstall mcp-win-stdio-ssh & remove from Claude")
+            print("  [8] all       -> Uninstall all 7 MCP servers & remove from Claude (keeps mws CLI)")
+            print("  [9] self      -> Uninstall mws CLI itself (mcp-win-stdio)")
+            print("  [10] Exit")
+            choice = input("\nEnter choice (1-10) [default: 8]: ").strip() or "8"
             mapping = {
                 "1": "excel",
                 "2": "word",
@@ -473,8 +475,9 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
                 "4": "tsc",
                 "5": "db",
                 "6": "git",
-                "7": "all",
-                "8": "self",
+                "7": "ssh",
+                "8": "all",
+                "9": "self",
             }
             if choice not in mapping:
                 print("Uninstall cancelled.")
@@ -483,7 +486,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    known_servers = ["excel", "word", "explorer", "tsc", "db", "git"]
+    known_servers = ["excel", "word", "explorer", "tsc", "db", "git", "ssh"]
 
     if target == "self":
         print("\n==> 🧹 Uninstalling mws CLI core package (mcp-win-stdio)...")
@@ -618,6 +621,8 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         ("win32com", "PyWin32 Windows COM Automation (Excel & Word)"),
         ("psycopg2", "PostgreSQL Adapter (Database MCP)"),
         ("pymysql", "MySQL Pure-Python Driver (Database MCP)"),
+        ("paramiko", "Paramiko SSH & SFTP Engine (SSH MCP)"),
+        ("cryptography", "Cryptography & Key Parsing (SSH MCP)"),
     ]
     print("\n--- Python Dependencies ---")
     for mod, desc in deps:
@@ -625,7 +630,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             importlib.import_module(mod)
             print(f"[OK] {mod:<14} : {desc}")
         except ImportError:
-            print(f"[MISSING] {mod:<10} : {desc}")
+            print(f"[MISSING] {mod:<14} : {desc}")
 
     # 3. Microsoft Office COM Automation
     print("\n--- Microsoft Office COM Automation ---")
@@ -706,7 +711,26 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     else:
         print(f"[INFO] GitHub CLI: Not installed (optional: winget install --id GitHub.cli -e)")
 
-    # 7. Claude Config Files
+    # 7. SSH Environment & Hosts
+    print("\n--- SSH Environment & Hosts ---")
+    ssh_bin = shutil.which("ssh")
+    print(f"[{'OK' if ssh_bin else 'INFO'}] OpenSSH Client: {ssh_bin or 'Not found on PATH (Paramiko built-in client active)'}")
+    ssh_dir = Path.home() / ".ssh"
+    if ssh_dir.is_dir():
+        keys = [f.name for f in ssh_dir.iterdir() if f.is_file() and not f.name.endswith(".pub") and "id_" in f.name]
+        print(f"[OK] SSH Config Directory: {ssh_dir} ({len(keys)} private keys found)")
+    else:
+        print(f"[INFO] SSH Config Directory: {ssh_dir} (empty/not yet created)")
+
+    try:
+        from mcp_win_stdio.ssh.connection import get_all_registered_hosts, get_active_host_name
+        ssh_hosts = get_all_registered_hosts()
+        active_ssh = get_active_host_name()
+        print(f"[OK] Registered SSH Hosts: {len(ssh_hosts)} host{'s' if len(ssh_hosts) != 1 else ''} (Active: {active_ssh or 'None'})")
+    except Exception:
+        pass
+
+    # 8. Claude Config Files
 
     print("\n--- Claude Configuration Targets ---")
     desktop_cfg = get_claude_desktop_config_path()

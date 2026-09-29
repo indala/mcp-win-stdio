@@ -8,11 +8,12 @@ Windows-optimized **Model Context Protocol (MCP)** suite and interactive CLI hub
 
 ---
 
-## 🌟 Highlights (103 Tools Across 6 Modular Servers)
+## 🌟 Highlights (130 Tools Across 7 Modular Servers)
 
 * **Interactive CLI Hub (`mws`)**: Run `mws` alone to view all servers, live installation status (`[Installed]` vs `[Not Installed]`), and quick commands.
 * **Safe, Transparent Setup (`mws setup <server>` / `mws add <server>`)**: Installs missing dependencies on-demand, generates exact copy-pasteable JSON configuration for Claude Desktop and Claude Code CLI, and asks confirmation before making any automated edits (always creating `.bak` backups).
-* **Dynamic Guide Merging (`mws guide [server]`)**: View comprehensive tool schemas, prompt recipes, and diagnostic checks for individual servers (`mws git guide`, `mws db guide`) or all installed servers merged (`mws guide all`).
+* **Dynamic Guide Merging (`mws guide [server]`)**: View comprehensive tool schemas, prompt recipes, and diagnostic checks for individual servers (`mws ssh guide`, `mws git guide`, `mws db guide`) or all installed servers merged (`mws guide all`).
+* **Multi-SSH & Remote Management MCP (27 Tools)**: Advanced multi-host connection pooling, auto-discovery of `~/.ssh/config` aliases/identity files/ProxyJump, sticky active host routing, command execution, elevated `sudo` automation, interactive PTY terminal sessions, detached background jobs, systemd/docker/pm2 service inspection, package listing, log tailing, comprehensive SFTP file management, and background local port forwarding tunnels.
 * **Git & GitHub MCP (33 Tools)**: Unified local Git repository management (init, remotes, restore, bookmarks, branching, commits, paginated diffs, conflicts) and remote GitHub CLI (`gh`) operations (PR checks, releases, issues, Actions) with hybrid synergy workflows.
 * **Polyglot Database MCP (23 Tools)**: Unified PostgreSQL & MySQL database manager with cross-database switching, cross-schema auto-resolution, fast JSON queries, DBA administrative operations (safety-guarded DROP, CREATE, CLONE), active connection monitoring, index health audits, schema diffing, and native dump/restore utilities.
 * **Excel MCP (20 Tools)**: High-speed Pandas data queries, multi-column reconciliation with RapidFuzz, cell & formula editing, and native Windows Excel COM automation (PDF exports, recalculation, pivot refreshes, VBA macros).
@@ -29,6 +30,7 @@ Each server is published as an independent, lightweight PyPI package. Installing
 
 | Server | Standalone Package | Tools | Primary Capabilities |
 | :--- | :--- | :---: | :--- |
+| **SSH** | `pip install mcp-win-stdio-ssh` | 27 | Multi-host pooling, ~/.ssh/config discovery, PTY shells, background jobs, systemd/docker, package management, SFTP, port forwarding |
 | **Git & GitHub** | `pip install mcp-win-stdio-git` | 33 | Local Git init/remotes/restore/bookmarks/branches, commits, diffs + GitHub PR checks, releases, issues, Actions |
 | **Database** | `pip install mcp-win-stdio-db` | 23 | PostgreSQL & MySQL pooling, cross-schema resolution, index audits, schema diffs, DBA management, dump/restore |
 | **Excel** | `pip install mcp-win-stdio-excel` | 20 | Pandas queries, RapidFuzz reconciliation, OpenPyXL, native Excel COM automation |
@@ -38,6 +40,7 @@ Each server is published as an independent, lightweight PyPI package. Installing
 
 ### Install Individual Servers:
 ```powershell
+pip install mcp-win-stdio-ssh
 pip install mcp-win-stdio-git
 pip install mcp-win-stdio-db
 pip install mcp-win-stdio-excel
@@ -69,7 +72,7 @@ mws
 Output:
 ```text
 ============================================================================
-   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.2.3)
+   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.2.4)
 ============================================================================
 
  Single-Source Hub:      C:\Users\admin\.mcp-win-stdio

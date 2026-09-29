@@ -3,16 +3,17 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-win-stdio-db"
+name = "mcp-win-stdio-ssh"
 version = "0.2.4"
-description = "Unified Database Model Context Protocol (MCP) server for PostgreSQL & MySQL: 20 tools for multi-server querying, DBA operations (create, drop, clone, dump, terminate), and cross-schema auto-resolution."
+description = "Advanced Multi-SSH Connection & Remote Management Model Context Protocol (MCP) server for Windows & Claude: 25+ tools for multi-host pooling, ~/.ssh/config auto-discovery, PTY interactive shells, SFTP file management, systemd/docker services, background jobs, and local port forwarding tunnels."
 readme = "README.md"
+
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "Mohan Kumar Indala" }
 ]
-keywords = ["mcp", "claude", "database", "postgres", "postgresql", "mysql", "mariadb", "dba", "ai", "llm"]
+keywords = ["mcp", "claude", "ssh", "sftp", "pty", "tunnels", "port-forwarding", "remote-management", "systemd", "docker", "ai", "llm", "windows"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
@@ -25,19 +26,19 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    "Topic :: Database",
+    "Topic :: System :: Systems Administration",
 ]
 
 dependencies = [
     "mcp-win-stdio>=0.2.4",
     "mcp>=1.2.0",
-    "psycopg2-binary>=2.9.0",
-    "pymysql>=1.1.0",
+    "paramiko>=3.0.0",
+    "cryptography>=3.3.0",
 ]
 
 [project.scripts]
-mcp-win-stdio-db = "mcp_win_stdio.db.cli:main"
-mws-db = "mcp_win_stdio.db.cli:main"
+mcp-win-stdio-ssh = "mcp_win_stdio.ssh.cli:main"
+mws-ssh = "mcp_win_stdio.ssh.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_win_stdio"]

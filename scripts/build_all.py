@@ -27,6 +27,7 @@ PACKAGES = [
     ROOT_DIR / "packages" / "mcp-win-stdio-tsc",
     ROOT_DIR / "packages" / "mcp-win-stdio-db",
     ROOT_DIR / "packages" / "mcp-win-stdio-git",
+    ROOT_DIR / "packages" / "mcp-win-stdio-ssh",
 ]
 
 

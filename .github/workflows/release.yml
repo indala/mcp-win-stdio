@@ -34,11 +34,11 @@ jobs:
 
       - name: Run Test Suite
         run: |
-          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql
+          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql paramiko cryptography
           python tests/test_cli.py
           python tests/test_audit.py
 
-      - name: Build All 7 Packages (Root + Subpackages)
+      - name: Build All 8 Packages (Root + Subpackages)
         run: python scripts/build_all.py
 
       - name: Check Artifact Metadata

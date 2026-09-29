@@ -73,7 +73,74 @@ def test_tsc_safety():
     # Should not crash or crawl home/root
     configs = find_tsconfigs("C:\\")
     assert isinstance(configs, list)
-    print("[PASS] TSC safety, standby mode, and pre-check tests passed.")
+
+    # Context window protection & message truncation tests
+    from mcp_win_stdio.tsc.server import _format_tsc_error, get_tsc_errors, get_file_errors, WATCHED_PROJECTS, CACHE_LOCK
+    huge_msg = "Type '{ " + "x: string; " * 100 + "}' is not assignable to type 'number'."
+    mock_err = {
+        "file": "E:/project/src/App.tsx",
+        "relative_path": "src/App.tsx",
+        "line": 10,
+        "column": 5,
+        "severity": "error",
+        "code": "TS2322",
+        "message": huge_msg,
+    }
+    formatted = _format_tsc_error(mock_err, max_msg_chars=100)
+    assert formatted["is_message_truncated"] is True
+    assert len(formatted["message"]) < 200
+    assert "truncated" in formatted["message"]
+
+    # Pagination & limits test with mock watched project
+    with CACHE_LOCK:
+        fake_errors = [
+            {
+                "file": "E:/project/src/file.tsx",
+                "relative_path": "src/file.tsx",
+                "line": i,
+                "column": 1,
+                "severity": "error",
+                "code": f"TS{2000 + i}",
+                "message": f"Error line {i}",
+            }
+            for i in range(1, 60)
+        ]
+        WATCHED_PROJECTS["fake_tsconfig"] = {
+            "relative_config": "tsconfig.json",
+            "project_dir": "E:/project",
+            "status": "ready",
+            "last_updated": "2026-09-29T12:00:00Z",
+            "errors": fake_errors,
+        }
+
+    try:
+        # Test get_tsc_errors pagination
+        page1 = get_tsc_errors(limit=20, offset=0)
+        assert page1["total_errors"] == 59
+        assert page1["returned_errors"] == 20
+        assert page1["has_more"] is True
+        assert "TRUNCATED" in page1["notice"]
+
+        page2 = get_tsc_errors(limit=20, offset=20)
+        assert page2["returned_errors"] == 20
+        assert page2["offset"] == 20
+
+        # Test error code filter
+        filtered = get_tsc_errors(error_code="TS2010")
+        assert filtered["total_errors"] == 1
+        assert filtered["errors"][0]["code"] == "TS2010"
+
+        # Test get_file_errors pagination
+        file_res = get_file_errors("src/file.tsx", limit=15, offset=0)
+        assert file_res["total_errors"] == 59
+        assert file_res["returned_errors"] == 15
+        assert file_res["has_more"] is True
+        assert "TRUNCATED" in file_res["notice"]
+    finally:
+        with CACHE_LOCK:
+            WATCHED_PROJECTS.pop("fake_tsconfig", None)
+
+    print("[PASS] TSC safety, standby mode, context protection & pagination tests passed.")
 
 def test_db_truncate_cell():
     import json
@@ -453,6 +520,44 @@ def test_db_schema_tools():
     print("[PASS] compare_schemas migration_sql structural check passed.")
 
 
+def test_ssh_tools():
+    from mcp_win_stdio.ssh.server import (
+        add_host,
+        list_hosts,
+        use_host,
+        remove_host,
+        list_active_connections,
+        ssh_tunnel_list,
+        ssh_list_pty_sessions,
+    )
+    # Test adding host
+    res_add = add_host("ci-test-host", "127.0.0.1", "testuser", 2222)
+    assert res_add["success"] is True
+    assert res_add["host"] == "ci-test-host"
+
+    # Test listing hosts
+    res_list = list_hosts()
+    assert res_list["totalHosts"] >= 1
+    found = any(h["name"] == "ci-test-host" for h in res_list["hosts"])
+    assert found is True
+
+    # Test switching active host
+    res_use = use_host("ci-test-host")
+    assert res_use["success"] is True
+    assert res_use["activeHost"] == "ci-test-host"
+
+    # Test empty / clean state queries
+    assert isinstance(list_active_connections()["connections"], list)
+    assert isinstance(ssh_tunnel_list()["tunnels"], list)
+    assert isinstance(ssh_list_pty_sessions()["sessions"], list)
+
+    # Test removing host
+    res_rm = remove_host("ci-test-host")
+    assert res_rm["success"] is True
+
+    print("[PASS] SSH tools and multi-host lifecycle tests passed.")
+
+
 if __name__ == "__main__":
     test_excel_clean_records()
     test_explorer_gitignore()
@@ -464,4 +569,5 @@ if __name__ == "__main__":
     test_db_agent_friction_fixes()
     test_db_pii_masking()
     test_db_schema_tools()
+    test_ssh_tools()
     print("ALL AUDIT TESTS PASSED!")

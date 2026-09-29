@@ -45,12 +45,12 @@ SCHEMA INSPECTION
     - Compact overview of all user tables and views.
     - Args: schemaName (optional str)
 
-8.  compact_schema_overview                                          [NEW v0.2.3]
+8.  compact_schema_overview                                          [NEW v0.2.4]
     - Ultra-compact one-liner per table: schema.table (col: type PK, col2: FK->ref)
     - Ideal for large databases — fits entire schema in minimal tokens.
     - Args: schemaName (optional str), connection (optional str)
 
-9.  get_table_ddl                                                    [NEW v0.2.3]
+9.  get_table_ddl                                                    [NEW v0.2.4]
     - Reconstructs the full CREATE TABLE DDL with column types, NOT NULL,
       defaults, all constraints (PK, FK, UNIQUE, CHECK), and extra indexes.
     - PostgreSQL only (MySQL falls back to SHOW CREATE TABLE).
@@ -61,7 +61,7 @@ SCHEMA INSPECTION
     - Args: query (str)
 
 DATA ACCESS
-11. get_table_sample                                                 [NEW v0.2.3]
+11. get_table_sample                                                 [NEW v0.2.4]
     - Returns sample rows (default: 5) and estimated row count for quick inspection.
     - mask_sensitive=True (default) auto-redacts PII columns (password, token,
       secret, ssn, api_key, credit_card, etc.) as [REDACTED_SENSITIVE].
@@ -88,7 +88,7 @@ DIAGNOSTICS & HEALTH
 16. list_active_queries
     - Lists running queries, connection duration, and process IDs.
 
-17. audit_database_health                                            [NEW v0.2.3]
+17. audit_database_health                                            [NEW v0.2.4]
     - Database-wide health audit (PostgreSQL only). Returns three categories:
         • unindexed_foreign_keys: FK columns lacking a supporting index (slow JOINs).
         • unused_indexes: Indexes with zero scans — candidates for DROP.

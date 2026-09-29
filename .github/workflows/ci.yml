@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql build twine pytest
+          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql paramiko cryptography build twine pytest
           pip install -e .
 
       - name: Run CLI and Discovery Tests
@@ -55,7 +55,7 @@ jobs:
       - name: Install build tools
         run: pip install --upgrade build twine hatchling
 
-      - name: Build all 7 packages
+      - name: Build all 8 packages
         run: python scripts/build_all.py
 
       - name: Validate distribution packages with Twine

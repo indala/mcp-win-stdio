@@ -8,6 +8,7 @@ diagnostic cache for instantaneous (0ms latency) TypeScript error inspection.
 import atexit
 from datetime import datetime, timezone
 import json
+import ntpath
 import os
 from pathlib import Path
 import re
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -33,17 +34,36 @@ CACHE_LOCK = threading.Lock()
 # Regex to parse standard tsc compiler output line
 # Example: src/components/App.tsx(42,15): error TS2322: Type 'string' is not assignable to type 'number'.
 ERROR_REGEX = re.compile(r"^([^(]+)\((\d+),(\d+)\):\s*(error|warning)\s*(TS\d+):\s*(.+)$")
+_WINDOWS_DRIVE_ROOT = re.compile(r"^[A-Za-z]:[\\/]*$")
 
 
-def is_home_or_root_dir(p: str) -> bool:
-    """Check if path is the user home directory, root drive, or Windows system/AppData directory."""
+def is_home_or_root_dir(p: Union[str, os.PathLike]) -> bool:
+    """
+    Check if path is the user home directory, root drive, or Windows system/AppData directory.
+    Cross-platform safe: Windows drive roots (e.g. 'C:\\', 'D:/') are recognized even on Linux.
+    """
+    if not p:
+        return False
+    raw = os.fspath(p).strip()
+
+    # Treat Windows drive roots as roots on every platform (Linux, macOS, Windows)
+    if _WINDOWS_DRIVE_ROOT.fullmatch(raw):
+        return True
+
+    # Normalize Windows-style paths for callers that pass equivalent forms (e.g. C:\)
+    normalized_windows = ntpath.normpath(raw)
+    if _WINDOWS_DRIVE_ROOT.fullmatch(normalized_windows):
+        return True
+
     try:
-        resolved = Path(p).resolve()
+        resolved = Path(raw).expanduser().resolve()
         home = Path.home().resolve()
-        # Home directory (e.g. C:\Users\admin) or root drive (e.g. C:\)
-        if resolved == home or resolved.parent == resolved:
+
+        # POSIX root or drive root
+        if resolved.parent == resolved or resolved == home:
             return True
-        # Parent of home (e.g. C:\Users)
+
+        # Parent of home (e.g. /home or C:\Users)
         if resolved == home.parent:
             return True
 
@@ -64,6 +84,7 @@ def is_home_or_root_dir(p: str) -> bool:
 
     except Exception:
         pass
+
     return False
 
 
@@ -384,6 +405,27 @@ if _initial_root and os.path.isdir(_initial_root) and not is_home_or_root_dir(_i
 
 
 
+def _format_tsc_error(err: Dict[str, Any], max_msg_chars: int = 300) -> Dict[str, Any]:
+    """Format individual TypeScript error, truncating giant generic type signatures to protect agent context window."""
+    msg = str(err.get("message", "")).strip()
+    is_truncated = False
+    if len(msg) > max_msg_chars:
+        msg = msg[:max_msg_chars] + "... [type signature truncated]"
+        is_truncated = True
+
+    formatted = {
+        "file": err.get("relative_path") or err.get("file"),
+        "line": err.get("line"),
+        "column": err.get("column"),
+        "severity": err.get("severity", "error"),
+        "code": err.get("code"),
+        "message": msg,
+    }
+    if is_truncated:
+        formatted["is_message_truncated"] = True
+    return formatted
+
+
 # ==========================================
 # MCP TOOLS
 # ==========================================
@@ -392,16 +434,22 @@ if _initial_root and os.path.isdir(_initial_root) and not is_home_or_root_dir(_i
 def get_tsc_errors(
     project_path: Optional[str] = None,
     tsconfig_path: Optional[str] = None,
-    limit: int = 50
+    error_code: Optional[str] = None,
+    limit: int = 30,
+    offset: int = 0,
+    max_message_chars: int = 300,
 ) -> Dict[str, Any]:
     """
     Get active TypeScript compiler errors across watched projects (0ms latency from memory cache).
-    Features automatic context window protection with error code and file aggregation.
+    Features automatic context window protection, pagination, error code filtering, and token-safe message truncation.
     
     Args:
         project_path: Optional filter by project directory substring.
         tsconfig_path: Optional filter by specific tsconfig.json file path.
-        limit: Maximum number of detailed error objects to return (default 50, max 100).
+        error_code: Optional filter by TS error code (e.g. 'TS2304', 'TS2322', 'TS2339').
+        limit: Maximum number of detailed error objects to return per batch (default 30, max 100).
+        offset: Starting index offset for pagination (default 0).
+        max_message_chars: Maximum character length for individual error messages (default 300).
     """
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
@@ -409,6 +457,8 @@ def get_tsc_errors(
                 "success": True,
                 "total_errors": 0,
                 "returned_errors": 0,
+                "offset": offset,
+                "limit": limit,
                 "projects": [],
                 "errors": [],
                 "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first, or configure TSC_WATCH_DIR.",
@@ -418,6 +468,7 @@ def get_tsc_errors(
         projects_summary = []
         initializing_count = 0
         safe_limit = min(max(1, limit), 100)
+        safe_offset = max(0, offset)
 
         for cfg_path, data in WATCHED_PROJECTS.items():
             if tsconfig_path and normalize_path(tsconfig_path) != cfg_path:
@@ -430,7 +481,11 @@ def get_tsc_errors(
             if status == "initializing":
                 initializing_count += 1
 
-            all_errors.extend(errs)
+            for e in errs:
+                if error_code and e.get("code", "").upper() != error_code.strip().upper():
+                    continue
+                all_errors.append(e)
+
             projects_summary.append({
                 "tsconfig": data["relative_config"],
                 "project_dir": data["project_dir"],
@@ -449,24 +504,28 @@ def get_tsc_errors(
             file_counts[f] = file_counts.get(f, 0) + 1
 
         total_errs = len(all_errors)
-        display_errors = all_errors[:safe_limit]
-        has_more = total_errs > safe_limit
+        display_errors = all_errors[safe_offset : safe_offset + safe_limit]
+        has_more = total_errs > (safe_offset + len(display_errors))
 
         result: Dict[str, Any] = {
             "success": True,
             "total_errors": total_errs,
             "returned_errors": len(display_errors),
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "has_more": has_more,
             "truncated": has_more,
             "error_codes_breakdown": dict(sorted(code_counts.items(), key=lambda x: x[1], reverse=True)[:10]),
             "top_affected_files": dict(sorted(file_counts.items(), key=lambda x: x[1], reverse=True)[:8]),
             "projects": projects_summary,
-            "errors": display_errors,
+            "errors": [_format_tsc_error(e, max_msg_chars=max_message_chars) for e in display_errors],
         }
 
         if has_more:
+            next_offset = safe_offset + len(display_errors)
             result["notice"] = (
-                f"... [CAPPED: Showing first {safe_limit} of {total_errs} errors to protect context window. "
-                f"Filter by file using 'get_file_errors' or use 'suggest_error_fixes' for resolution advice] ..."
+                f"... [TRUNCATED: Showing errors {safe_offset + 1}-{next_offset} of {total_errs} to protect context window. "
+                f"Use offset={next_offset} to view the next window, or filter by file with 'get_file_errors'] ..."
             )
 
         if initializing_count > 0:
@@ -634,12 +693,12 @@ def get_error_category_breakdown() -> Dict[str, Any]:
                 else:
                     categories["other"].append(item)
 
-        # Cap lists in categories to 10 each to avoid bloating context
+        # Cap lists in categories to avoid bloating agent context window
         capped_cats = {}
         for cat_name, items in categories.items():
             capped_cats[cat_name] = {
                 "count": len(items),
-                "sample_errors": items[:8]
+                "sample_errors": [_format_tsc_error(it, max_msg_chars=200) for it in items[:6]]
             }
 
         return {
@@ -651,15 +710,29 @@ def get_error_category_breakdown() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def get_file_errors(file_path: str) -> Dict[str, Any]:
+def get_file_errors(
+    file_path: str,
+    limit: int = 30,
+    offset: int = 0,
+    max_message_chars: int = 300,
+) -> Dict[str, Any]:
     """
-    Get TypeScript compiler errors for a specific file (.ts, .tsx, .js, .jsx).
+    Get TypeScript compiler errors for a specific file (.ts, .tsx, .js, .jsx) with context window protection.
+    
+    Args:
+        file_path: Relative or absolute path to the TypeScript/JavaScript file.
+        limit: Max errors to return in this batch (default 30, max 100).
+        offset: Starting offset for pagination (default 0).
+        max_message_chars: Maximum character length for individual error messages (default 300).
     """
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
             return {
                 "file": file_path,
-                "error_count": 0,
+                "total_errors": 0,
+                "returned_errors": 0,
+                "offset": offset,
+                "limit": limit,
                 "has_errors": False,
                 "errors": [],
                 "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first.",
@@ -673,12 +746,32 @@ def get_file_errors(file_path: str) -> Dict[str, Any]:
                 if err["file"] == norm_file or err["relative_path"] == norm_file or file_path.replace("\\", "/") in err["file"]:
                     file_errors.append(err)
 
-    return {
+    safe_limit = min(max(1, limit), 100)
+    safe_offset = max(0, offset)
+    total_file_errs = len(file_errors)
+    display_errs = file_errors[safe_offset : safe_offset + safe_limit]
+    has_more = total_file_errs > (safe_offset + len(display_errs))
+
+    res: Dict[str, Any] = {
         "file": file_path,
-        "error_count": len(file_errors),
-        "has_errors": len(file_errors) > 0,
-        "errors": file_errors,
+        "total_errors": total_file_errs,
+        "returned_errors": len(display_errs),
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "has_errors": total_file_errs > 0,
+        "has_more": has_more,
+        "truncated": has_more,
+        "errors": [_format_tsc_error(e, max_msg_chars=max_message_chars) for e in display_errs],
     }
+
+    if has_more:
+        next_offset = safe_offset + len(display_errs)
+        res["notice"] = (
+            f"... [TRUNCATED: Showing errors {safe_offset + 1}-{next_offset} of {total_file_errs}. "
+            f"Use offset={next_offset} to view the next batch] ..."
+        )
+
+    return res
 
 
 @mcp.tool()
