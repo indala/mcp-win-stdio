@@ -51,7 +51,18 @@ jobs:
         run: |
           if [ -n "$TWINE_PASSWORD" ]; then
             echo "Publishing packages to PyPI (skipping already published releases)..."
-            twine upload --skip-existing dist/*
+            for f in dist/*; do
+              echo "Uploading $f..."
+              for attempt in 1 2 3 4 5; do
+                if twine upload --skip-existing "$f"; then
+                  break
+                else
+                  echo "Upload failed (possibly rate limit), retrying in 10s... (attempt $attempt/5)"
+                  sleep 10
+                fi
+              done
+              sleep 3
+            done
           else
             echo "::warning ::PYPI_API_TOKEN secret is not set in GitHub repository settings. Skipping PyPI upload."
           fi
