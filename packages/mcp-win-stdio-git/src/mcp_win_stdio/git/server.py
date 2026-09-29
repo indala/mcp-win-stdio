@@ -2,8 +2,8 @@
 """
 Unified Git & GitHub MCP Server for mcp-win-stdio.
 Combines local Git repository management with remote GitHub CLI (gh) operations,
-providing seamless repository switching, hybrid synergy workflows, token-safe
-truncation, Windows CRLF filtering, and tiered fallback guidance.
+providing seamless repository switching, bookmark alias resolution, hybrid synergy workflows,
+token-safe truncation, Windows CRLF filtering, and tiered fallback guidance.
 """
 
 import json
@@ -13,7 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -274,11 +274,32 @@ def find_git_root(start_path: Optional[str] = None) -> Optional[Path]:
 
 
 def resolve_repo_path(repo_path: Optional[str] = None) -> Path:
-    """Resolve active repository path using priority: explicit param -> active repo -> cwd search."""
+    """
+    Resolve active repository path using priority:
+    1. Explicit alias in registered bookmarks (e.g. 'backend', 'my-repo')
+    2. Explicit filesystem path (relative or absolute)
+    3. Currently active in-memory repository
+    4. Saved active repository bookmark in ~/.mcp-win-stdio/git_repos.json
+    5. GIT_REPO_DIR environment variable
+    6. Upward climb from current working directory
+    """
     global _ACTIVE_REPO
 
     if repo_path:
-        p = Path(repo_path).resolve()
+        target_str = str(repo_path).strip()
+        bookmarks = _load_repo_bookmarks()
+        repos = bookmarks.get("repos", {})
+
+        # Check for registered bookmark alias or path match (case-insensitive)
+        for key, p_str in repos.items():
+            if key.lower() == target_str.lower() or p_str.lower() == target_str.lower():
+                p = Path(p_str).resolve()
+                if (p / ".git").exists() or find_git_root(str(p)):
+                    return find_git_root(str(p)) or p
+                return p
+
+        # Check direct path
+        p = Path(target_str).resolve()
         if (p / ".git").exists() or find_git_root(str(p)):
             return find_git_root(str(p)) or p
         return p
@@ -336,13 +357,17 @@ def get_remote_github_info(cwd: Path) -> Optional[Dict[str, str]]:
 def use_repo(repo_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Switch or display the active Git repository workspace.
-    If repo_path is not specified, auto-detects from the current directory.
+    Supports directory paths or registered bookmark aliases (e.g. 'backend', 'C:/dev/project').
+    If repo_path is not specified, auto-detects from the current working directory.
+    
+    Args:
+        repo_path: Path to repository workspace or registered bookmark alias.
     """
     global _ACTIVE_REPO
     if not is_git_installed():
         return get_git_missing_guidance()
 
-    target = find_git_root(repo_path)
+    target = resolve_repo_path(repo_path)
     if not target or not (target / ".git").exists():
         return {
             "success": False,
@@ -370,7 +395,7 @@ def use_repo(repo_path: Optional[str] = None) -> Dict[str, Any]:
 @mcp.tool()
 def list_repos() -> Dict[str, Any]:
     """
-    List all registered repository bookmarks, active repository, and git status.
+    List all registered repository bookmarks, the currently active repository, and directory validity.
     """
     bookmarks = _load_repo_bookmarks()
     active_path = str(_ACTIVE_REPO) if _ACTIVE_REPO else bookmarks.get("active")
@@ -397,7 +422,11 @@ def list_repos() -> Dict[str, Any]:
 @mcp.tool()
 def add_repo(repo_path: str, alias: Optional[str] = None) -> Dict[str, Any]:
     """
-    Bookmark a repository path for quick switching across multi-project workspaces.
+    Bookmark a repository path with an optional alias for instant switching across multi-project workspaces.
+    
+    Args:
+        repo_path: Local filesystem path to the Git repository.
+        alias: Optional friendly alias (e.g. 'backend', 'frontend', 'docs'). Defaults to directory name.
     """
     p = find_git_root(repo_path)
     if not p or not (p / ".git").exists():
@@ -421,6 +450,151 @@ def add_repo(repo_path: str, alias: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+@mcp.tool()
+def remove_repo(alias_or_path: str) -> Dict[str, Any]:
+    """
+    Remove or drop a repository bookmark or alias from registered workspaces.
+    
+    Args:
+        alias_or_path: Bookmark alias name (e.g. 'backend') or filesystem path to remove.
+    """
+    bookmarks = _load_repo_bookmarks()
+    repos = bookmarks.get("repos", {})
+    target_str = str(alias_or_path).strip()
+
+    removed_key = None
+    if target_str in repos:
+        removed_key = target_str
+    else:
+        for k, p in list(repos.items()):
+            if k.lower() == target_str.lower() or p.lower() == target_str.lower():
+                removed_key = k
+                break
+
+    if not removed_key:
+        return {
+            "success": False,
+            "error": f"Bookmark or path '{alias_or_path}' not found in registered repositories.",
+            "available_aliases": list(repos.keys())
+        }
+
+    removed_path = repos.pop(removed_key)
+    if bookmarks.get("active") == removed_path:
+        bookmarks["active"] = None
+    _save_repo_bookmarks(bookmarks)
+
+    return {
+        "success": True,
+        "removed_alias": removed_key,
+        "removed_path": removed_path,
+        "remaining_count": len(repos),
+        "message": f"Bookmark alias '{removed_key}' successfully removed."
+    }
+
+
+@mcp.tool()
+def rename_alias(old_alias: str, new_alias: str) -> Dict[str, Any]:
+    """
+    Rename an existing repository bookmark alias (e.g. rename 'backend' to 'api-service').
+    
+    Args:
+        old_alias: Current bookmark alias name.
+        new_alias: New alias name to assign.
+    """
+    bookmarks = _load_repo_bookmarks()
+    repos = bookmarks.get("repos", {})
+    old_key = str(old_alias).strip()
+    new_key = str(new_alias).strip()
+
+    if not new_key:
+        return {"success": False, "error": "New alias name cannot be empty."}
+
+    matched_key = None
+    if old_key in repos:
+        matched_key = old_key
+    else:
+        for k in repos:
+            if k.lower() == old_key.lower():
+                matched_key = k
+                break
+
+    if not matched_key:
+        return {
+            "success": False,
+            "error": f"Alias '{old_alias}' not found in registered bookmarks.",
+            "available_aliases": list(repos.keys())
+        }
+
+    target_path = repos.pop(matched_key)
+    repos[new_key] = target_path
+    bookmarks["repos"] = repos
+    _save_repo_bookmarks(bookmarks)
+
+    return {
+        "success": True,
+        "old_alias": matched_key,
+        "new_alias": new_key,
+        "path": target_path,
+        "message": f"Successfully renamed bookmark alias from '{matched_key}' to '{new_key}'."
+    }
+
+
+@mcp.tool()
+def git_init(
+    repo_path: Optional[str] = None,
+
+    initial_branch: str = "main",
+    remote_url: Optional[str] = None,
+    alias: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Initialize a new local Git repository, configure default branch, and optionally connect a remote origin.
+    
+    Args:
+        repo_path: Directory path where repository will be created (defaults to current working directory).
+        initial_branch: Initial branch name (default 'main').
+        remote_url: Optional remote Git URL (e.g. 'https://github.com/owner/repo.git') to add as origin.
+        alias: Optional bookmark alias to register in ~/.mcp-win-stdio/git_repos.json.
+    """
+    if not is_git_installed():
+        return get_git_missing_guidance()
+
+    target_dir = Path(repo_path).resolve() if repo_path else Path.cwd().resolve()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    args = ["init", "-b", initial_branch]
+    res = run_git_command(args, cwd=target_dir)
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    remote_msg = None
+    if remote_url:
+        r_res = run_git_command(["remote", "add", "origin", remote_url], cwd=target_dir)
+        remote_msg = "Remote 'origin' added." if r_res.get("success") else f"Failed to add remote: {r_res.get('stderr')}"
+
+    # Auto bookmark
+    key = alias or target_dir.name
+    bookmarks = _load_repo_bookmarks()
+    if "repos" not in bookmarks:
+        bookmarks["repos"] = {}
+    bookmarks["repos"][key] = str(target_dir)
+    bookmarks["active"] = str(target_dir)
+    _save_repo_bookmarks(bookmarks)
+
+    global _ACTIVE_REPO
+    _ACTIVE_REPO = target_dir
+
+    return {
+        "success": True,
+        "repository_path": str(target_dir),
+        "initial_branch": initial_branch,
+        "remote": remote_url,
+        "remote_status": remote_msg,
+        "alias": key,
+        "message": f"Initialized Git repository in {target_dir} with initial branch '{initial_branch}'."
+    }
+
+
 # ==============================================================================
 # 2. Hybrid Synergy Tools (Git + GH Combined)
 # ==============================================================================
@@ -431,6 +605,9 @@ def repo_overview(repo_path: Optional[str] = None) -> Dict[str, Any]:
     Unified 360-degree repository status: local branch, dirty status, ahead/behind
     tracking, open Pull Request for active branch, and latest CI/CD workflow runs.
     Gracefully degrades if GitHub CLI ('gh') is not installed or not logged in.
+    
+    Args:
+        repo_path: Optional path to repository workspace or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -535,6 +712,14 @@ def pr_quickstart(
     2. Commits with the specified title/body
     3. Pushes branch to origin with upstream tracking
     4. Creates a GitHub Pull Request via 'gh pr create'
+    
+    Args:
+        title: Commit message and Pull Request title.
+        body: Optional Pull Request description body.
+        branch: Optional branch name to create/checkout.
+        files: Optional list of specific files (relative or absolute) to stage.
+        draft: Create Pull Request as draft (default False).
+        repo_path: Optional repository path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -611,6 +796,11 @@ def issue_start_work(
     Issue-Driven Workflow:
     Fetches GitHub Issue details via 'gh issue view', extracts title, creates a clean
     local branch name (e.g. 'feature/42-fix-login-error'), and checks it out.
+    
+    Args:
+        issue_number: GitHub issue number (e.g. 42).
+        branch_prefix: Branch category prefix (default 'feature').
+        repo_path: Optional repository path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -646,13 +836,16 @@ def issue_start_work(
 
 
 # ==============================================================================
-# 3. Local Git Operations (14 Tools)
+# 3. Local Git Operations (16 Tools)
 # ==============================================================================
 
 @mcp.tool()
 def git_status(repo_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Structured git status showing staged, unstaged, untracked files, and in-progress states.
+    
+    Args:
+        repo_path: Optional repository path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -701,11 +894,23 @@ def git_diff(
     staged: bool = False,
     target: Optional[str] = None,
     path: Optional[str] = None,
+    files: Optional[List[str]] = None,
+    offset_lines: int = 0,
     max_lines: int = 250,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Token-safe git diff (unstaged changes, staged index diff, or between branches/commits).
+    Token-safe git diff with pagination and line offset chunking.
+    Inspect unstaged working tree diffs, staged index diffs, or diffs across commits/branches.
+    
+    Args:
+        staged: If True, inspect staged changes in the index (--staged).
+        target: Comparison target (e.g. branch name 'main', commit SHA 'HEAD~1', or 'origin/main...HEAD').
+        path: Single file path filter.
+        files: Optional list of file paths (relative or absolute) to diff.
+        offset_lines: Starting line index for chunked diff inspection of large diffs (default 0).
+        max_lines: Maximum number of diff lines to return in this chunk (default 250).
+        repo_path: Optional repository path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -716,8 +921,15 @@ def git_diff(
         args.append("--staged")
     if target:
         args.append(target)
+    
+    path_filters = []
     if path:
-        args += ["--", path]
+        path_filters.append(path)
+    if files:
+        path_filters.extend(files)
+
+    if path_filters:
+        args += ["--"] + path_filters
 
     res = run_git_command(args, cwd=cwd)
     if not res.get("success"):
@@ -725,17 +937,42 @@ def git_diff(
 
     raw_diff = res.get("stdout", "")
     if not raw_diff:
-        return {"success": True, "diff": "", "message": "No diff found (working tree clean)."}
+        return {
+            "success": True,
+            "diff": "",
+            "total_lines": 0,
+            "returned_lines": 0,
+            "offset_lines": offset_lines,
+            "has_more": False,
+            "message": "No diff found (working tree clean or matches target)."
+        }
 
-    capped = _truncate_output(raw_diff, max_lines=max_lines)
+    all_lines = raw_diff.splitlines()
+    total_lines = len(all_lines)
+    
+    # Safe chunking
+    start_idx = max(0, offset_lines)
+    chunk_lines = all_lines[start_idx : start_idx + max_lines]
+    returned_lines = len(chunk_lines)
+    has_more = (start_idx + returned_lines) < total_lines
+    next_offset = (start_idx + returned_lines) if has_more else None
+
+    diff_content = "\n".join(chunk_lines)
+    notice = None
+    if total_lines > max_lines:
+        notice = f"[Diff chunk: showing lines {start_idx + 1} to {start_idx + returned_lines} of {total_lines}. Use offset_lines={next_offset} to view next chunk.]"
+
     return {
         "success": True,
         "staged": staged,
         "target": target,
-        "diff": capped["content"],
-        "lines": capped["returned_lines"],
-        "truncated": capped["truncated"],
-        "notice": capped.get("notice")
+        "diff": diff_content,
+        "total_lines": total_lines,
+        "returned_lines": returned_lines,
+        "offset_lines": start_idx,
+        "has_more": has_more,
+        "next_offset": next_offset,
+        "notice": notice
     }
 
 
@@ -749,12 +986,18 @@ def git_log(
     """
     Structured commit history with hash, author, relative date, and subject.
     Capped to prevent context window blowout.
+    
+    Args:
+        max_count: Maximum number of commits to retrieve (default 20, max 100).
+        branch: Optional branch name or revision range (e.g. 'main', 'feature..main').
+        path: Optional file path filter to trace history of a specific file.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
 
     cwd = resolve_repo_path(repo_path)
-    limit = min(max_count, 100)
+    limit = min(max(1, max_count), 100)
     fmt = "%H%x1f%an%x1f%ae%x1f%cr%x1f%s"
     args = ["log", f"-n{limit}", f"--format={fmt}"]
     if branch:
@@ -791,10 +1034,18 @@ def git_commit(
     message: str,
     files: Optional[List[str]] = None,
     all_modified: bool = False,
+    include_untracked: bool = False,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Stage files and create a Git commit with a clean descriptive message.
+    Stage files and create a Git commit with a clean descriptive message and author verification.
+    
+    Args:
+        message: Descriptive commit message.
+        files: Optional explicit list of file paths (relative to repo root or absolute) to stage and commit.
+        all_modified: If True, stages all modified and deleted tracked files (git add -u).
+        include_untracked: If True, stages all tracked and untracked files in the working tree (git add -A).
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -812,28 +1063,47 @@ def git_commit(
         }
 
     # Staging
-    if files:
+    if include_untracked:
+        a_res = run_git_command(["add", "-A"], cwd=cwd)
+        if not a_res.get("success"):
+            return {"success": False, "step": "stage", "error": a_res.get("stderr")}
+    elif files:
         a_res = run_git_command(["add"] + files, cwd=cwd)
         if not a_res.get("success"):
             return {"success": False, "step": "stage", "error": a_res.get("stderr")}
     elif all_modified:
-        run_git_command(["add", "-u"], cwd=cwd)
+        a_res = run_git_command(["add", "-u"], cwd=cwd)
+        if not a_res.get("success"):
+            return {"success": False, "step": "stage", "error": a_res.get("stderr")}
+
+    # Check untracked files status
+    st_res = run_git_command(["status", "--porcelain"], cwd=cwd)
+    untracked_remaining = []
+    for line in st_res.get("stdout", "").splitlines():
+        if line.startswith("??"):
+            untracked_remaining.append(line[3:].strip())
 
     # Commit
     res = run_git_command(["commit", "-m", message], cwd=cwd)
     if not res.get("success"):
-        return {"success": False, "step": "commit", "error": res.get("stderr") or res.get("stdout")}
+        return {
+            "success": False,
+            "step": "commit",
+            "error": res.get("stderr") or res.get("stdout"),
+            "untracked_files_remaining": untracked_remaining
+        }
 
     return {
         "success": True,
         "output": res.get("stdout"),
-        "message": "Commit created successfully."
+        "message": "Commit created successfully.",
+        "untracked_files_skipped": untracked_remaining if untracked_remaining else None
     }
 
 
 @mcp.tool()
 def git_branch(
-    action: str = "list",
+    action: Literal["list", "create", "switch", "delete"] = "list",
     branch_name: Optional[str] = None,
     start_point: Optional[str] = None,
     delete: bool = False,
@@ -842,7 +1112,14 @@ def git_branch(
 ) -> Dict[str, Any]:
     """
     Branch operations: list branches, create, switch, or safely delete branches.
-    action: 'list', 'create', 'switch', 'delete'
+    
+    Args:
+        action: Branch action ('list', 'create', 'switch', 'delete').
+        branch_name: Name of branch to create, switch to, or delete.
+        start_point: Optional commit/branch to branch off from (for 'create').
+        delete: Deprecated flag. Prefer action='delete'.
+        force: If True with action='delete', force deletes unmerged branch (-D).
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -863,7 +1140,7 @@ def git_branch(
                 })
         return {"success": True, "branches": branches}
 
-    if act in ("create", "new"):
+    if act == "create":
         if not branch_name:
             return {"success": False, "error": "branch_name is required for creating a branch."}
         args = ["checkout", "-b", branch_name]
@@ -872,7 +1149,7 @@ def git_branch(
         res = run_git_command(args, cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
 
-    if act in ("switch", "checkout"):
+    if act == "switch":
         if not branch_name:
             return {"success": False, "error": "branch_name is required for switching branch."}
         res = run_git_command(["checkout", branch_name], cwd=cwd)
@@ -890,13 +1167,19 @@ def git_branch(
 
 @mcp.tool()
 def git_stash(
-    action: str = "list",
+    action: Literal["list", "save", "pop", "drop", "clear"] = "list",
     message: Optional[str] = None,
     index: int = 0,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Manage the Git stash: 'save', 'pop', 'list', 'drop', 'clear'.
+    
+    Args:
+        action: Stash action ('list', 'save', 'pop', 'drop', 'clear').
+        message: Optional description message when saving stash.
+        index: Stash index integer for pop/drop (default 0 for stash@{0}).
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -924,19 +1207,30 @@ def git_stash(
         res = run_git_command(["stash", "drop", f"stash@{{{index}}}"], cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
 
-    return {"success": False, "error": f"Unknown stash action '{action}'. Use list, save, pop, or drop."}
+    if act == "clear":
+        res = run_git_command(["stash", "clear"], cwd=cwd)
+        return {"success": res.get("success"), "output": res.get("stdout") or "Stash cleared."}
+
+    return {"success": False, "error": f"Unknown stash action '{action}'. Use list, save, pop, drop, or clear."}
 
 
 @mcp.tool()
 def git_sync(
-    action: str = "pull",
+    action: Literal["pull", "push", "fetch", "sync"] = "pull",
     remote: str = "origin",
     branch: Optional[str] = None,
     set_upstream: bool = False,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Synchronize with remote: 'fetch', 'pull', or 'push'.
+    Synchronize with remote repository: 'fetch', 'pull', 'push', or 'sync' (pull then push).
+    
+    Args:
+        action: Sync action ('fetch', 'pull', 'push', 'sync').
+        remote: Remote repository name (default 'origin').
+        branch: Optional remote branch name to target.
+        set_upstream: If True when pushing, sets upstream tracking (-u).
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -965,7 +1259,21 @@ def git_sync(
         res = run_git_command(args, cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
 
-    return {"success": False, "error": f"Unknown sync action: '{action}'. Use fetch, pull, or push."}
+    if act == "sync":
+        # Pull then push
+        p_res = run_git_command(["pull", remote] + ([branch] if branch else []), cwd=cwd)
+        if not p_res.get("success"):
+            return {"success": False, "step": "pull", "error": p_res.get("stderr") or p_res.get("stdout")}
+        
+        push_args = ["push"] + (["-u"] if set_upstream else []) + [remote] + ([branch] if branch else [])
+        ps_res = run_git_command(push_args, cwd=cwd)
+        return {
+            "success": ps_res.get("success"),
+            "pull_output": p_res.get("stdout"),
+            "push_output": ps_res.get("stdout") or ps_res.get("stderr")
+        }
+
+    return {"success": False, "error": f"Unknown sync action: '{action}'. Use fetch, pull, push, or sync."}
 
 
 @mcp.tool()
@@ -977,7 +1285,13 @@ def git_blame(
 ) -> Dict[str, Any]:
     """
     View file blame line-by-line with author, date, and commit hash.
-    Supports line range filtering (start_line, end_line) to conserve tokens.
+    Supports line range filtering (start_line, end_line) to conserve context tokens.
+    
+    Args:
+        file_path: Relative or absolute path to the file.
+        start_line: Optional starting line number (1-indexed).
+        end_line: Optional ending line number (1-indexed).
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1005,18 +1319,70 @@ def git_blame(
 
 
 @mcp.tool()
+def git_restore(
+    files: List[str],
+    staged: bool = False,
+    source: Optional[str] = None,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Safely restore working tree files or unstage files from the index (git restore).
+    
+    Args:
+        files: List of file paths (relative to repo root or absolute) to restore.
+        staged: If True, unstage files from the index (--staged). If False, discard working tree changes.
+        source: Optional commit hash or branch to restore files from (e.g. 'HEAD~1', 'main').
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_git_installed():
+        return get_git_missing_guidance()
+
+    if not files:
+        return {"success": False, "error": "Specify at least one file path to restore."}
+
+    cwd = resolve_repo_path(repo_path)
+    args = ["restore"]
+    if staged:
+        args.append("--staged")
+    if source:
+        args.append(f"--source={source}")
+    args += ["--"] + files
+
+    res = run_git_command(args, cwd=cwd)
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    action_desc = "unregistered/unstaged from index" if staged else "restored in working tree"
+    return {
+        "success": True,
+        "restored_files": files,
+        "staged": staged,
+        "source": source or "HEAD",
+        "message": f"Successfully {action_desc} {len(files)} file(s)."
+    }
+
+
+@mcp.tool()
 def git_reset(
-    mode: str = "restore",
+    mode: Literal["restore", "soft", "mixed", "hard"] = "restore",
     target: Optional[str] = None,
     files: Optional[List[str]] = None,
     confirm_destructive: bool = False,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Safe file restore or commit reset:
+    Safe file restore or commit history reset:
     - mode='restore': Safely discards unstaged changes in specific files (git restore <files>).
-    - mode='soft': Reset commit history while keeping working directory and index intact.
+    - mode='soft': Reset commit history while keeping working tree and index changes intact.
+    - mode='mixed': Reset commit history and unstages index while keeping working tree files.
     - mode='hard': Destructive reset. Requires confirm_destructive=True.
+    
+    Args:
+        mode: Reset mode ('restore', 'soft', 'mixed', 'hard').
+        target: Target commit (e.g. 'HEAD~1', 'origin/main'). Defaults to 'HEAD~1' for soft/mixed, 'HEAD' for hard.
+        files: Specific files to restore (used when mode='restore').
+        confirm_destructive: Safety guard required to execute destructive mode='hard'.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1026,7 +1392,7 @@ def git_reset(
 
     if m == "restore":
         if not files:
-            return {"success": False, "error": "Specify files to restore, or use confirm_destructive=True to restore all."}
+            return {"success": False, "error": "Specify files to restore, or use confirm_destructive=True with mode='hard'."}
         res = run_git_command(["restore"] + files, cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr") or "Files restored."}
 
@@ -1035,22 +1401,27 @@ def git_reset(
         res = run_git_command(["reset", "--soft", tgt], cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
 
+    if m == "mixed":
+        tgt = target or "HEAD~1"
+        res = run_git_command(["reset", "--mixed", tgt], cwd=cwd)
+        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
+
     if m == "hard":
         if not confirm_destructive:
             return {
                 "success": False,
-                "error": "Destructive operation blocked. 'git reset --hard' wipes uncommitted changes. Pass confirm_destructive=True to proceed."
+                "error": "Destructive operation blocked. 'git reset --hard' wipes all uncommitted changes. Pass confirm_destructive=True to proceed."
             }
         tgt = target or "HEAD"
         res = run_git_command(["reset", "--hard", tgt], cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
 
-    return {"success": False, "error": f"Unknown reset mode '{mode}'. Use restore, soft, or hard."}
+    return {"success": False, "error": f"Unknown reset mode '{mode}'. Use restore, soft, mixed, or hard."}
 
 
 @mcp.tool()
 def git_tag(
-    action: str = "list",
+    action: Literal["list", "create", "delete"] = "list",
     tag_name: Optional[str] = None,
     message: Optional[str] = None,
     delete: bool = False,
@@ -1058,6 +1429,13 @@ def git_tag(
 ) -> Dict[str, Any]:
     """
     List, create, or delete Git tags.
+    
+    Args:
+        action: Tag action ('list', 'create', 'delete').
+        tag_name: Name of the tag to create or delete (e.g. 'v1.0.0').
+        message: Optional annotation message when creating tag.
+        delete: Deprecated flag. Prefer action='delete'.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1089,6 +1467,64 @@ def git_tag(
 
 
 @mcp.tool()
+def git_remote(
+    action: Literal["list", "add", "set-url", "remove", "get-url"] = "list",
+    name: str = "origin",
+    url: Optional[str] = None,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Inspect and configure Git remotes (origin, upstream) without raw git config manipulation.
+    
+    Args:
+        action: Remote action ('list', 'add', 'set-url', 'remove', 'get-url').
+        name: Remote name (default 'origin').
+        url: Remote repository URL (required for 'add' and 'set-url').
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_git_installed():
+        return get_git_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    act = action.lower()
+
+    if act == "list":
+        res = run_git_command(["remote", "-v"], cwd=cwd)
+        lines = res.get("stdout", "").splitlines()
+        remotes: Dict[str, Dict[str, str]] = {}
+        for ln in lines:
+            parts = ln.split()
+            if len(parts) >= 3:
+                r_name, r_url, r_type = parts[0], parts[1], parts[2].strip("()")
+                if r_name not in remotes:
+                    remotes[r_name] = {}
+                remotes[r_name][r_type] = r_url
+        return {"success": True, "remotes": remotes}
+
+    if act == "get-url":
+        res = run_git_command(["remote", "get-url", name], cwd=cwd)
+        return {"success": res.get("success"), "remote": name, "url": res.get("stdout", "").strip()}
+
+    if act == "add":
+        if not url:
+            return {"success": False, "error": "URL is required to add a remote."}
+        res = run_git_command(["remote", "add", name, url], cwd=cwd)
+        return {"success": res.get("success"), "remote": name, "url": url, "output": res.get("stdout") or res.get("stderr")}
+
+    if act == "set-url":
+        if not url:
+            return {"success": False, "error": "URL is required to update a remote."}
+        res = run_git_command(["remote", "set-url", name, url], cwd=cwd)
+        return {"success": res.get("success"), "remote": name, "url": url, "output": res.get("stdout") or res.get("stderr")}
+
+    if act == "remove":
+        res = run_git_command(["remote", "remove", name], cwd=cwd)
+        return {"success": res.get("success"), "remote": name, "output": res.get("stdout") or res.get("stderr")}
+
+    return {"success": False, "error": f"Unknown remote action: '{action}'. Use list, add, set-url, remove, or get-url."}
+
+
+@mcp.tool()
 def git_grep(
     pattern: str,
     path_spec: Optional[str] = None,
@@ -1098,6 +1534,13 @@ def git_grep(
 ) -> Dict[str, Any]:
     """
     Fast regex pattern search across tracked repository files at commit/branch level.
+    
+    Args:
+        pattern: Regex or literal string pattern to search for.
+        path_spec: Optional glob path filter (e.g. '*.py', 'src/').
+        ignore_case: Case-insensitive search (default True).
+        max_results: Maximum matching lines to return (default 50).
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1134,14 +1577,20 @@ def git_grep(
 
 @mcp.tool()
 def git_worktree(
-    action: str = "list",
+    action: Literal["list", "add", "remove", "prune"] = "list",
     path: Optional[str] = None,
     branch: Optional[str] = None,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Manage Git worktrees: 'list', 'add', 'remove', 'prune'.
-    Allows AI agents to work in isolated branches without disturbing user's open editor.
+    Allows AI agents to work in isolated branch directories without disturbing the user's active editor.
+    
+    Args:
+        action: Worktree action ('list', 'add', 'remove', 'prune').
+        path: Worktree directory path (required for 'add' and 'remove').
+        branch: Branch to checkout in the new worktree (for 'add').
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1187,15 +1636,21 @@ def git_worktree(
 
 @mcp.tool()
 def git_config(
-    action: str = "get",
+    action: Literal["get", "set", "unset", "list"] = "get",
     key: Optional[str] = None,
     value: Optional[str] = None,
-    scope: str = "global",
+    scope: Literal["global", "local", "system"] = "global",
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Inspect or configure Git identity & settings (e.g. user.name, user.email, core.autocrlf).
-    scope: 'global' or 'local'
+    Inspect or configure Git identity and settings (e.g. user.name, user.email, core.autocrlf).
+    
+    Args:
+        action: Config action ('get', 'set', 'unset', 'list').
+        key: Git configuration key (e.g. 'user.name', 'core.autocrlf').
+        value: Value to set (required for 'set').
+        scope: Configuration scope ('global', 'local', 'system').
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1204,13 +1659,16 @@ def git_config(
     act = action.lower()
     scope_flag = f"--{scope}"
 
+    if act in ("get", "list") and not key:
+        res = run_git_command(["config", "--list", scope_flag], cwd=cwd)
+        cfg = dict(line.split("=", 1) for line in res.get("stdout", "").splitlines() if "=" in line)
+        return {"success": True, "scope": scope, "config": cfg}
+
     if act == "get":
         if not key:
-            res = run_git_command(["config", "--list", scope_flag], cwd=cwd)
-            cfg = dict(line.split("=", 1) for line in res.get("stdout", "").splitlines() if "=" in line)
-            return {"success": True, "scope": scope, "config": cfg}
+            return {"success": False, "error": "Key is required for 'get' action."}
         res = run_git_command(["config", scope_flag, key], cwd=cwd)
-        return {"success": res.get("success"), "key": key, "value": res.get("stdout", "").strip()}
+        return {"success": res.get("success"), "key": key, "value": res.get("stdout", "").strip(), "scope": scope}
 
     if act == "set":
         if not key or value is None:
@@ -1218,21 +1676,28 @@ def git_config(
         res = run_git_command(["config", scope_flag, key, value], cwd=cwd)
         return {"success": res.get("success"), "key": key, "value": value, "scope": scope}
 
-    return {"success": False, "error": f"Unknown config action: '{action}'. Use get or set."}
+    if act == "unset":
+        if not key:
+            return {"success": False, "error": "Key is required to unset git config."}
+        res = run_git_command(["config", scope_flag, "--unset", key], cwd=cwd)
+        return {"success": res.get("success"), "key": key, "scope": scope}
+
+    return {"success": False, "error": f"Unknown config action: '{action}'. Use get, set, unset, or list."}
 
 
 @mcp.tool()
 def git_conflict_resolve(
-    action: str = "status",
+    action: Literal["status", "abort", "continue"] = "status",
     mode: Optional[str] = None,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Detect and manage in-progress merge/rebase/cherry-pick conflicts.
-    action:
-    - 'status': List all conflicted unmerged files
-    - 'abort': Abort current merge or rebase (e.g. git merge --abort)
-    - 'continue': Continue after resolving conflicts (git rebase --continue / git merge --continue)
+    Detect and manage in-progress merge, rebase, or cherry-pick conflicts.
+    
+    Args:
+        action: Conflict action ('status', 'abort', 'continue').
+        mode: Optional operation override ('merge', 'rebase', 'cherry-pick').
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1256,408 +1721,16 @@ def git_conflict_resolve(
         }
 
     if act == "abort":
-        cmd_type = "merge" if is_merging else ("rebase" if is_rebasing else "cherry-pick")
+        cmd_type = mode or ("merge" if is_merging else ("rebase" if is_rebasing else "cherry-pick"))
         res = run_git_command([cmd_type, "--abort"], cwd=cwd)
         return {"success": res.get("success"), "aborted": cmd_type, "output": res.get("stdout") or res.get("stderr")}
 
     if act == "continue":
-        cmd_type = "rebase" if is_rebasing else "merge"
+        cmd_type = mode or ("rebase" if is_rebasing else "merge")
         res = run_git_command([cmd_type, "--continue"], cwd=cwd)
         return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
 
     return {"success": False, "error": f"Unknown action: '{action}'. Use status, abort, or continue."}
-
-
-# ==============================================================================
-# 4. Remote GitHub Operations via 'gh' CLI (10 Tools)
-# ==============================================================================
-
-@mcp.tool()
-def gh_auth_status() -> Dict[str, Any]:
-    """
-    Check GitHub CLI authentication status, active account, and protocol scopes.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    res = run_gh_command(["auth", "status"], cwd=resolve_repo_path())
-    # gh auth status outputs to stderr by design
-    out = res.get("stderr") or res.get("stdout")
-    return {
-        "success": res.get("success"),
-        "raw_status": out,
-        "is_logged_in": res.get("success") or "Logged in to" in out
-    }
-
-
-@mcp.tool()
-def gh_switch_account(username: str) -> Dict[str, Any]:
-    """
-    Switch active GitHub CLI account if multiple accounts are configured.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    res = run_gh_command(["auth", "switch", "--user", username], cwd=resolve_repo_path())
-    return {
-        "success": res.get("success"),
-        "output": res.get("stdout") or res.get("stderr")
-    }
-
-
-@mcp.tool()
-def gh_pr_list(
-    state: str = "open",
-    limit: int = 20,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    List pull requests for the repository (state: 'open', 'closed', 'merged', 'all').
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    lim = min(limit, 50)
-    res = run_gh_command([
-        "pr", "list",
-        "--state", state,
-        "--limit", str(lim),
-        "--json", "number,title,state,headRefName,baseRefName,author,isDraft,url,updatedAt"
-    ], cwd=cwd)
-
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    try:
-        prs = json.loads(res.get("stdout", "[]"))
-        return {"success": True, "count": len(prs), "pull_requests": prs}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to parse PR list JSON: {str(e)}"}
-
-
-@mcp.tool()
-def gh_pr_view(
-    pr_number: int,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    View complete details of a pull request (title, body, author, reviews, checks, mergeable status).
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    res = run_gh_command([
-        "pr", "view", str(pr_number),
-        "--json", "number,title,body,state,author,headRefName,baseRefName,mergeable,reviewDecision,statusCheckRollup,url"
-    ], cwd=cwd)
-
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    try:
-        pr_data = json.loads(res.get("stdout", "{}"))
-        return {"success": True, "pull_request": pr_data}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to parse PR JSON: {str(e)}"}
-
-
-@mcp.tool()
-def gh_pr_diff(
-    pr_number: int,
-    max_lines: int = 250,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    View token-capped diff of a remote GitHub Pull Request.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    res = run_gh_command(["pr", "diff", str(pr_number)], cwd=cwd)
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    capped = _truncate_output(res.get("stdout", ""), max_lines=max_lines)
-    return {
-        "success": True,
-        "pr_number": pr_number,
-        "diff": capped["content"],
-        "lines": capped["returned_lines"],
-        "truncated": capped["truncated"]
-    }
-
-
-@mcp.tool()
-def gh_pr_checkout(
-    pr_number: int,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Check out a GitHub Pull Request branch locally in the Git repository.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    res = run_gh_command(["pr", "checkout", str(pr_number)], cwd=cwd)
-    return {
-        "success": res.get("success"),
-        "output": res.get("stdout") or res.get("stderr")
-    }
-
-
-@mcp.tool()
-def gh_pr_action(
-    pr_number: int,
-    action: str,
-    comment: Optional[str] = None,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Perform PR lifecycle actions: 'approve', 'merge', 'close', 'reopen'.
-    For 'merge', merges using default squash/merge settings.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    act = action.lower()
-
-    if act == "approve":
-        args = ["pr", "review", str(pr_number), "--approve"]
-        if comment:
-            args += ["--body", comment]
-        res = run_gh_command(args, cwd=cwd)
-        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
-
-    if act == "merge":
-        res = run_gh_command(["pr", "merge", str(pr_number), "--auto", "--merge"], cwd=cwd)
-        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
-
-    if act == "close":
-        args = ["pr", "close", str(pr_number)]
-        if comment:
-            args += ["--comment", comment]
-        res = run_gh_command(args, cwd=cwd)
-        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
-
-    if act == "reopen":
-        res = run_gh_command(["pr", "reopen", str(pr_number)], cwd=cwd)
-        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
-
-    return {"success": False, "error": f"Unknown PR action '{action}'. Use approve, merge, close, or reopen."}
-
-
-@mcp.tool()
-def gh_issue_list(
-    state: str = "open",
-    limit: int = 20,
-    assignee: Optional[str] = None,
-    labels: Optional[List[str]] = None,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Search and list GitHub issues with filters (assignee, label, state).
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    args = [
-        "issue", "list",
-        "--state", state,
-        "--limit", str(min(limit, 50)),
-        "--json", "number,title,state,author,labels,assignees,url,updatedAt"
-    ]
-    if assignee:
-        args += ["--assignee", assignee]
-    if labels:
-        for lbl in labels:
-            args += ["--label", lbl]
-
-    res = run_gh_command(args, cwd=cwd)
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    try:
-        issues = json.loads(res.get("stdout", "[]"))
-        return {"success": True, "count": len(issues), "issues": issues}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to parse issues JSON: {str(e)}"}
-
-
-@mcp.tool()
-def gh_issue_view(
-    issue_number: int,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    View complete GitHub issue details including body, labels, comments, and assignees.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    res = run_gh_command([
-        "issue", "view", str(issue_number),
-        "--json", "number,title,body,state,author,labels,assignees,comments,url"
-    ], cwd=cwd)
-
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    try:
-        data = json.loads(res.get("stdout", "{}"))
-        return {"success": True, "issue": data}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to parse issue JSON: {str(e)}"}
-
-
-@mcp.tool()
-def gh_issue_create(
-    title: str,
-    body: str,
-    labels: Optional[List[str]] = None,
-    assignees: Optional[List[str]] = None,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Create a new GitHub issue with title, description, labels, and assignees.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    args = ["issue", "create", "--title", title, "--body", body]
-    if labels:
-        for lbl in labels:
-            args += ["--label", lbl]
-    if assignees:
-        for a in assignees:
-            args += ["--assignee", a]
-
-    res = run_gh_command(args, cwd=cwd)
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    return {
-        "success": True,
-        "issue_url": res.get("stdout", "").strip(),
-        "message": "Issue created successfully."
-    }
-
-
-@mcp.tool()
-def gh_issue_comment(
-    issue_number: int,
-    comment: str,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Post a comment on a GitHub issue or pull request.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    res = run_gh_command(["issue", "comment", str(issue_number), "--body", comment], cwd=cwd)
-    return {
-        "success": res.get("success"),
-        "output": res.get("stdout") or res.get("stderr")
-    }
-
-
-@mcp.tool()
-def gh_run_status(
-    limit: int = 10,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Inspect GitHub Actions CI/CD workflows and recent run outcomes.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    res = run_gh_command([
-        "run", "list",
-        "--limit", str(min(limit, 20)),
-        "--json", "databaseId,name,status,conclusion,event,headBranch,url,createdAt"
-    ], cwd=cwd)
-
-    if not res.get("success"):
-        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-    try:
-        runs = json.loads(res.get("stdout", "[]"))
-        return {"success": True, "count": len(runs), "runs": runs}
-    except Exception as e:
-        return {"success": False, "error": f"Failed to parse runs JSON: {str(e)}"}
-
-
-@mcp.tool()
-def gh_gist_create(
-    description: str,
-    files: Dict[str, str],
-    public: bool = False
-) -> Dict[str, Any]:
-    """
-    Create a GitHub Gist with multiple files to share snippets, patches, or logs.
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tmp_path = Path(tmp_dir)
-        file_args = []
-        for fname, content in files.items():
-            f_dest = tmp_path / fname
-            f_dest.write_text(content, encoding="utf-8")
-            file_args.append(str(f_dest))
-
-        args = ["gist", "create", "--desc", description] + file_args
-        if public:
-            args.append("--public")
-
-        res = run_gh_command(args, cwd=Path.cwd())
-        if not res.get("success"):
-            return {"success": False, "error": res.get("stderr") or res.get("stdout")}
-
-        return {
-            "success": True,
-            "gist_url": res.get("stdout", "").strip(),
-            "message": "Gist created successfully."
-        }
-
-
-@mcp.tool()
-def gh_search(
-    kind: str = "issues",
-    query: str = "",
-    limit: int = 15,
-    repo_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Search GitHub globally or within the current repository (kind: 'issues', 'prs', 'code', 'repos').
-    """
-    if not is_gh_installed():
-        return get_gh_missing_guidance()
-
-    cwd = resolve_repo_path(repo_path)
-    k = kind.lower()
-    if k not in ("issues", "prs", "code", "repos"):
-        return {"success": False, "error": f"Invalid search kind '{kind}'. Use issues, prs, code, or repos."}
-
-    args = ["search", k, query, "--limit", str(min(limit, 30))]
-    res = run_gh_command(args, cwd=cwd)
-    return {
-        "success": res.get("success"),
-        "results": res.get("stdout") or res.get("stderr")
-    }
 
 
 @mcp.tool()
@@ -1667,13 +1740,13 @@ def git_cherry_pick(
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [Advanced Tool] Apply the changes introduced by an existing commit to the current branch.
+    Apply the changes introduced by an existing commit to the current branch.
     Detects cherry-pick conflicts and provides clean resolution guidance.
     
     Args:
         commit_hash: The SHA-1 hash or reference of the commit to cherry-pick.
         no_commit: Apply changes to working tree and index without creating a commit (default False).
-        repo_path: Optional path to repository workspace.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1711,13 +1784,13 @@ def git_clean_untracked(
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [Advanced Tool] Clean untracked files and build artifacts safely.
+    Clean untracked files and build artifacts safely.
     Defaults to dry_run=True to prevent accidental loss of uncommitted work.
     
     Args:
         dry_run: If True (default), only lists files that WOULD be removed without deleting anything.
         remove_directories: Also remove untracked directories (-d flag).
-        repo_path: Optional path to repository workspace.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_git_installed():
         return get_git_missing_guidance()
@@ -1746,17 +1819,520 @@ def git_clean_untracked(
     }
 
 
+# ==============================================================================
+# 4. Remote GitHub Operations via 'gh' CLI (12 Tools)
+# ==============================================================================
+
+@mcp.tool()
+def gh_auth_status() -> Dict[str, Any]:
+    """
+    Check GitHub CLI authentication status, active account, and protocol scopes.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    res = run_gh_command(["auth", "status"], cwd=resolve_repo_path())
+    out = res.get("stderr") or res.get("stdout")
+    return {
+        "success": res.get("success"),
+        "raw_status": out,
+        "is_logged_in": res.get("success") or "Logged in to" in out
+    }
+
+
+@mcp.tool()
+def gh_switch_account(username: str) -> Dict[str, Any]:
+    """
+    Switch active GitHub CLI account if multiple accounts are configured.
+    
+    Args:
+        username: GitHub account username to switch to.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    res = run_gh_command(["auth", "switch", "--user", username], cwd=resolve_repo_path())
+    return {
+        "success": res.get("success"),
+        "output": res.get("stdout") or res.get("stderr")
+    }
+
+
+@mcp.tool()
+def gh_pr_list(
+    state: Literal["open", "closed", "merged", "all"] = "open",
+    limit: int = 20,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List pull requests for the repository with status, branch names, and authors.
+    
+    Args:
+        state: Pull request state ('open', 'closed', 'merged', 'all').
+        limit: Maximum number of PRs to return (default 20, max 50).
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    lim = min(max(1, limit), 50)
+    res = run_gh_command([
+        "pr", "list",
+        "--state", state,
+        "--limit", str(lim),
+        "--json", "number,title,state,headRefName,baseRefName,author,isDraft,url,updatedAt"
+    ], cwd=cwd)
+
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    try:
+        prs = json.loads(res.get("stdout", "[]"))
+        return {"success": True, "count": len(prs), "pull_requests": prs}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse PR list JSON: {str(e)}"}
+
+
+@mcp.tool()
+def gh_pr_view(
+    pr_number: int,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    View complete details of a pull request (title, body, author, reviews, checks, mergeable status).
+    
+    Args:
+        pr_number: Pull request number.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    res = run_gh_command([
+        "pr", "view", str(pr_number),
+        "--json", "number,title,body,state,author,headRefName,baseRefName,mergeable,reviewDecision,statusCheckRollup,url"
+    ], cwd=cwd)
+
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    try:
+        pr_data = json.loads(res.get("stdout", "{}"))
+        return {"success": True, "pull_request": pr_data}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse PR JSON: {str(e)}"}
+
+
+@mcp.tool()
+def gh_pr_diff(
+    pr_number: int,
+    max_lines: int = 250,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    View token-capped diff of a remote GitHub Pull Request.
+    
+    Args:
+        pr_number: Pull request number.
+        max_lines: Maximum diff lines to return (default 250).
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    res = run_gh_command(["pr", "diff", str(pr_number)], cwd=cwd)
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    capped = _truncate_output(res.get("stdout", ""), max_lines=max_lines)
+    return {
+        "success": True,
+        "pr_number": pr_number,
+        "diff": capped["content"],
+        "lines": capped["returned_lines"],
+        "truncated": capped["truncated"]
+    }
+
+
+@mcp.tool()
+def gh_pr_checkout(
+    pr_number: int,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Check out a GitHub Pull Request branch locally in the Git repository.
+    
+    Args:
+        pr_number: Pull request number to checkout locally.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    res = run_gh_command(["pr", "checkout", str(pr_number)], cwd=cwd)
+    return {
+        "success": res.get("success"),
+        "output": res.get("stdout") or res.get("stderr")
+    }
+
+
+@mcp.tool()
+def gh_pr_action(
+    pr_number: int,
+    action: Literal["approve", "merge", "close", "reopen"],
+    comment: Optional[str] = None,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Perform Pull Request lifecycle actions: 'approve', 'merge', 'close', 'reopen'.
+    
+    Args:
+        pr_number: Pull request number.
+        action: Lifecycle action ('approve', 'merge', 'close', 'reopen').
+        comment: Optional review or closure comment.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    act = action.lower()
+
+    if act == "approve":
+        args = ["pr", "review", str(pr_number), "--approve"]
+        if comment:
+            args += ["--body", comment]
+        res = run_gh_command(args, cwd=cwd)
+        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
+
+    if act == "merge":
+        res = run_gh_command(["pr", "merge", str(pr_number), "--auto", "--merge"], cwd=cwd)
+        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
+
+    if act == "close":
+        args = ["pr", "close", str(pr_number)]
+        if comment:
+            args += ["--comment", comment]
+        res = run_gh_command(args, cwd=cwd)
+        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
+
+    if act == "reopen":
+        res = run_gh_command(["pr", "reopen", str(pr_number)], cwd=cwd)
+        return {"success": res.get("success"), "output": res.get("stdout") or res.get("stderr")}
+
+    return {"success": False, "error": f"Unknown PR action '{action}'. Use approve, merge, close, or reopen."}
+
+
+@mcp.tool()
+def gh_pr_checks(
+    pr_number: int,
+    watch: bool = False,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Inspect individual GitHub Actions CI/CD step statuses, check runs, and failure logs for a Pull Request.
+    
+    Args:
+        pr_number: Pull request number.
+        watch: If True, waits for checks to finish before returning (timeout 30s).
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    args = ["pr", "checks", str(pr_number), "--json", "name,state,status,workflow,description,link,event,bucket"]
+    if watch:
+        args.append("--watch")
+
+    res = run_gh_command(args, cwd=cwd)
+    if not res.get("success"):
+        # Fallback to standard text output if json is unsupported on older gh versions
+        raw_res = run_gh_command(["pr", "checks", str(pr_number)], cwd=cwd)
+        return {
+            "success": raw_res.get("success"),
+            "pr_number": pr_number,
+            "raw_checks": raw_res.get("stdout") or raw_res.get("stderr")
+        }
+
+    try:
+        checks_data = json.loads(res.get("stdout", "[]"))
+        failed_checks = [c for c in checks_data if c.get("state") in ("FAILURE", "CANCELLED", "ERROR") or c.get("status") == "fail"]
+        return {
+            "success": True,
+            "pr_number": pr_number,
+            "checks_count": len(checks_data),
+            "failed_count": len(failed_checks),
+            "all_passing": len(failed_checks) == 0,
+            "checks": checks_data,
+            "failed_checks": failed_checks if failed_checks else None
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse PR checks JSON: {str(e)}"}
+
+
+@mcp.tool()
+def gh_issue_list(
+    state: Literal["open", "closed", "all"] = "open",
+    limit: int = 20,
+    assignee: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Search and list GitHub issues with filters (assignee, label, state).
+    
+    Args:
+        state: Issue state ('open', 'closed', 'all').
+        limit: Maximum number of issues to return (default 20, max 50).
+        assignee: Optional GitHub username filter.
+        labels: Optional list of label names to filter by.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    args = [
+        "issue", "list",
+        "--state", state,
+        "--limit", str(min(max(1, limit), 50)),
+        "--json", "number,title,state,author,labels,assignees,url,updatedAt"
+    ]
+    if assignee:
+        args += ["--assignee", assignee]
+    if labels:
+        for lbl in labels:
+            args += ["--label", lbl]
+
+    res = run_gh_command(args, cwd=cwd)
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    try:
+        issues = json.loads(res.get("stdout", "[]"))
+        return {"success": True, "count": len(issues), "issues": issues}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse issues JSON: {str(e)}"}
+
+
+@mcp.tool()
+def gh_issue_view(
+    issue_number: int,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    View complete GitHub issue details including body, labels, comments, and assignees.
+    
+    Args:
+        issue_number: GitHub issue number.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    res = run_gh_command([
+        "issue", "view", str(issue_number),
+        "--json", "number,title,body,state,author,labels,assignees,comments,url"
+    ], cwd=cwd)
+
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    try:
+        data = json.loads(res.get("stdout", "{}"))
+        return {"success": True, "issue": data}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse issue JSON: {str(e)}"}
+
+
+@mcp.tool()
+def gh_issue_create(
+    title: str,
+    body: str,
+    labels: Optional[List[str]] = None,
+    assignees: Optional[List[str]] = None,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a new GitHub issue with title, description, labels, and assignees.
+    
+    Args:
+        title: Issue title.
+        body: Issue description body.
+        labels: Optional list of label strings to attach.
+        assignees: Optional list of GitHub usernames to assign.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    args = ["issue", "create", "--title", title, "--body", body]
+    if labels:
+        for lbl in labels:
+            args += ["--label", lbl]
+    if assignees:
+        for a in assignees:
+            args += ["--assignee", a]
+
+    res = run_gh_command(args, cwd=cwd)
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    return {
+        "success": True,
+        "issue_url": res.get("stdout", "").strip(),
+        "message": "Issue created successfully."
+    }
+
+
+@mcp.tool()
+def gh_issue_comment(
+    issue_number: int,
+    comment: str,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Post a comment on a GitHub issue or pull request.
+    
+    Args:
+        issue_number: GitHub issue or PR number.
+        comment: Markdown comment content.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    res = run_gh_command(["issue", "comment", str(issue_number), "--body", comment], cwd=cwd)
+    return {
+        "success": res.get("success"),
+        "output": res.get("stdout") or res.get("stderr")
+    }
+
+
+@mcp.tool()
+def gh_run_status(
+    limit: int = 10,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Inspect GitHub Actions CI/CD workflows and recent run outcomes.
+    
+    Args:
+        limit: Maximum number of workflow runs to retrieve (default 10, max 20).
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    res = run_gh_command([
+        "run", "list",
+        "--limit", str(min(max(1, limit), 20)),
+        "--json", "databaseId,name,status,conclusion,event,headBranch,url,createdAt"
+    ], cwd=cwd)
+
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    try:
+        runs = json.loads(res.get("stdout", "[]"))
+        return {"success": True, "count": len(runs), "runs": runs}
+    except Exception as e:
+        return {"success": False, "error": f"Failed to parse runs JSON: {str(e)}"}
+
+
+@mcp.tool()
+def gh_gist_create(
+    description: str,
+    files: Dict[str, str],
+    public: bool = False
+) -> Dict[str, Any]:
+    """
+    Create a GitHub Gist with multiple files to share snippets, patches, or logs.
+    
+    Args:
+        description: Gist description.
+        files: Dictionary mapping filename to string content.
+        public: If True, creates public gist (default False / secret).
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        file_args = []
+        for fname, content in files.items():
+            f_dest = tmp_path / fname
+            f_dest.write_text(content, encoding="utf-8")
+            file_args.append(str(f_dest))
+
+        args = ["gist", "create", "--desc", description] + file_args
+        if public:
+            args.append("--public")
+
+        res = run_gh_command(args, cwd=Path.cwd())
+        if not res.get("success"):
+            return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+        return {
+            "success": True,
+            "gist_url": res.get("stdout", "").strip(),
+            "message": "Gist created successfully."
+        }
+
+
+@mcp.tool()
+def gh_search(
+    kind: Literal["issues", "prs", "code", "repos"] = "issues",
+    query: str = "",
+    limit: int = 15,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Search GitHub globally or within the current repository (kind: 'issues', 'prs', 'code', 'repos').
+    
+    Args:
+        kind: Search entity ('issues', 'prs', 'code', 'repos').
+        query: Search keywords or query string.
+        limit: Maximum results to return (default 15, max 30).
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    k = kind.lower()
+    if k not in ("issues", "prs", "code", "repos"):
+        return {"success": False, "error": f"Invalid search kind '{kind}'. Use issues, prs, code, or repos."}
+
+    args = ["search", k, query, "--limit", str(min(max(1, limit), 30))]
+    res = run_gh_command(args, cwd=cwd)
+    return {
+        "success": res.get("success"),
+        "results": res.get("stdout") or res.get("stderr")
+    }
+
+
 @mcp.tool()
 def gh_release_list(
     limit: int = 10,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [Advanced Tool] List GitHub releases, tags, published dates, and release notes for the repository.
+    List GitHub releases, tags, published dates, and release notes for the repository.
     
     Args:
         limit: Maximum number of releases to return (default 10, max 30).
-        repo_path: Optional repository workspace path.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_gh_installed():
         return get_gh_missing_guidance()
@@ -1784,18 +2360,73 @@ def gh_release_list(
 
 
 @mcp.tool()
+def gh_release_create(
+    tag_name: str,
+    title: Optional[str] = None,
+    notes: Optional[str] = None,
+    generate_notes: bool = False,
+    draft: bool = False,
+    prerelease: bool = False,
+    assets: Optional[List[str]] = None,
+    repo_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a new GitHub Release for a tag and optionally upload release binary/wheel assets.
+    
+    Args:
+        tag_name: Git tag for the release (e.g. 'v1.0.0').
+        title: Release title (defaults to tag_name if omitted).
+        notes: Custom markdown release notes or changelog.
+        generate_notes: If True, automatically generate release notes from commits and PRs.
+        draft: If True, creates the release as a draft.
+        prerelease: If True, marks the release as a pre-release.
+        assets: Optional list of local file paths (binaries, wheels, tarballs) to upload to the release.
+        repo_path: Optional repository workspace path or bookmark alias.
+    """
+    if not is_gh_installed():
+        return get_gh_missing_guidance()
+
+    cwd = resolve_repo_path(repo_path)
+    args = ["release", "create", tag_name]
+    if title:
+        args += ["--title", title]
+    if notes:
+        args += ["--notes", notes]
+    if generate_notes:
+        args.append("--generate-notes")
+    if draft:
+        args.append("--draft")
+    if prerelease:
+        args.append("--prerelease")
+    if assets:
+        args += assets
+
+    res = run_gh_command(args, cwd=cwd)
+    if not res.get("success"):
+        return {"success": False, "error": res.get("stderr") or res.get("stdout")}
+
+    return {
+        "success": True,
+        "tag": tag_name,
+        "release_url": res.get("stdout", "").strip(),
+        "uploaded_assets": assets if assets else None,
+        "message": f"Successfully created GitHub Release for {tag_name}."
+    }
+
+
+@mcp.tool()
 def gh_pr_review_comments(
     pr_number: int,
     limit: int = 30,
     repo_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    [Advanced Tool] Retrieve inline code review comments and discussion threads on a Pull Request.
+    Retrieve inline code review comments and discussion threads on a Pull Request.
     
     Args:
         pr_number: Pull request number.
         limit: Maximum number of review comments to return (default 30, max 60).
-        repo_path: Optional repository workspace path.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_gh_installed():
         return get_gh_missing_guidance()
@@ -1856,7 +2487,7 @@ def gh_api(
         method: HTTP method (default 'GET').
         fields: Optional dictionary of query/body parameters.
         max_chars: Maximum character limit on response payload to preserve context (default 15000).
-        repo_path: Optional repository workspace path.
+        repo_path: Optional repository workspace path or bookmark alias.
     """
     if not is_gh_installed():
         return get_gh_missing_guidance()

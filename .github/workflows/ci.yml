@@ -1,0 +1,62 @@
+name: CI Test Suite
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql build twine pytest
+          pip install -e .
+
+      - name: Run CLI and Discovery Tests
+        run: python tests/test_cli.py
+
+      - name: Run Audit & Server Engine Tests
+        run: python tests/test_audit.py
+
+  build-validation:
+    name: Validate Wheel & Sdist Builds
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install --upgrade build twine hatchling
+
+      - name: Build all 7 packages
+        run: python scripts/build_all.py
+
+      - name: Validate distribution packages with Twine
+        run: twine check dist/*

@@ -39,8 +39,9 @@ def test_discovery():
     assert servers["explorer"]["tools_count"] == 11
     assert servers["tsc"]["tools_count"] == 6
     assert servers["db"]["tools_count"] == 23
-    assert servers["git"]["tools_count"] == 26
+    assert servers["git"]["tools_count"] == 33
     print("[PASS] Discovery test passed for all 6 servers.")
+
 
 
 def test_guides():
@@ -94,9 +95,25 @@ def test_all_servers_import():
     print("[PASS] All 6 servers imported successfully from packages/.")
 
 
+def test_updater():
+    from mcp_win_stdio.core.updater import parse_version, format_update_banner, check_for_update
+
+    assert parse_version("0.2.3") == (0, 2, 3)
+    assert parse_version("0.2.4") > parse_version("0.2.3")
+    assert parse_version("1.0.0") > parse_version("0.9.9")
+
+    banner = format_update_banner("0.2.3", "0.2.4")
+    assert "UPDATE AVAILABLE" in banner
+    assert "v0.2.3" in banner
+    assert "v0.2.4" in banner
+    print("[PASS] Updater tests passed.")
+
+
 if __name__ == "__main__":
     test_discovery()
     test_guides()
     test_dashboard()
     test_all_servers_import()
+    test_updater()
     print("ALL TESTS PASSED!")
+

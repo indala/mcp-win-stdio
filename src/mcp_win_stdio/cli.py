@@ -44,7 +44,20 @@ from mcp_win_stdio.core.installer import (
     remove_server_from_desktop,
     safe_apply_to_cli,
     safe_apply_to_desktop,
+    uninstall_pip_packages,
 )
+from mcp_win_stdio.core.updater import (
+    check_for_update,
+    format_update_banner,
+    get_cached_or_latest_version,
+)
+from mcp_win_stdio.core.environment import (
+    add_dir_to_user_path,
+    check_and_prompt_path_setup,
+    get_candidate_script_dirs,
+    is_in_path,
+)
+
 
 
 
@@ -55,7 +68,17 @@ def print_dashboard() -> None:
     desktop_cfg = get_claude_desktop_config_path()
     cli_cfg = get_claude_cli_config_path()
 
+    # Check for PyPI updates (fast/cached)
+    update_info = check_for_update(__version__)
+    if update_info:
+        cur, latest = update_info
+        print("\n" + format_update_banner(cur, latest))
+
+    # Check if Python Scripts directory is missing from PATH and prompt user
+    check_and_prompt_path_setup()
+
     print(f"\n" + "=" * 76)
+
     print(f"   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v{__version__})")
     print("=" * 76)
     print(f" Single-Source Hub:      {INDALA_DIR}")
@@ -77,13 +100,16 @@ def print_dashboard() -> None:
 
     print("-" * 76)
     print(" 💡 Quick Commands:")
-    print("   mws install <server|all> -> Install server packages from PyPI")
-    print("   mws setup <server>       -> Configure Claude Desktop & Claude Code CLI")
-    print("   mws guide <server>       -> View complete tool reference & Claude prompts")
-    print("   mws doctor               -> Run health checks (COM, Python, DB, Git)")
-    print("   mws run <server>         -> Launch MCP server over stdio")
-    print("   mws list                 -> List all servers and custom plugins")
+    print("   mws install <server|all>   -> Install server packages from PyPI")
+    print("   mws update <server|all>    -> Check & upgrade to latest PyPI version")
+    print("   mws setup <server>         -> Configure Claude Desktop & Claude Code CLI")
+    print("   mws uninstall <server|all> -> Cleanly remove packages & Claude configs")
+    print("   mws guide <server>         -> View complete tool reference & Claude prompts")
+    print("   mws doctor                 -> Run health checks (COM, Python, DB, Git)")
+    print("   mws run <server>           -> Launch MCP server over stdio")
+    print("   mws list                   -> List all servers and custom plugins")
     print("=" * 76 + "\n")
+
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -216,7 +242,11 @@ def cmd_install(args: argparse.Namespace) -> None:
                 if do_gh in ("y", "yes"):
                     subprocess.run(["winget", "install", "--id", "GitHub.cli", "-e"])
 
+    # Check and prompt to add Python Scripts directory to Windows User PATH
+    check_and_prompt_path_setup()
+
     print("\n✅ Installation complete! Run 'mws list' to verify status or 'mws setup <server>' to configure Claude.\n")
+
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -386,8 +416,143 @@ def cmd_remove(args: argparse.Namespace) -> None:
             print(f"  Claude CLI:     {msg}")
 
 
+def cmd_update(args: argparse.Namespace) -> None:
+    """Check PyPI for latest version and upgrade mcp-win-stdio suite or specific server."""
+    target = (args.server or "all").lower()
+    print(f"\n=== 🔄 mcp-win-stdio Update Manager (Current: v{__version__}) ===")
+
+    print("Checking PyPI for latest version...")
+    update_info = check_for_update(__version__, force=True)
+    if update_info:
+        cur, latest = update_info
+        print(f"✨ New version available on PyPI: v{cur} ➔ v{latest}")
+    else:
+        latest = get_cached_or_latest_version(force=True)
+        print(f"✅ Core CLI is on the latest version: v{__version__} (PyPI: v{latest or __version__})")
+
+    if target == "all":
+        print("\n==> 🚀 Updating full suite via 'pip install --upgrade \"mcp-win-stdio[all]\"'...")
+        res = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "mcp-win-stdio[all]"])
+    elif target in ("core", "mws", "mcp-win-stdio"):
+        print("\n==> 🚀 Updating core CLI via 'pip install --upgrade mcp-win-stdio'...")
+        res = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "mcp-win-stdio"])
+    else:
+        srv = get_server_info(target)
+        pkg = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
+        print(f"\n==> 🚀 Updating '{target}' via 'pip install --upgrade {pkg}'...")
+        res = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", pkg])
+
+    if res.returncode == 0:
+        print("\n✅ Update completed successfully!\n")
+    else:
+        print("\n[WARN] Update process completed with return code: {res.returncode}\n")
+
+
+def cmd_uninstall(args: argparse.Namespace) -> None:
+    """Cleanly uninstall MCP server package(s) and Claude configs while preserving ~/.mcp-win-stdio and mws CLI."""
+    target = (args.server or "").lower()
+
+    if not target:
+        if sys.stdin.isatty():
+            print("\n=== 🗑️  mcp-win-stdio Uninstaller ===")
+            print("Select an option to uninstall:")
+            print("  [1] excel     -> Uninstall mcp-win-stdio-excel & remove from Claude")
+            print("  [2] word      -> Uninstall mcp-win-stdio-word & remove from Claude")
+            print("  [3] explorer  -> Uninstall mcp-win-stdio-explorer & remove from Claude")
+            print("  [4] tsc       -> Uninstall mcp-win-stdio-tsc & remove from Claude")
+            print("  [5] db        -> Uninstall mcp-win-stdio-db & remove from Claude")
+            print("  [6] git       -> Uninstall mcp-win-stdio-git & remove from Claude")
+            print("  [7] all       -> Uninstall all 6 MCP servers & remove from Claude (keeps mws CLI)")
+            print("  [8] self      -> Uninstall mws CLI itself (mcp-win-stdio)")
+            print("  [9] Exit")
+            choice = input("\nEnter choice (1-9) [default: 7]: ").strip() or "7"
+            mapping = {
+                "1": "excel",
+                "2": "word",
+                "3": "explorer",
+                "4": "tsc",
+                "5": "db",
+                "6": "git",
+                "7": "all",
+                "8": "self",
+            }
+            if choice not in mapping:
+                print("Uninstall cancelled.")
+                return
+            target = mapping[choice]
+        else:
+            target = "all"
+
+    known_servers = ["excel", "word", "explorer", "tsc", "db", "git"]
+
+    if target == "self":
+        print("\n==> 🧹 Uninstalling mws CLI core package (mcp-win-stdio)...")
+        ok_pip, msg_pip = uninstall_pip_packages(["mcp-win-stdio"])
+        if ok_pip:
+            print("[OK] mcp-win-stdio core CLI uninstalled successfully.")
+        else:
+            print(f"[WARN] {msg_pip}")
+        print(f"🔒 Single-source hub directory PRESERVED: {INDALA_DIR}")
+        return
+
+    selected_servers = known_servers if target == "all" else [target]
+
+    print(f"\n==> 🧹 Starting clean uninstallation for: {target}...")
+
+    # 1. Remove from Claude Desktop and Claude Code CLI
+    print("\n--- 1. Cleaning Claude Registrations ---")
+    for srv_name in selected_servers:
+        ok_d, msg_d = remove_server_from_desktop(srv_name)
+        ok_c, msg_c = remove_server_from_cli(srv_name)
+        print(f"  • {srv_name:<10} Desktop: {msg_d} | CLI: {msg_c}")
+
+    # 2. Pip Uninstall packages (only server packages, mws CLI is preserved)
+    print("\n--- 2. Removing Python Packages via pip ---")
+    packages_to_remove = []
+    for srv_name in selected_servers:
+        srv = get_server_info(srv_name)
+        pkg = srv.get("package", f"mcp-win-stdio-{srv_name}") if srv else f"mcp-win-stdio-{srv_name}"
+        packages_to_remove.append(pkg)
+
+    print(f"Packages to uninstall: {', '.join(packages_to_remove)}")
+    ok_pip, msg_pip = uninstall_pip_packages(packages_to_remove)
+    if ok_pip:
+        print("[OK] Server packages uninstalled successfully.")
+    else:
+        print(f"[WARN] {msg_pip}")
+
+    # 3. Explicitly preserve Single-Source Hub ~/.mcp-win-stdio and mws CLI
+    print("\n--- 3. Single-Source Hub & CLI Status ---")
+    print(f"🔒 Single-source hub directory PRESERVED: {INDALA_DIR}")
+    print("   (Your custom plugins, logs, and configs in ~/.mcp-win-stdio are kept safe.)")
+    print(f"⚙️  mws CLI PRESERVED (You can continue to use 'mws' to install servers or manage plugins.)")
+    print("=" * 76)
+    print("✅ Uninstallation complete!\n")
+
+
+def cmd_fix_path(args: argparse.Namespace) -> None:
+    """Check and automatically configure Python Scripts / bin directories in Windows User PATH."""
+    print(f"\n=== 🧭 Windows PATH Environment Manager ===")
+    candidate_dirs = get_candidate_script_dirs()
+    print("Detected Python executable script & binary directories:")
+    for d in candidate_dirs:
+        status = "[In PATH]" if is_in_path(d) else "[MISSING from PATH]"
+        print(f"  • {str(d):<65} {status}")
+
+    missing = [d for d in candidate_dirs if not is_in_path(d) and d.exists()]
+    if not missing:
+        print("\n✅ All active Python script directories are already registered in your Windows PATH!\n")
+        return
+
+    added = check_and_prompt_path_setup(auto_accept=getattr(args, "yes", False))
+    if added:
+        print("✅ PATH environment variable updated successfully!\n")
+    else:
+        print("ℹ️  No changes made to PATH.\n")
+
 
 def cmd_run(args: argparse.Namespace) -> None:
+
     """Run an MCP server over stdio."""
     server_name = args.server.lower()
     srv = get_server_info(server_name)
@@ -428,26 +593,19 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print(f"[{py_status}] Python Runtime: {py_ver} ({sys.executable})")
 
     # 1b. Scripts & PATH Check
-    import sysconfig
-    scripts_dir = sysconfig.get_path("scripts")
-    path_env = os.environ.get("PATH", "")
-    in_path = False
-    if scripts_dir:
-        in_path = any(
-            os.path.normcase(os.path.normpath(scripts_dir)) == os.path.normcase(os.path.normpath(p.strip()))
-            for p in path_env.split(os.pathsep)
-            if p.strip()
-        )
-    scripts_exist = os.path.isdir(scripts_dir) if scripts_dir else False
+    candidate_dirs = get_candidate_script_dirs()
+    missing_dirs = [d for d in candidate_dirs if not is_in_path(d) and d.exists()]
+    in_path_dirs = [d for d in candidate_dirs if is_in_path(d) and d.exists()]
 
-    if scripts_exist and in_path:
-        print(f"[OK] Scripts Directory: {scripts_dir} (in PATH)")
-    elif scripts_exist and not in_path:
-        print(f"[WARN] Scripts Directory: {scripts_dir} (NOT in PATH)")
-        print(f"       Tip: Add to PATH to run 'mws' directly, or run: python -m mcp_win_stdio <command>")
-    else:
-        print(f"[INFO] Scripts Directory: Not created yet ({scripts_dir})")
-        print(f"       Tip: You can always run: python -m mcp_win_stdio <command>")
+    for d in in_path_dirs:
+        print(f"[OK] Scripts Directory: {d} (in PATH)")
+    for d in missing_dirs:
+        print(f"[WARN] Scripts Directory: {d} (NOT in PATH)")
+        print(f"       👉 Run 'mws fix-path' to add it to your Windows User PATH automatically.")
+
+    if not candidate_dirs:
+        print(f"[INFO] Scripts Directory: No standard scripts directory detected.")
+
 
     # 2. Python Dependencies
     deps = [
@@ -563,6 +721,17 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     else:
         print(f"[INFO] Claude Code CLI config: {cli_cfg or 'Not found in ~/.claude.json'}")
 
+    # 8. PyPI Version & Update Status
+    print("\n--- PyPI Version & Update Status ---")
+    update_info = check_for_update(__version__, force=True)
+    if update_info:
+        cur, latest = update_info
+        print(f"[WARN] New version available on PyPI: v{cur} ➔ v{latest}")
+        print(f"       👉 Run 'mws update' or 'pip install --upgrade mcp-win-stdio' to upgrade.")
+    else:
+        latest = get_cached_or_latest_version(force=True)
+        print(f"[OK] mcp-win-stdio is up to date: v{__version__} (PyPI: v{latest or __version__})")
+
     print("\nDiagnostic complete.\n")
 
 
@@ -590,6 +759,11 @@ def main() -> None:
     sub_install.add_argument("server", nargs="?", default=None, help="Server package to install ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
     sub_install.set_defaults(func=cmd_install)
 
+    # update
+    sub_update = subparsers.add_parser("update", help="Check PyPI and upgrade mcp-win-stdio suite or specific server")
+    sub_update.add_argument("server", nargs="?", default="all", help="Server or 'all' to update ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_update.set_defaults(func=cmd_update)
+
     # setup
     sub_setup = subparsers.add_parser("setup", help="Configure server(s) into Claude Desktop and CLI")
     sub_setup.add_argument("server", nargs="?", default=None, help="Server to configure ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
@@ -598,9 +772,14 @@ def main() -> None:
 
     # remove
     sub_remove = subparsers.add_parser("remove", help="Remove server(s) from Claude Desktop and CLI")
-    sub_remove.add_argument("server", help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'all')")
+    sub_remove.add_argument("server", help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
     sub_remove.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_remove.set_defaults(func=cmd_remove)
+
+    # uninstall
+    sub_uninstall = subparsers.add_parser("uninstall", help="Uninstall MCP server(s) & clean Claude configs while preserving ~/.mcp-win-stdio")
+    sub_uninstall.add_argument("server", nargs="?", default=None, help="Server to uninstall ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_uninstall.set_defaults(func=cmd_uninstall)
 
     # run
     sub_run = subparsers.add_parser("run", help="Launch an MCP server over stdio for Claude")
@@ -611,13 +790,20 @@ def main() -> None:
     sub_doctor = subparsers.add_parser("doctor", help="Check system health, dependencies, and COM readiness")
     sub_doctor.set_defaults(func=cmd_doctor)
 
+    # fix-path / path
+    sub_path = subparsers.add_parser("fix-path", aliases=["path"], help="Check and configure Python Scripts directory in Windows User PATH")
+    sub_path.add_argument("--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH")
+    sub_path.set_defaults(func=cmd_fix_path)
+
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
     known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc"}
-    known_cmds = {"guide", "run", "setup", "doctor", "remove", "install"}
+    known_cmds = {"guide", "run", "setup", "doctor", "remove", "install", "update", "uninstall", "fix-path", "path"}
     if len(sys.argv) >= 3 and sys.argv[1].lower() in known_srvs and sys.argv[2].lower() in known_cmds:
         srv_token = sys.argv[1].lower()
         cmd_token = sys.argv[2].lower()
         sys.argv = [sys.argv[0], cmd_token, srv_token] + sys.argv[3:]
+
+
 
     args = parser.parse_args()
     if not args.command:

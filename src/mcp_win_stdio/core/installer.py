@@ -192,3 +192,20 @@ def remove_server_from_cli(server_name: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Failed to remove from Claude CLI: {str(e)}"
 
+
+def uninstall_pip_packages(packages: List[str]) -> Tuple[bool, str]:
+    """Uninstall Python packages using pip."""
+    if not packages:
+        return True, "No packages specified to uninstall."
+
+    cmd = [sys.executable, "-m", "pip", "uninstall", "-y"] + packages
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode == 0:
+            return True, "Packages uninstalled successfully."
+        else:
+            return False, f"Pip uninstall error:\n{res.stderr or res.stdout}"
+    except Exception as e:
+        return False, f"Failed to run pip uninstall: {str(e)}"
+
+

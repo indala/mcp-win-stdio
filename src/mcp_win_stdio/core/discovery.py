@@ -76,13 +76,14 @@ BUILTIN_SERVERS = {
         "package": "mcp-win-stdio-git",
         "title": "Unified Git & GitHub MCP (Local Git + gh CLI)",
         "module": "mcp_win_stdio.git.server",
-        "description": "26 tools: Local Git branching, commits, diffs, conflicts, and remote GitHub PRs, issues, Actions, with hybrid synergy workflows.",
-        "tools_count": 26,
+        "description": "33 tools: Local Git init/remotes/restore/branching, bookmark management, commits, diffs, conflicts, and remote GitHub PR checks, releases, issues, Actions.",
+        "tools_count": 33,
         "is_builtin": True,
         "required_pip": ["mcp-win-stdio-git"],
         "dependencies": ["mcp"],
         "optional_dependencies": [],
     },
+
 }
 
 
