@@ -24,6 +24,8 @@ MANIFEST
 *.manifest
 *.spec
 api.txt
+pypi-api.txt
+
 
 pip-log.txt
 pip-delete-this-directory.txt

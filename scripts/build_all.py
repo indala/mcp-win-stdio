@@ -1,5 +1,5 @@
 """
-Build script to compile wheels and source distributions for all 7 packages.
+Build script to compile wheels and source distributions for all 8 packages.
 """
 
 import os
@@ -44,7 +44,7 @@ def clean():
 
 def build_all():
     clean()
-    print("🚀 Building all 7 packages...")
+    print("🚀 Building all 8 packages...")
 
     for pkg in PACKAGES:
         rel_name = pkg.name if pkg != ROOT_DIR else "mcp-win-stdio (root)"
