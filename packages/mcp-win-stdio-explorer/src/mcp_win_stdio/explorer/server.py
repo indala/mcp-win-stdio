@@ -194,7 +194,10 @@ def _load_gitignore_spec(root: Path) -> Optional[pathspec.PathSpec]:
     if not patterns:
         return None
     try:
-        return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+        try:
+            return pathspec.PathSpec.from_lines("gitignore", patterns)
+        except Exception:
+            return pathspec.PathSpec.from_lines("gitwildmatch", patterns)
     except Exception:
         return None
 

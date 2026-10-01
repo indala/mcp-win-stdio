@@ -471,10 +471,23 @@ def get_tsc_errors(
         safe_offset = max(0, offset)
 
         for cfg_path, data in WATCHED_PROJECTS.items():
-            if tsconfig_path and normalize_path(tsconfig_path) != cfg_path:
-                continue
-            if project_path and normalize_path(project_path) not in data["project_dir"]:
-                continue
+            if tsconfig_path:
+                norm_cfg_filter = tsconfig_path.replace("\\", "/").lower()
+                norm_cfg_abs = normalize_path(tsconfig_path).lower()
+                if cfg_path.lower() != norm_cfg_abs and norm_cfg_filter not in cfg_path.lower():
+                    continue
+
+            if project_path:
+                p_filter = project_path.replace("\\", "/").rstrip("/").lower()
+                p_abs = normalize_path(project_path).lower()
+                proj_dir = data["project_dir"].lower()
+                if (
+                    p_filter not in proj_dir
+                    and p_abs != proj_dir
+                    and not proj_dir.startswith(p_abs + "/")
+                    and not p_abs.startswith(proj_dir + "/")
+                ):
+                    continue
 
             errs = data.get("errors", [])
             status = data.get("status", "unknown")
@@ -738,12 +751,21 @@ def get_file_errors(
                 "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first.",
             }
 
-        norm_file = normalize_path(file_path)
+        norm_file = normalize_path(file_path).lower()
+        norm_raw = file_path.replace("\\", "/").lower()
         file_errors = []
 
         for cfg_path, data in WATCHED_PROJECTS.items():
             for err in data.get("errors", []):
-                if err["file"] == norm_file or err["relative_path"] == norm_file or file_path.replace("\\", "/") in err["file"]:
+                err_file = err.get("file", "").lower()
+                err_rel = err.get("relative_path", "").lower()
+                if (
+                    err_file == norm_file
+                    or err_rel == norm_raw
+                    or err_file.endswith("/" + norm_raw.lstrip("/"))
+                    or norm_raw in err_file
+                    or norm_raw == err_file
+                ):
                     file_errors.append(err)
 
     safe_limit = min(max(1, limit), 100)

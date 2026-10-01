@@ -33,7 +33,7 @@ def test_excel_clean_records():
 def test_explorer_gitignore():
     from mcp_win_stdio.explorer.server import _matches_gitignore
     patterns = ["node_modules/", "dist/", "*.pyc", "temp_dir/"]
-    spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+    spec = pathspec.PathSpec.from_lines("gitignore", patterns)
     assert _matches_gitignore(spec, "node_modules", is_dir=True) is True
     assert _matches_gitignore(spec, "dist", is_dir=True) is True
     assert _matches_gitignore(spec, "src/foo.pyc", is_dir=False) is True
@@ -555,13 +555,147 @@ def test_ssh_tools():
     res_rm = remove_host("ci-test-host")
     assert res_rm["success"] is True
 
-    print("[PASS] SSH tools and multi-host lifecycle tests passed.")
+def test_db_server_database_confusion():
+    """Test that DB MCP seamlessly resolves aliases when server, connection, database, or name are used."""
+    from mcp_win_stdio.db.server import (
+        _RAW_CONFIG,
+        _CONNECTION_REGISTRY,
+        _get_connection,
+        _resolve_conn,
+        use_database,
+    )
+    # Simulate user configuring showreel server with showreel database
+    _RAW_CONFIG["showreel"] = "postgresql://postgres:pass@localhost:5432/showreel"
+    _RAW_CONFIG["analytics_server"] = "postgresql://postgres:pass@remote:5432/metrics_db"
+
+    try:
+        # 1. Resolve by connection alias
+        c1 = _get_connection("showreel")
+        assert c1["name"] == "showreel"
+        assert c1["database"] == "showreel"
+
+        # 2. Resolve by database name inside configured server (metrics_db on analytics_server)
+        c2 = _get_connection("metrics_db")
+        assert c2["name"] == "analytics_server"
+        assert c2["database"] == "metrics_db"
+
+        # 3. Test _resolve_conn helper
+        assert _resolve_conn("showreel", None) == "showreel"
+        assert _resolve_conn(None, "showreel") == "showreel"
+        assert _resolve_conn("showreel", "fallback") == "showreel"
+        assert _resolve_conn("null", "showreel") == "showreel"
+
+        # 4. Test use_database with various argument forms:
+        # a) database="showreel"
+        res_db = use_database(database="showreel")
+        assert res_db["success"] is True
+        assert res_db["activeConnection"] == "showreel"
+
+        # b) connection="showreel"
+        res_conn = use_database(connection="showreel")
+        assert res_conn["success"] is True
+        assert res_conn["activeConnection"] == "showreel"
+
+        # c) server="showreel"
+        res_srv = use_database(server="showreel")
+        assert res_srv["success"] is True
+        assert res_srv["activeConnection"] == "showreel"
+
+        # d) name="showreel"
+        res_name = use_database(name="showreel")
+        assert res_name["success"] is True
+        assert res_name["activeConnection"] == "showreel"
+
+        # e) switching to metrics_db by database name
+        res_metrics = use_database(database="metrics_db")
+        assert res_metrics["success"] is True
+        assert res_metrics["activeConnection"] == "analytics_server"
+        assert res_metrics["database"] == "metrics_db"
+
+        print("[PASS] DB server vs database confusion & alias resolution tests passed.")
+    finally:
+        _RAW_CONFIG.pop("showreel", None)
+        _RAW_CONFIG.pop("analytics_server", None)
+        _CONNECTION_REGISTRY.pop("showreel", None)
+        _CONNECTION_REGISTRY.pop("analytics_server", None)
+
+
+def test_tsc_filter_improvements():
+    """Test TSC substring filtering, case-insensitivity, and suggestion tools."""
+    from mcp_win_stdio.tsc.server import (
+        WATCHED_PROJECTS,
+        CACHE_LOCK,
+        get_tsc_errors,
+        get_file_errors,
+        suggest_error_fixes,
+        get_error_category_breakdown,
+    )
+    with CACHE_LOCK:
+        WATCHED_PROJECTS["E:/repos/my-app/tsconfig.json"] = {
+            "relative_config": "tsconfig.json",
+            "project_dir": "E:/repos/my-app",
+            "status": "ready",
+            "last_updated": "2026-10-01T12:00:00Z",
+            "errors": [
+                {
+                    "file": "E:/repos/my-app/src/App.tsx",
+                    "relative_path": "src/App.tsx",
+                    "line": 15,
+                    "column": 5,
+                    "severity": "error",
+                    "code": "TS2322",
+                    "message": "Type 'string' is not assignable to type 'number'.",
+                },
+                {
+                    "file": "E:/repos/my-app/src/utils.ts",
+                    "relative_path": "src/utils.ts",
+                    "line": 42,
+                    "column": 10,
+                    "severity": "error",
+                    "code": "TS2304",
+                    "message": "Cannot find name 'missingVar'.",
+                },
+            ],
+        }
+
+    try:
+        # 1. Test substring filtering for project_path (e.g. 'my-app' or 'my-app/src')
+        res_sub = get_tsc_errors(project_path="my-app")
+        assert res_sub["total_errors"] == 2
+        assert len(res_sub["errors"]) == 2
+
+        # 2. Test tsconfig substring filter
+        res_cfg = get_tsc_errors(tsconfig_path="my-app/tsconfig.json")
+        assert res_cfg["total_errors"] == 2
+
+        # 3. Test get_file_errors with Windows path and casing
+        res_file = get_file_errors("E:\\repos\\MY-APP\\src\\app.tsx")
+        assert res_file["total_errors"] == 1
+        assert res_file["errors"][0]["code"] == "TS2322"
+
+        # 4. Test suggest_error_fixes
+        res_fix = suggest_error_fixes("TS2322")
+        assert res_fix["success"] is True
+        assert "recommended_resolutions" in res_fix
+        assert len(res_fix["recommended_resolutions"]) > 0
+
+        # 5. Test get_error_category_breakdown
+        res_cat = get_error_category_breakdown()
+        assert res_cat["success"] is True
+        assert "type_mismatches" in res_cat["category_summary"]
+        assert res_cat["category_summary"]["type_mismatches"] == 1
+
+        print("[PASS] TSC substring filter, case-insensitivity & suggestions tests passed.")
+    finally:
+        with CACHE_LOCK:
+            WATCHED_PROJECTS.pop("E:/repos/my-app/tsconfig.json", None)
 
 
 if __name__ == "__main__":
     test_excel_clean_records()
     test_explorer_gitignore()
     test_tsc_safety()
+    test_tsc_filter_improvements()
     test_db_truncate_cell()
     test_excel_context_protection()
     test_word_tools()
@@ -569,5 +703,6 @@ if __name__ == "__main__":
     test_db_agent_friction_fixes()
     test_db_pii_masking()
     test_db_schema_tools()
+    test_db_server_database_confusion()
     test_ssh_tools()
     print("ALL AUDIT TESTS PASSED!")

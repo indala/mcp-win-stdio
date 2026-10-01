@@ -18,28 +18,38 @@ Safety & Standby Architecture:
   * Compiler Pre-Check: Verifies TypeScript compiler ('tsc') availability before
     scanning or watching files, returning clear installation guidance if missing.
 
-Available Tools (6 Tools):
+Available Tools (8 Tools):
 --------------------------------------------------------------------------------
 1.  get_tsc_errors
     - Returns active TypeScript compilation errors from cache (0ms latency).
-    - Optional filters: project_path (str), tsconfig_path (str)
+    - Context-window protected, paginated, and token-safe.
+    - Optional filters: project_path (str), tsconfig_path (str), error_code (str)
 
-2.  get_file_errors
+2.  suggest_error_fixes
+    - Instant actionable fix recommendations, explanation, and code patterns
+      for common TypeScript compiler errors (e.g. TS2304, TS2322, TS2339, TS2345).
+    - Args: error_code (str), message (optional str)
+
+3.  get_error_category_breakdown
+    - High-level categorization of all active TypeScript errors into semantic groups:
+      type_mismatch, missing_declaration, nullability, imports, jsx, config.
+
+4.  get_file_errors
     - Returns TypeScript errors for a specific .ts / .tsx / .js / .jsx file.
-    - Args: file_path (str)
+    - Args: file_path (str), limit (int), offset (int), max_message_chars (int)
 
-3.  get_error_summary
+5.  get_error_summary
     - Returns error counts per project and top 5 most common error codes (e.g. TS2322).
 
-4.  list_watched_projects
+6.  list_watched_projects
     - Lists all active tsconfig.json files and current watcher statuses.
 
-5.  watch_project
+7.  watch_project
     - Dynamically verifies 'tsc', scans for tsconfig.json, and starts background
       watchers for a target project directory without restarting the server.
     - Args: project_path (str)
 
-6.  restart_tsc_watcher
+8.  restart_tsc_watcher
     - Restarts all watchers and flushes diagnostics.
 
 --------------------------------------------------------------------------------
@@ -55,6 +65,7 @@ Example Prompts for Claude:
 * "Watch the TypeScript project at 'Z:/projects/my-web-app'."
 * "Check if there are any TypeScript errors in my project right now."
 * "Are there any type errors in src/components/Dashboard.tsx?"
+* "How do I fix TypeScript error TS2322 in my component?"
 ================================================================================
 """
     print(guide_text)
@@ -62,3 +73,4 @@ Example Prompts for Claude:
 
 def print_tsc_guide() -> None:
     print_guide()
+

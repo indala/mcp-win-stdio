@@ -36,13 +36,13 @@ def test_discovery():
     assert "git" in servers
     assert "ssh" in servers
 
-    assert servers["excel"]["tools_count"] == 20
-    assert servers["word"]["tools_count"] == 10
-    assert servers["explorer"]["tools_count"] == 11
-    assert servers["tsc"]["tools_count"] == 6
-    assert servers["db"]["tools_count"] == 23
-    assert servers["git"]["tools_count"] == 33
-    assert servers["ssh"]["tools_count"] == 27
+    assert servers["excel"]["tools_count"] == 27
+    assert servers["word"]["tools_count"] == 13
+    assert servers["explorer"]["tools_count"] == 14
+    assert servers["tsc"]["tools_count"] == 8
+    assert servers["db"]["tools_count"] == 25
+    assert servers["git"]["tools_count"] == 46
+    assert servers["ssh"]["tools_count"] == 34
     print("[PASS] Discovery test passed for all 7 servers.")
 
 

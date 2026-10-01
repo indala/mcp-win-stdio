@@ -341,16 +341,23 @@ def _parse_url(url: str) -> Dict[str, Any]:
     }
 
 
-def _get_connection(target_name: Optional[str] = None) -> Dict[str, Any]:
+def _resolve_conn(connection: Optional[str] = None, server: Optional[str] = None) -> Optional[str]:
+    """Helper to resolve connection or server parameter interchangeably."""
+    return _normalize_connection_param(connection) or _normalize_connection_param(server)
+
+
+def _get_connection(target_name: Optional[str] = None, fallback_server: Optional[str] = None) -> Dict[str, Any]:
     global _ACTIVE_CONNECTION
-    norm_name = _normalize_connection_param(target_name)
+    norm_name = _normalize_connection_param(target_name) or _normalize_connection_param(fallback_server)
     name = norm_name or _ACTIVE_CONNECTION
     if not name:
         raise ValueError("No database connection specified and no active connection set.")
 
+    # 1. Exact match in registry
     if name in _CONNECTION_REGISTRY:
         return _CONNECTION_REGISTRY[name]
 
+    # 2. Exact match in raw config
     if name in _RAW_CONFIG:
         entry = _RAW_CONFIG[name]
         url = entry if isinstance(entry, str) else entry.get("url", "")
@@ -360,9 +367,25 @@ def _get_connection(target_name: Optional[str] = None) -> Dict[str, Any]:
         _CONNECTION_REGISTRY[name] = info
         return info
 
-    # Try to derive sibling DB on active server
-    if _ACTIVE_CONNECTION and _ACTIVE_CONNECTION in _CONNECTION_REGISTRY:
-        curr = _CONNECTION_REGISTRY[_ACTIVE_CONNECTION]
+    # 3. Case-insensitive match in raw config
+    for k in _RAW_CONFIG.keys():
+        if k.lower() == name.lower():
+            return _get_connection(k)
+
+    # 4. Check if 'name' is the target database name inside any configured server
+    for k, v in _RAW_CONFIG.items():
+        try:
+            url = v if isinstance(v, str) else v.get("url", "")
+            p_info = _parse_url(url)
+            if p_info.get("database", "").lower() == name.lower():
+                return _get_connection(k)
+        except Exception:
+            pass
+
+    # 5. Try to derive sibling DB on active server or fallback server
+    base_target = _normalize_connection_param(fallback_server) or _ACTIVE_CONNECTION
+    if base_target and (base_target in _CONNECTION_REGISTRY or base_target in _RAW_CONFIG):
+        curr = _get_connection(base_target)
         u = urlparse(curr["url"])
         new_url = f"{u.scheme}://{u.netloc}/{name}"
         info = _parse_url(new_url)
@@ -384,7 +407,7 @@ def _get_connection(target_name: Optional[str] = None) -> Dict[str, Any]:
         _RAW_CONFIG[name] = new_url
         return info
 
-    raise ValueError(f"Connection '{name}' not found. Available: {list(_RAW_CONFIG.keys())}")
+    raise ValueError(f"Connection or database '{name}' not found. Available connections: {list(_RAW_CONFIG.keys())}")
 
 
 def _get_pg_client(info: Dict[str, Any], dbname: Optional[str] = None):
@@ -527,41 +550,82 @@ def list_connections() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def use_database(database: str, server: Optional[str] = None) -> Dict[str, Any]:
+def use_database(
+    database: Optional[str] = None,
+    server: Optional[str] = None,
+    connection: Optional[str] = None,
+    name: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Switch active database connection. Automatically discovers and connects to sibling databases on the same server.
-    Sticky connection state is guaranteed for all subsequent tool calls when connection is omitted.
+    Switch active database connection. Supports connection aliases (e.g. 'showreel', 'production'),
+    database names, or sibling databases on the active/specified server.
+    Sticky connection state is guaranteed for all subsequent tool calls when connection/server is omitted.
     
     Args:
-        database: Database name to connect to, or registered connection name.
-        server: Optional base server/connection name to find sibling database on (defaults to currently active connection).
+        database: Database name to connect to, or registered connection/server alias.
+        server: Optional server or connection alias (e.g. 'showreel', 'localhost') to locate sibling database on.
+        connection: Optional alias for server/connection name.
+        name: Optional alias for database or connection name.
     """
     global _ACTIVE_CONNECTION
-    clean_db = str(database).strip()
-    norm_server = _normalize_connection_param(server)
+    target = _normalize_connection_param(database) or _normalize_connection_param(connection) or _normalize_connection_param(name) or _normalize_connection_param(server)
+    base_server = _normalize_connection_param(server) or _normalize_connection_param(connection)
 
-    # 1. If clean_db is already a known connection name
-    if clean_db in _RAW_CONFIG or clean_db in _CONNECTION_REGISTRY:
+    if not target and not base_server:
+        return {
+            "error": True,
+            "message": f"Please specify a database name or connection alias. Available connections: {list(_RAW_CONFIG.keys())}"
+        }
+
+    if not target:
+        target = base_server
+
+    # 1. Check if target directly matches a registered connection name (case-insensitive)
+    for k in list(_RAW_CONFIG.keys()):
+        if k.lower() == target.lower():
+            try:
+                info = _get_connection(k)
+                _ACTIVE_CONNECTION = info["name"]
+                _save_active_connection(_ACTIVE_CONNECTION)
+                return {
+                    "success": True,
+                    "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}). Connection alias: '{_ACTIVE_CONNECTION}', Database: '{info['database']}'.",
+                    "activeConnection": _ACTIVE_CONNECTION,
+                    "engine": info["engine"],
+                    "database": info["database"],
+                    "host": info["host"],
+                    "port": info["port"]
+                }
+            except Exception as e:
+                return _format_db_error(e)
+
+    # 2. Check if target matches a database name inside one of the registered connections
+    for k, v in list(_RAW_CONFIG.items()):
         try:
-            info = _get_connection(clean_db)
-            _ACTIVE_CONNECTION = info["name"]
-            _save_active_connection(_ACTIVE_CONNECTION)
-            return {
-                "success": True,
-                "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}).",
-                "activeConnection": _ACTIVE_CONNECTION,
-                "engine": info["engine"],
-                "database": info["database"]
-            }
-        except Exception as e:
-            return _format_db_error(e)
+            url = v if isinstance(v, str) else v.get("url", "")
+            p_info = _parse_url(url)
+            if p_info.get("database", "").lower() == target.lower():
+                info = _get_connection(k)
+                _ACTIVE_CONNECTION = info["name"]
+                _save_active_connection(_ACTIVE_CONNECTION)
+                return {
+                    "success": True,
+                    "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}). Connection alias: '{_ACTIVE_CONNECTION}', Database: '{info['database']}'.",
+                    "activeConnection": _ACTIVE_CONNECTION,
+                    "engine": info["engine"],
+                    "database": info["database"],
+                    "host": info["host"],
+                    "port": info["port"]
+                }
+        except Exception:
+            pass
 
-    # 2. Derive sibling database on server or active connection
-    base_name = norm_server or _ACTIVE_CONNECTION
+    # 3. Derive sibling database on specified server or active connection
+    base_name = base_server or _ACTIVE_CONNECTION
     if not base_name:
         return {
             "error": True,
-            "message": "No active connection available to derive sibling database from. Please specify server parameter."
+            "message": f"No active connection available to derive sibling database '{target}' from. Please specify server/connection parameter. Available: {list(_RAW_CONFIG.keys())}"
         }
 
     try:
@@ -570,9 +634,9 @@ def use_database(database: str, server: Optional[str] = None) -> Dict[str, Any]:
         return _format_db_error(e)
 
     u = urlparse(base_info["url"])
-    new_url = f"{u.scheme}://{u.netloc}/{clean_db}"
+    new_url = f"{u.scheme}://{u.netloc}/{target}"
     info = _parse_url(new_url)
-    info["name"] = clean_db
+    info["name"] = target
     info["url"] = new_url
 
     # Verify connectivity before registering
@@ -589,25 +653,27 @@ def use_database(database: str, server: Optional[str] = None) -> Dict[str, Any]:
     except Exception as e:
         return _format_db_error(e, info["engine"])
 
-    _CONNECTION_REGISTRY[clean_db] = info
-    _RAW_CONFIG[clean_db] = new_url
-    _ACTIVE_CONNECTION = clean_db
+    _CONNECTION_REGISTRY[target] = info
+    _RAW_CONFIG[target] = new_url
+    _ACTIVE_CONNECTION = target
     _save_active_connection(_ACTIVE_CONNECTION)
 
     return {
         "success": True,
-        "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}).",
+        "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}). Connection alias: '{_ACTIVE_CONNECTION}', Database: '{info['database']}'.",
         "activeConnection": _ACTIVE_CONNECTION,
         "engine": info["engine"],
-        "database": info["database"]
+        "database": info["database"],
+        "host": info["host"],
+        "port": info["port"]
     }
 
 
 @mcp.tool()
-def list_databases(connection: Optional[str] = None) -> Dict[str, Any]:
+def list_databases(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """List all databases available on the active (or specified) server instance."""
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -644,10 +710,10 @@ def list_databases(connection: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def list_schemas(connection: Optional[str] = None) -> Dict[str, Any]:
+def list_schemas(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """List all user schemas with table count and disk size (PostgreSQL) or current database table summary (MySQL)."""
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -694,10 +760,10 @@ def list_schemas(connection: Optional[str] = None) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def describe_table(tableName: str, schema: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def describe_table(tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """Deep inspection of a table: column types, defaults, nullability, PKs, FKs, indexes, and sizes."""
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -787,7 +853,8 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
 def get_table_ddl(
     tableName: str,
     schema: Optional[str] = None,
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Reconstruct and return the complete, ground-truth CREATE TABLE DDL statement for a table.
@@ -797,10 +864,11 @@ def get_table_ddl(
     Args:
         tableName: Name of the table.
         schema: Optional schema name (defaults to 'public' or auto-resolves in PostgreSQL).
-        connection: Optional connection name (defaults to active connection).
+        connection: Optional connection or server name (defaults to active connection).
+        server: Optional server or connection alias.
     """
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -949,6 +1017,7 @@ def get_table_ddl(
 def schema_overview(
     schema: Optional[str] = "public",
     connection: Optional[str] = None,
+    server: Optional[str] = None,
     max_tables: int = 60,
 ) -> Dict[str, Any]:
     """
@@ -957,12 +1026,13 @@ def schema_overview(
     
     Args:
         schema: Target schema name or 'all' (PostgreSQL). Default 'public'.
-        connection: Connection name to query.
+        connection: Optional connection or server name to query.
+        server: Optional server or connection alias.
         max_tables: Maximum number of tables to detail (default 60, max 150).
     """
     safe_max = min(max(1, max_tables), 150)
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -1037,6 +1107,7 @@ def schema_overview(
 def compact_schema_overview(
     schema: Optional[str] = "public",
     connection: Optional[str] = None,
+    server: Optional[str] = None,
     max_tables: int = 80
 ) -> Dict[str, Any]:
     """
@@ -1046,12 +1117,13 @@ def compact_schema_overview(
     
     Args:
         schema: Target schema name or 'all' (PostgreSQL, default: 'public').
-        connection: Optional target database connection.
+        connection: Optional target database connection or server alias.
+        server: Optional server or connection alias.
         max_tables: Maximum number of tables to include (default: 80, max 150).
     """
     safe_max = min(max(1, max_tables), 150)
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -1182,7 +1254,8 @@ def get_table_sample(
     limit: int = 5,
     schema: Optional[str] = None,
     mask_sensitive: bool = True,
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Fetch sample rows from a table along with column metadata and row count estimate.
@@ -1193,11 +1266,12 @@ def get_table_sample(
         limit: Number of sample rows to retrieve (default 5, max 100).
         schema: Optional schema name (PostgreSQL).
         mask_sensitive: Whether to redact sensitive columns like passwords, secrets, and tokens (default True).
-        connection: Optional target database connection.
+        connection: Optional target database connection or server alias.
+        server: Optional server or connection alias.
     """
     lim = min(max(limit, 1), 100)
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -1246,13 +1320,14 @@ def search_schema(
     searchTerm: str,
     schema: Optional[str] = "all",
     max_results: int = 50,
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """Search across tables and column names for a keyword with safety limits to protect context window."""
     safe_max = min(max(1, max_results), 100)
     pat = f"%{searchTerm}%"
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -1329,14 +1404,23 @@ def read_query(
     params: Optional[List[Any]] = None,
     limit: int = 50,
     max_cell_chars: int = 500,
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Safely execute a read-only SELECT query inside a read-only transaction with automatic rollback and token-safe pagination.
     Forwards native PostgreSQL / MySQL error diagnostics directly upon error.
+    
+    Args:
+        sql: SELECT SQL query.
+        params: Optional query parameters.
+        limit: Max rows to return (default 50, max 200).
+        max_cell_chars: Max characters per cell (default 500).
+        connection: Optional target database connection or server alias.
+        server: Optional server or connection alias.
     """
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
         return _format_db_error(e, "unknown", sql)
 
@@ -1425,7 +1509,8 @@ def execute_query(
     sql: str,
     params: Optional[List[Any]] = None,
     dry_run: bool = False,
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Execute INSERT, UPDATE, DELETE, or DDL statement(s).
@@ -1437,9 +1522,10 @@ def execute_query(
         params: Optional parameter list for single statements (e.g. [123, "active"]).
         dry_run: If True, executes inside a transaction and rolls back (default False).
         connection: Connection name to target (defaults to active connection).
+        server: Optional server or connection alias.
     """
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
         return _format_db_error(e, "unknown", sql)
 
@@ -1643,10 +1729,10 @@ def execute_query(
 
 
 @mcp.tool()
-def explain_query(sql: str, analyze: bool = True, connection: Optional[str] = None) -> Dict[str, Any]:
+def explain_query(sql: str, analyze: bool = True, connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """Run EXPLAIN on a SQL statement to inspect execution plan and costs."""
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
         return _format_db_error(e, "unknown", sql)
 
@@ -1684,10 +1770,10 @@ def explain_query(sql: str, analyze: bool = True, connection: Optional[str] = No
 
 
 @mcp.tool()
-def get_database_stats(connection: Optional[str] = None) -> Dict[str, Any]:
+def get_database_stats(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """Get database metrics: database size, active connections, cache hit ratio, engine version."""
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -1770,10 +1856,10 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
 # ==========================================
 
 @mcp.tool()
-def create_database(database: str, server: Optional[str] = None, encoding: Optional[str] = None, template: Optional[str] = None) -> Dict[str, Any]:
+def create_database(database: str, server: Optional[str] = None, connection: Optional[str] = None, encoding: Optional[str] = None, template: Optional[str] = None) -> Dict[str, Any]:
     """Create a new database on the active (or specified) PostgreSQL or MySQL server instance."""
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             admin_conn = _get_pg_client(info, dbname="postgres")
             admin_conn.autocommit = True
@@ -1816,7 +1902,7 @@ def create_database(database: str, server: Optional[str] = None, encoding: Optio
 
 
 @mcp.tool()
-def drop_database(database: str, confirmName: str, force: bool = False, server: Optional[str] = None) -> Dict[str, Any]:
+def drop_database(database: str, confirmName: str, force: bool = False, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
     """Safely drop a database. Requires exact 'confirmName' matching the database name. Supports 'force' to kill active connections."""
     global _ACTIVE_CONNECTION
     protected = {"postgres", "template0", "template1", "mysql", "information_schema", "performance_schema", "sys", "cloudsqladmin"}
@@ -1827,7 +1913,7 @@ def drop_database(database: str, confirmName: str, force: bool = False, server: 
         return {"error": True, "message": f"Safety Confirmation Failed: 'confirmName' ({confirmName}) does not match 'database' ({database}). You must pass confirmName='{database}' to explicitly confirm deletion."}
 
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         if database in _CONNECTION_REGISTRY:
             del _CONNECTION_REGISTRY[database]
         _RAW_CONFIG.pop(database, None)
@@ -1867,10 +1953,10 @@ def drop_database(database: str, confirmName: str, force: bool = False, server: 
 
 
 @mcp.tool()
-def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[str] = None) -> Dict[str, Any]:
+def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
     """Instantly clone an entire database (schema, tables, indexes, data). Uses native template cloning in PostgreSQL."""
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             admin_conn = _get_pg_client(info, dbname="postgres")
             admin_conn.autocommit = True
@@ -1922,10 +2008,10 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
 
 
 @mcp.tool()
-def terminate_connections(database: str, server: Optional[str] = None) -> Dict[str, Any]:
+def terminate_connections(database: str, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
     """Kill active client connections or hanging locks on a specific database."""
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             admin_conn = _get_pg_client(info, dbname="postgres")
             admin_conn.autocommit = True
@@ -1958,10 +2044,10 @@ def terminate_connections(database: str, server: Optional[str] = None) -> Dict[s
 
 
 @mcp.tool()
-def list_active_queries(database: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
+def list_active_queries(database: Optional[str] = None, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
     """Inspect currently executing queries, lock waits, and execution durations."""
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -1992,10 +2078,10 @@ def list_active_queries(database: Optional[str] = None, server: Optional[str] = 
 
 
 @mcp.tool()
-def dump_database(database: Optional[str] = None, outputPath: Optional[str] = None, schemaOnly: bool = False, server: Optional[str] = None) -> Dict[str, Any]:
+def dump_database(database: Optional[str] = None, outputPath: Optional[str] = None, schemaOnly: bool = False, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
     """Export an SQL dump snapshot of the database using native pg_dump or mysqldump."""
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         target_db = database or info["database"]
 
         backup_dir = Path.home() / ".gemini" / "backups"
@@ -2063,14 +2149,14 @@ def dump_database(database: Optional[str] = None, outputPath: Optional[str] = No
 
 
 @mcp.tool()
-def restore_database(database: str, dumpFilePath: str, server: Optional[str] = None) -> Dict[str, Any]:
+def restore_database(database: str, dumpFilePath: str, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
     """Restore a database from a .sql dump file using native psql or mysql."""
     fpath = Path(dumpFilePath)
     if not fpath.exists():
         return {"error": True, "message": f"Dump file not found: {dumpFilePath}"}
 
     try:
-        info = _get_connection(server)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             cmd = [
                 "psql",
@@ -2127,7 +2213,8 @@ def restore_database(database: str, dumpFilePath: str, server: Optional[str] = N
 def analyze_table_indexes(
     tableName: str,
     schema: Optional[str] = None,
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Perform deep index analysis on a database table.
@@ -2139,9 +2226,10 @@ def analyze_table_indexes(
         tableName: Name of the table.
         schema: Target schema (Postgres). If None, auto-resolved.
         connection: Connection name to query.
+        server: Optional server or connection alias.
     """
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -2266,19 +2354,31 @@ def analyze_table_indexes(
 
 @mcp.tool()
 def compare_schemas(
-    source_connection: str,
-    target_connection: str,
-    schema: Optional[str] = "public"
+    source_connection: Optional[str] = None,
+    target_connection: Optional[str] = None,
+    schema: Optional[str] = "public",
+    source_server: Optional[str] = None,
+    target_server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Compare table structures, missing tables, missing columns, and data type discrepancies between two database connections.
     Ideal for detecting environment drift (e.g. dev vs staging vs prod).
     
     Args:
-        source_connection: Baseline source connection name.
-        target_connection: Target connection name to compare against.
+        source_connection: Baseline source connection or server name.
+        target_connection: Target connection or server name to compare against.
         schema: Target schema name (PostgreSQL, default: 'public').
+        source_server: Optional alias for source_connection.
+        target_server: Optional alias for target_connection.
     """
+    src_name = _resolve_conn(source_connection, source_server)
+    tgt_name = _resolve_conn(target_connection, target_server)
+    if not src_name or not tgt_name:
+        return {
+            "error": True,
+            "message": "Both source_connection (or source_server) and target_connection (or target_server) must be specified."
+        }
+
     try:
         def _fetch_table_cols(conn_name: str) -> Dict[str, Dict[str, str]]:
             inf = _get_connection(conn_name)
@@ -2318,8 +2418,8 @@ def compare_schemas(
                     cn.close()
             return tbl_map
 
-        source_tables = _fetch_table_cols(source_connection)
-        target_tables = _fetch_table_cols(target_connection)
+        source_tables = _fetch_table_cols(src_name)
+        target_tables = _fetch_table_cols(tgt_name)
 
         s_set = set(source_tables.keys())
         t_set = set(target_tables.keys())
@@ -2387,8 +2487,8 @@ def compare_schemas(
                 )
 
         return {
-            "source_connection": source_connection,
-            "target_connection": target_connection,
+            "source_connection": src_name,
+            "target_connection": tgt_name,
             "identical": not (missing_in_target or extra_in_target or discrepancies),
             "tables_only_in_source": missing_in_target,
             "tables_only_in_target": extra_in_target,
@@ -2408,7 +2508,8 @@ def compare_schemas(
 @mcp.tool()
 def audit_database_health(
     schema: Optional[str] = "public",
-    connection: Optional[str] = None
+    connection: Optional[str] = None,
+    server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Comprehensive database-wide health audit for PostgreSQL.
@@ -2419,10 +2520,11 @@ def audit_database_health(
 
     Args:
         schema:     Schema to audit (default: 'public'). Use '*' for all schemas.
-        connection: Named connection to use; defaults to active connection.
+        connection: Named connection or server alias to use; defaults to active connection.
+        server:     Optional server or connection alias.
     """
     try:
-        info = _get_connection(connection)
+        info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] != "postgres":
             return {"error": "audit_database_health requires PostgreSQL. MySQL is not supported."}
 
