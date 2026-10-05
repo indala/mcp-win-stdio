@@ -35,15 +35,19 @@ def test_discovery():
     assert "db" in servers
     assert "git" in servers
     assert "ssh" in servers
+    assert "rag" in servers
+    assert "excel-db" in servers
 
-    assert servers["excel"]["tools_count"] == 27
+    assert servers["excel"]["tools_count"] == 36
     assert servers["word"]["tools_count"] == 13
     assert servers["explorer"]["tools_count"] == 14
     assert servers["tsc"]["tools_count"] == 8
     assert servers["db"]["tools_count"] == 25
     assert servers["git"]["tools_count"] == 46
     assert servers["ssh"]["tools_count"] == 34
-    print("[PASS] Discovery test passed for all 7 servers.")
+    assert servers["rag"]["tools_count"] == 8
+    assert servers["excel-db"]["tools_count"] == 5
+    print("[PASS] Discovery test passed for all 9 servers.")
 
 
 def test_guides():
@@ -91,6 +95,8 @@ def test_all_servers_import():
     from mcp_win_stdio.db.server import mcp as db_mcp
     from mcp_win_stdio.git.server import mcp as git_mcp
     from mcp_win_stdio.ssh.server import mcp as ssh_mcp
+    from mcp_win_stdio.rag.server import mcp as rag_mcp
+    from mcp_win_stdio.excel_db.server import mcp as excel_db_mcp
 
     assert excel_mcp is not None
     assert word_mcp is not None
@@ -99,7 +105,9 @@ def test_all_servers_import():
     assert db_mcp is not None
     assert git_mcp is not None
     assert ssh_mcp is not None
-    print("[PASS] All 7 servers imported successfully from packages/.")
+    assert rag_mcp is not None
+    assert excel_db_mcp is not None
+    print("[PASS] All 9 servers imported successfully from packages/.")
 
 
 def test_updater():

@@ -14,9 +14,13 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+try:
+    import numpy as np
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    _HAS_SKLEARN = True
+except Exception:
+    _HAS_SKLEARN = False
 
 
 def extract_code_subwords(text: str) -> List[str]:
@@ -663,21 +667,34 @@ class RAGVectorStore:
 
         # 3. Dense / Subword N-gram Vector Similarity Ranking
         vector_ranked_ids: List[int] = []
-        try:
-            vectorizer = TfidfVectorizer(
-                analyzer='word',
-                token_pattern=r'(?u)\b\w+\b',
-                ngram_range=(1, 2),
-                max_features=25000,
-                sublinear_tf=True
-            )
-            tfidf_matrix = vectorizer.fit_transform(texts)
-            query_vec = vectorizer.transform([query])
-            scores = cosine_similarity(query_vec, tfidf_matrix).flatten()
-            sorted_vec_idx = np.argsort(scores)[::-1]
-            vector_ranked_ids = [c_ids[i] for i in sorted_vec_idx if scores[i] > 0.001]
-        except Exception:
-            vector_ranked_ids = list(c_ids)
+        if _HAS_SKLEARN:
+            try:
+                vectorizer = TfidfVectorizer(
+                    analyzer='word',
+                    token_pattern=r'(?u)\b\w+\b',
+                    ngram_range=(1, 2),
+                    max_features=25000,
+                    sublinear_tf=True
+                )
+                tfidf_matrix = vectorizer.fit_transform(texts)
+                query_vec = vectorizer.transform([query])
+                scores = cosine_similarity(query_vec, tfidf_matrix).flatten()
+                sorted_vec_idx = np.argsort(scores)[::-1]
+                vector_ranked_ids = [c_ids[i] for i in sorted_vec_idx if scores[i] > 0.001]
+            except Exception:
+                vector_ranked_ids = list(c_ids)
+        else:
+            try:
+                q_tokens = set(extract_code_subwords(query))
+                scores_list = []
+                for i, txt in enumerate(texts):
+                    txt_tokens = set(extract_code_subwords(txt))
+                    overlap = len(q_tokens & txt_tokens)
+                    scores_list.append((c_ids[i], overlap))
+                scores_list.sort(key=lambda x: x[1], reverse=True)
+                vector_ranked_ids = [cid for cid, score in scores_list if score > 0] or list(c_ids)
+            except Exception:
+                vector_ranked_ids = list(c_ids)
 
         # 4. Reciprocal Rank Fusion (RRF)
         # RRF formula: Score(d) = 1/(60 + rank_bm25) + 1/(60 + rank_vector)

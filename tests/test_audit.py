@@ -966,12 +966,126 @@ def test_excel_copilot_tools():
         print("[PASS] Excel copilot tools (clean, transform, chart) test passed!")
 
 
+def test_excel_get_cell_formatting():
+    import tempfile
+    from mcp_win_stdio.excel.server import create_workbook, format_cells, get_cell_formatting
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wb_path = os.path.join(tmpdir, "test_format_inspect.xlsx")
+        data = [
+            {"SKU": "K1-ITEM", "Price": 150.50, "Status": "Active"},
+            {"SKU": "L1-ITEM", "Price": 250.00, "Status": "Pending"},
+        ]
+        create_workbook(wb_path, data, sheet_name="SALE-HIRE")
+
+        # Apply specific formatting to A1 and B1
+        format_cells(
+            wb_path,
+            range_address="A1:C1",
+            sheet_name="SALE-HIRE",
+            font={"name": "Arial", "size": 13, "bold": True, "color": "FF0000"},
+            fill="1F497D",
+            alignment={"horizontal": "center", "vertical": "center", "wrap_text": True},
+            number_format="@",
+        )
+
+        # 1. Inspect specific cells list
+        res_cells = get_cell_formatting(wb_path, cells=["A1", "B1"], sheet_name="SALE-HIRE")
+        assert res_cells["status"] == "success"
+        assert res_cells["total_cells_inspected"] == 2
+        a1_info = res_cells["cells"][0]
+        assert a1_info["cell"] == "A1"
+        assert a1_info["font"]["bold"] is True
+        assert a1_info["font"]["name"] == "Arial"
+        assert a1_info["alignment"]["horizontal"] == "center"
+
+        # 2. Inspect comma-separated string
+        res_str = get_cell_formatting(wb_path, cells="A1, B1, C1", sheet_name="SALE-HIRE")
+        assert res_str["total_cells_inspected"] == 3
+
+        # 3. Inspect range coordinate
+        res_range = get_cell_formatting(wb_path, range_address="A1:B2", sheet_name="SALE-HIRE")
+        assert res_range["total_cells_inspected"] == 4
+
+        print("[PASS] Excel get_cell_formatting inspection test passed!")
+
+
+def test_excel_export_transformed_workbook():
+    import tempfile
+    import openpyxl
+    from mcp_win_stdio.excel.server import create_workbook, export_transformed_workbook
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_path = os.path.join(tmpdir, "source_master.xlsx")
+        dst_path = os.path.join(tmpdir, "transformed_output.xlsx")
+        csv_path = os.path.join(tmpdir, "transformed_output.csv")
+
+        # Create 1,000 rows test dataset
+        records = [
+            {"SKU": f"SKU_{i:04d}", "Category": "Lighting" if i % 2 == 0 else "Audio", "Price": float(10 + i), "Cost": float(5 + (i * 0.5)), "Status": "Active" if i % 5 != 0 else "Discontinued"}
+            for i in range(1, 1001)
+        ]
+        create_workbook(src_path, records, sheet_name="RawData")
+
+        # 1. Transform with SQL Query, Column Mappings, and Computed Columns directly to new Excel file
+        res = export_transformed_workbook(
+            source_path=src_path,
+            destination_path=dst_path,
+            source_sheet="RawData",
+            destination_sheet="CleanMaster",
+            sql_query="SELECT SKU, Category, Price, Cost, Status FROM source WHERE Status = 'Active'",
+            computed_columns={"Margin": "Price - Cost", "Source": "'ERP'"},
+            column_mappings={"SKU": "Item_Code", "Price": "Sale_Price"},
+            drop_columns=["Status"],
+            sort_by="Sale_Price",
+            sort_ascending=False,
+            format_headers=True,
+            header_fill_color="1F497D",
+            header_font_color="FFFFFF",
+            auto_fit_columns=True,
+            freeze_header=True,
+        )
+
+        assert res["status"] == "success"
+        assert res["initial_rows"] == 1000
+        assert res["exported_rows"] == 800  # 1000 - 200 discontinued
+        assert "Item_Code" in res["exported_columns"]
+        assert "Margin" in res["exported_columns"]
+        assert "Source" in res["exported_columns"]
+        assert "Status" not in res["exported_columns"]
+        assert os.path.exists(dst_path)
+
+        # Verify output formatting in target file
+        wb = openpyxl.load_workbook(dst_path)
+        ws = wb["CleanMaster"]
+        assert ws.freeze_panes == "A2"
+        h_cell = ws["A1"]
+        assert h_cell.value == "Item_Code"
+        assert h_cell.font.bold is True
+        wb.close()
+
+        # 2. Test direct export to CSV
+        res_csv = export_transformed_workbook(
+            source_path=src_path,
+            destination_path=csv_path,
+            filter_query="Price > 500",
+            column_mappings={"SKU": "Product_SKU"},
+        )
+        assert res_csv["status"] == "success"
+        assert res_csv["exported_rows"] == 510
+        assert os.path.exists(csv_path)
+
+        print("[PASS] Excel export_transformed_workbook ETL pipeline test passed!")
+
+
 if __name__ == "__main__":
     test_excel_clean_records()
     test_excel_styling_and_layout()
     test_excel_file_lock_instruction()
     test_excel_write_range()
     test_excel_copilot_tools()
+    test_excel_get_cell_formatting()
+    test_excel_export_transformed_workbook()
     test_explorer_gitignore()
     test_tsc_safety()
     test_tsc_filter_improvements()

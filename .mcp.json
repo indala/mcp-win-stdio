@@ -39,7 +39,10 @@
       "args": [
         "run",
         "db"
-      ]
+      ],
+      "env": {
+        "SERVERS": "{\"showreel_dev\": \"postgresql://postgres:postgres@localhost:5432/showreel_dev\"}"
+      }
     },
     "git": {
       "command": "mws",
@@ -67,7 +70,10 @@
       "args": [
         "run",
         "excel-db"
-      ]
+      ],
+      "env": {
+        "SERVERS": "{\"showreel_dev\": \"postgresql://postgres:postgres@localhost:5432/showreel_dev\"}"
+      }
     }
   }
 }
