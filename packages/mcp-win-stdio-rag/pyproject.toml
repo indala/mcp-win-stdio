@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-win-stdio-rag"
+version = "0.2.5"
+description = "Windows-optimized RAG MCP Server with Playwright crawling, Link Graph trees, and local hybrid search."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Mohan Kumar Indala" }
+]
+keywords = ["mcp", "rag", "vector-search", "playwright", "crawler", "knowledge-graph", "stdio"]
+
+dependencies = [
+    "mcp>=1.2.0",
+]
+
+[project.scripts]
+mcp-win-stdio-rag = "mcp_win_stdio.rag.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_win_stdio/rag"]

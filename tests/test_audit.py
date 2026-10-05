@@ -54,16 +54,22 @@ def test_tsc_safety():
     if appdata:
         assert is_home_or_root_dir(appdata) is True
 
-    # Standby check when env is empty
+    # Standby check when env and config are empty
     old_env = os.environ.pop("TSC_WATCH_DIR", None)
+    old_proj = os.environ.pop("PROJECT_ROOT", None)
+    from unittest.mock import patch
     try:
-        assert get_default_watch_dir() is None
-        status = list_watched_projects()
-        assert status["status"] == "standby"
-        assert status["watched_projects_count"] == 0
+        with patch("mcp_win_stdio.core.config.load_config", return_value={}), \
+             patch("mcp_win_stdio.tsc.server.WATCHED_PROJECTS", {}):
+            assert get_default_watch_dir() is None
+            status = list_watched_projects()
+            assert status["status"] == "standby"
+            assert status["watched_projects_count"] == 0
     finally:
         if old_env:
             os.environ["TSC_WATCH_DIR"] = old_env
+        if old_proj:
+            os.environ["PROJECT_ROOT"] = old_proj
 
     # Compiler pre-check
     tsc_check = check_tsc_available()
@@ -691,8 +697,281 @@ def test_tsc_filter_improvements():
             WATCHED_PROJECTS.pop("E:/repos/my-app/tsconfig.json", None)
 
 
+def test_excel_styling_and_layout():
+    import tempfile
+    import openpyxl
+    from mcp_win_stdio.excel.server import (
+        create_workbook,
+        format_cells,
+        apply_conditional_formatting,
+        set_sheet_layout_and_freeze,
+        update_cells,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        wb_path = os.path.join(td, "styled_test.xlsx")
+        create_workbook(
+            file_path=wb_path,
+            sheet_name="Sales",
+            data=[
+                {"Product": "Widgets", "Q1": 1200, "Q2": 1500, "Total": 2700},
+                {"Product": "Gadgets", "Q1": 300, "Q2": 450, "Total": 750},
+                {"Product": "Doohickeys", "Q1": 50, "Q2": 80, "Total": 130},
+            ],
+        )
+
+        # 1. Test format_cells
+        res_fmt = format_cells(
+            file_path=wb_path,
+            range_address="A1:D1",
+            sheet_name="Sales",
+            fill="1F497D",
+            font={"bold": True, "color": "FFFFFF", "name": "Segoe UI"},
+            alignment={"horizontal": "center"},
+            border="thin",
+        )
+        assert res_fmt["status"] == "success"
+        assert res_fmt["cells_formatted"] == 4
+
+        # 2. Test format_cells number format
+        res_num = format_cells(
+            file_path=wb_path,
+            range_address="B2:D4",
+            sheet_name="Sales",
+            number_format="currency",
+        )
+        assert res_num["status"] == "success"
+
+        # Verify with openpyxl
+        wb = openpyxl.load_workbook(wb_path)
+        ws = wb["Sales"]
+        assert ws["A1"].font.bold is True
+        assert "FFFFFF" in str(ws["A1"].font.color.rgb)
+        assert ws["B2"].number_format == "$#,##0.00"
+        wb.close()
+
+        # 3. Test apply_conditional_formatting
+        res_cond = apply_conditional_formatting(
+            file_path=wb_path,
+            sheet_name="Sales",
+            range_address="D2:D4",
+            rule_type="cell_is",
+            operator="greaterThan",
+            formula=["1000"],
+            fill_color="C6EFCE",
+            font_color="006100",
+        )
+        assert res_cond["status"] == "success"
+
+        # Color scale test
+        res_scale = apply_conditional_formatting(
+            file_path=wb_path,
+            sheet_name="Sales",
+            range_address="B2:C4",
+            rule_type="color_scale",
+            color_scale_preset="green_yellow_red",
+        )
+        assert res_scale["status"] == "success"
+
+        # 4. Test set_sheet_layout_and_freeze
+        res_layout = set_sheet_layout_and_freeze(
+            file_path=wb_path,
+            sheet_name="Sales",
+            auto_fit_columns=True,
+            freeze_panes="A2",
+            show_grid_lines=True,
+        )
+        assert res_layout["status"] == "success"
+        assert "auto_fit_columns" in res_layout["settings_applied"]
+        assert res_layout["settings_applied"]["freeze_panes"] == "A2"
+
+        wb = openpyxl.load_workbook(wb_path)
+        ws = wb["Sales"]
+        assert ws.freeze_panes == "A2"
+        assert len(ws.conditional_formatting) == 2
+        wb.close()
+
+        # 5. Test update_cells with inline styling
+        res_upd = update_cells(
+            file_path=wb_path,
+            sheet_name="Sales",
+            updates=[
+                {
+                    "cell": "A5",
+                    "value": "Total Summary",
+                    "font": {"bold": True, "color": "1F497D"},
+                    "fill": "D9E1F2",
+                }
+            ],
+        )
+        assert res_upd["status"] == "success"
+        assert res_upd["cells_updated"] == 1
+
+        wb = openpyxl.load_workbook(wb_path)
+        ws = wb["Sales"]
+        assert ws["A5"].value == "Total Summary"
+        assert ws["A5"].font.bold is True
+        wb.close()
+
+        print("[PASS] Excel styling, conditional formatting, and layout tests passed!")
+
+
+def test_excel_file_lock_instruction():
+    import pytest
+    from mcp_win_stdio.excel.server import _safe_save_workbook
+
+    class DummyWb:
+        def save(self, path):
+            raise PermissionError(13, "Permission denied")
+
+    wb = DummyWb()
+    with pytest.raises(PermissionError) as exc_info:
+        _safe_save_workbook(wb, "C:/Work/financial_report.xlsx")
+
+    err_msg = str(exc_info.value)
+    assert "FILE LOCKED BY EXCEL" in err_msg
+    assert "financial_report.xlsx" in err_msg
+    assert "DO NOT attempt terminal workarounds" in err_msg
+    assert "PLEASE ASK THE USER" in err_msg
+    print("[PASS] Excel file lock instruction test passed!")
+
+
+def test_excel_write_range():
+    import tempfile
+    import openpyxl
+    from mcp_win_stdio.excel.server import create_workbook, write_range
+
+    with tempfile.TemporaryDirectory() as td:
+        wb_path = os.path.join(td, "bulk_test.xlsx")
+        create_workbook(
+            file_path=wb_path,
+            sheet_name="Breakdown",
+            data=[
+                {"Code": "OLD01", "Category": "Old", "Sub": "Old", "SubCode": 1, "Desc": "Old 1"},
+                {"Code": "OLD02", "Category": "Old", "Sub": "Old", "SubCode": 2, "Desc": "Old 2"},
+                {"Code": "OLD03", "Category": "Old", "Sub": "Old", "SubCode": 3, "Desc": "Old 3"},
+            ],
+        )
+
+        # Overwrite starting at A2 with clear_subsequent_rows=True
+        new_data = [
+            ["AC01001", "AC", "Accessories", 1, "Power Distribution"],
+            ["AC01002", "AC", "Accessories", 1, "Power Distribution"],
+        ]
+        res = write_range(
+            file_path=wb_path,
+            sheet_name="Breakdown",
+            start_cell="A2",
+            data=new_data,
+            clear_subsequent_rows=True,
+        )
+        assert res["status"] == "success"
+        assert res["rows_written"] == 2
+        assert res["cells_written"] == 10
+
+        # Verify workbook content
+        wb = openpyxl.load_workbook(wb_path)
+        ws = wb["Breakdown"]
+        assert ws.max_row == 3  # Header row + 2 rows (old 3rd row deleted)
+        assert ws["A2"].value == "AC01001"
+        assert ws["E2"].value == "Power Distribution"
+        assert ws["A3"].value == "AC01002"
+        wb.close()
+
+        print("[PASS] Excel write_range test passed!")
+
+
+def test_excel_copilot_tools():
+    import tempfile
+    import openpyxl
+    from mcp_win_stdio.excel.server import (
+        create_workbook, create_chart, clean_and_deduplicate_sheet, transform_sheet_data
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        wb_path = os.path.join(td, "copilot_test.xlsx")
+
+        # 1. Create dataset with duplicates, extra whitespace, and dirty rows
+        dirty_data = [
+            {"Code": "A01", "Region": " North ", "Product": "Widget ", "Sales": 150, "Quantity": 10},
+            {"Code": "A01", "Region": " North ", "Product": "Widget ", "Sales": 150, "Quantity": 10},  # Duplicate
+            {"Code": "A02", "Region": "South", "Product": "Gadget", "Sales": 80, "Quantity": 5},
+            {"Code": "A03", "Region": "North", "Product": "Gadget", "Sales": 220, "Quantity": 15},
+            {"Code": "A04", "Region": "South", "Product": "Widget", "Sales": 310, "Quantity": 20},
+        ]
+        create_workbook(file_path=wb_path, sheet_name="Data", data=dirty_data)
+
+        # 2. Test clean_and_deduplicate_sheet
+        clean_res = clean_and_deduplicate_sheet(
+            file_path=wb_path,
+            sheet_name="Data",
+            deduplicate_columns=["Code"],
+            trim_text=True,
+            drop_empty_rows=True,
+        )
+        assert clean_res["status"] == "success"
+        assert clean_res["duplicates_removed"] == 1
+        assert clean_res["final_rows"] == 4
+
+        # Verify trimming in workbook
+        wb = openpyxl.load_workbook(wb_path)
+        ws = wb["Data"]
+        assert ws["B2"].value == "North"  # Untrimmed ' North ' became 'North'
+        assert ws["C2"].value == "Widget" # Untrimmed 'Widget ' became 'Widget'
+        wb.close()
+
+        # 3. Test transform_sheet_data (Grouping and Aggregations)
+        transform_res = transform_sheet_data(
+            file_path=wb_path,
+            source_sheet="Data",
+            output_sheet="Region_Summary",
+            group_by=["Region"],
+            aggregations={"Sales": "sum", "Quantity": "sum"},
+            sort_by="Sales",
+            ascending=False,
+        )
+        assert transform_res["status"] == "success"
+        assert transform_res["result_rows"] == 2
+        assert "Region" in transform_res["columns"]
+
+        # Verify summary sheet exists and has grouped data
+        wb = openpyxl.load_workbook(wb_path)
+        assert "Region_Summary" in wb.sheetnames
+        sum_ws = wb["Region_Summary"]
+        assert sum_ws.max_row == 3  # Header + 2 region rows (North, South)
+        wb.close()
+
+        # 4. Test create_chart (Native Bar / Column chart)
+        chart_res = create_chart(
+            file_path=wb_path,
+            sheet_name="Region_Summary",
+            chart_type="bar",
+            data_range="B1:B3",       # Header + 2 data rows for Sales
+            categories_range="A2:A3", # Region categories
+            title="Total Sales by Region",
+            target_cell="D2",
+            x_axis_title="Region",
+            y_axis_title="Sales ($)",
+        )
+        assert chart_res["status"] == "success"
+        assert chart_res["chart_type"] == "bar"
+
+        # Verify chart attached in worksheet
+        wb = openpyxl.load_workbook(wb_path)
+        sum_ws = wb["Region_Summary"]
+        assert len(sum_ws._charts) == 1
+        assert "Total Sales by Region" in str(sum_ws._charts[0].title)
+        wb.close()
+
+        print("[PASS] Excel copilot tools (clean, transform, chart) test passed!")
+
+
 if __name__ == "__main__":
     test_excel_clean_records()
+    test_excel_styling_and_layout()
+    test_excel_file_lock_instruction()
+    test_excel_write_range()
+    test_excel_copilot_tools()
     test_explorer_gitignore()
     test_tsc_safety()
     test_tsc_filter_improvements()

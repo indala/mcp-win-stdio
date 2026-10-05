@@ -278,6 +278,9 @@ def _watcher_loop(tsconfig_path: str, root_dir: str, cmd_base: Optional[List[str
         with CACHE_LOCK:
             if tsconfig_path in WATCHED_PROJECTS:
                 WATCHED_PROJECTS[tsconfig_path]["status"] = "error: tsc compiler not found (install typescript)"
+                ready_ev = WATCHED_PROJECTS[tsconfig_path].get("ready_event")
+                if ready_ev:
+                    ready_ev.set()
         return
 
     full_cmd = cmd_base + ["--noEmit", "--watch", "--preserveWatchOutput", "-p", tsconfig_path]
@@ -303,7 +306,8 @@ def _watcher_loop(tsconfig_path: str, root_dir: str, cmd_base: Optional[List[str
         with CACHE_LOCK:
             if tsconfig_path in WATCHED_PROJECTS:
                 WATCHED_PROJECTS[tsconfig_path]["process"] = proc
-                WATCHED_PROJECTS[tsconfig_path]["status"] = "watching"
+                WATCHED_PROJECTS[tsconfig_path]["status"] = "compiling"
+                WATCHED_PROJECTS[tsconfig_path]["start_time"] = time.time()
 
         pending_errors: List[Dict[str, Any]] = []
 
@@ -316,11 +320,20 @@ def _watcher_loop(tsconfig_path: str, root_dir: str, cmd_base: Optional[List[str
             if "Found 0 errors." in line or ("Found " in line and "Watching for file changes." in line):
                 with CACHE_LOCK:
                     if tsconfig_path in WATCHED_PROJECTS:
+                        st = WATCHED_PROJECTS[tsconfig_path].get("start_time", time.time())
                         WATCHED_PROJECTS[tsconfig_path]["errors"] = list(pending_errors)
-                        WATCHED_PROJECTS[tsconfig_path]["status"] = "watching"
+                        WATCHED_PROJECTS[tsconfig_path]["status"] = "ready"
+                        WATCHED_PROJECTS[tsconfig_path]["compile_duration_s"] = round(time.time() - st, 2)
                         WATCHED_PROJECTS[tsconfig_path]["last_updated"] = datetime.now(timezone.utc).isoformat()
+                        ready_ev = WATCHED_PROJECTS[tsconfig_path].get("ready_event")
+                        if ready_ev:
+                            ready_ev.set()
                 pending_errors = []
             elif "Starting compilation in watch mode..." in line or "File change detected." in line:
+                with CACHE_LOCK:
+                    if tsconfig_path in WATCHED_PROJECTS:
+                        WATCHED_PROJECTS[tsconfig_path]["status"] = "compiling"
+                        WATCHED_PROJECTS[tsconfig_path]["start_time"] = time.time()
                 pending_errors = []
             else:
                 err = parse_tsc_line(line, project_dir, root_dir)
@@ -334,6 +347,35 @@ def _watcher_loop(tsconfig_path: str, root_dir: str, cmd_base: Optional[List[str
         with CACHE_LOCK:
             if tsconfig_path in WATCHED_PROJECTS:
                 WATCHED_PROJECTS[tsconfig_path]["status"] = f"error: {str(e)}"
+                ready_ev = WATCHED_PROJECTS[tsconfig_path].get("ready_event")
+                if ready_ev:
+                    ready_ev.set()
+    finally:
+        with CACHE_LOCK:
+            if tsconfig_path in WATCHED_PROJECTS:
+                ready_ev = WATCHED_PROJECTS[tsconfig_path].get("ready_event")
+                if ready_ev and not ready_ev.is_set():
+                    ready_ev.set()
+
+
+def wait_for_projects_compilation(configs: List[str], timeout: float = 30.0) -> bool:
+    """
+    Wait for all specified project configs to finish their initial compilation pass.
+    Returns True if all projects compiled within the timeout, False otherwise.
+    """
+    start = time.time()
+    for cfg in configs:
+        norm_cfg = normalize_path(cfg)
+        ready_ev = None
+        with CACHE_LOCK:
+            if norm_cfg in WATCHED_PROJECTS:
+                ready_ev = WATCHED_PROJECTS[norm_cfg].get("ready_event")
+        if ready_ev:
+            elapsed = time.time() - start
+            remaining = max(0.1, timeout - elapsed)
+            if elapsed >= timeout or not ready_ev.wait(timeout=remaining):
+                return False
+    return True
 
 
 def start_watching_project(target_dir: str, cmd_base: Optional[List[str]] = None) -> List[str]:
@@ -368,10 +410,13 @@ def start_watching_project(target_dir: str, cmd_base: Optional[List[str]] = None
                 "tsconfig_path": norm_cfg,
                 "relative_config": normalize_path(os.path.relpath(cfg, abs_root)),
                 "errors": [],
-                "status": "initializing",
+                "status": "compiling",
                 "last_updated": datetime.now(timezone.utc).isoformat(),
                 "process": None,
                 "cmd_base": cmd_base,
+                "ready_event": threading.Event(),
+                "start_time": time.time(),
+                "compile_duration_s": None,
             }
 
         t = threading.Thread(target=_watcher_loop, args=(norm_cfg, abs_root, cmd_base), daemon=True)
@@ -438,10 +483,13 @@ def get_tsc_errors(
     limit: int = 30,
     offset: int = 0,
     max_message_chars: int = 300,
+    wait_if_compiling: bool = True,
+    wait_timeout: float = 15.0,
 ) -> Dict[str, Any]:
     """
     Get active TypeScript compiler errors across watched projects (0ms latency from memory cache).
-    Features automatic context window protection, pagination, error code filtering, and token-safe message truncation.
+    Features automatic context window protection, pagination, error code filtering, token-safe message truncation,
+    and automatic synchronization if an initial compilation pass is in progress.
     
     Args:
         project_path: Optional filter by project directory substring.
@@ -450,7 +498,41 @@ def get_tsc_errors(
         limit: Maximum number of detailed error objects to return per batch (default 30, max 100).
         offset: Starting index offset for pagination (default 0).
         max_message_chars: Maximum character length for individual error messages (default 300).
+        wait_if_compiling: If True, waits up to wait_timeout seconds if projects are currently compiling their initial pass (default True).
+        wait_timeout: Maximum seconds to wait if a project is actively compiling (default 15.0).
     """
+    # 1. If wait_if_compiling is enabled, check if matching projects are compiling and wait on their ready events
+    if wait_if_compiling:
+        events_to_wait = []
+        with CACHE_LOCK:
+            for cfg_path, data in WATCHED_PROJECTS.items():
+                if tsconfig_path:
+                    norm_cfg_filter = tsconfig_path.replace("\\", "/").lower()
+                    norm_cfg_abs = normalize_path(tsconfig_path).lower()
+                    if cfg_path.lower() != norm_cfg_abs and norm_cfg_filter not in cfg_path.lower():
+                        continue
+                if project_path:
+                    p_filter = project_path.replace("\\", "/").rstrip("/").lower()
+                    p_abs = normalize_path(project_path).lower()
+                    proj_dir = data["project_dir"].lower()
+                    if (
+                        p_filter not in proj_dir
+                        and p_abs != proj_dir
+                        and not proj_dir.startswith(p_abs + "/")
+                        and not p_abs.startswith(proj_dir + "/")
+                    ):
+                        continue
+                if data.get("status") == "compiling":
+                    ev = data.get("ready_event")
+                    if ev and not ev.is_set():
+                        events_to_wait.append(ev)
+
+        start_w = time.time()
+        for ev in events_to_wait:
+            rem = max(0.1, wait_timeout - (time.time() - start_w))
+            if (time.time() - start_w) >= wait_timeout or not ev.wait(timeout=rem):
+                break
+
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
             return {
@@ -466,7 +548,7 @@ def get_tsc_errors(
 
         all_errors = []
         projects_summary = []
-        initializing_count = 0
+        compiling_count = 0
         safe_limit = min(max(1, limit), 100)
         safe_offset = max(0, offset)
 
@@ -491,8 +573,8 @@ def get_tsc_errors(
 
             errs = data.get("errors", [])
             status = data.get("status", "unknown")
-            if status == "initializing":
-                initializing_count += 1
+            if status == "compiling":
+                compiling_count += 1
 
             for e in errs:
                 if error_code and e.get("code", "").upper() != error_code.strip().upper():
@@ -504,6 +586,7 @@ def get_tsc_errors(
                 "project_dir": data["project_dir"],
                 "status": status,
                 "error_count": len(errs),
+                "compile_duration_s": data.get("compile_duration_s"),
                 "last_updated": data["last_updated"],
             })
 
@@ -541,8 +624,9 @@ def get_tsc_errors(
                 f"Use offset={next_offset} to view the next window, or filter by file with 'get_file_errors'] ..."
             )
 
-        if initializing_count > 0:
-            result["status_notice"] = f"{initializing_count} project(s) still compiling initial pass. Errors will update in 1-2 seconds."
+        if compiling_count > 0:
+            result["is_initial_compilation_pending"] = True
+            result["status_notice"] = f"{compiling_count} project(s) still compiling initial pass. Diagnostics will update once compilation completes."
 
         return result
 
@@ -797,35 +881,59 @@ def get_file_errors(
 
 
 @mcp.tool()
-def get_error_summary() -> Dict[str, Any]:
+def get_error_summary(
+    wait_if_compiling: bool = True,
+    wait_timeout: float = 15.0,
+) -> Dict[str, Any]:
     """
     Get high-level summary of TypeScript errors across all projects without full diagnostic lists.
+    Synchronizes with background compiler passes to avoid returning inaccurate 0-error states while compiling.
+
+    Args:
+        wait_if_compiling: If True, waits up to wait_timeout seconds if projects are currently compiling their initial pass (default True).
+        wait_timeout: Maximum seconds to wait if a project is actively compiling (default 15.0).
     """
+    if wait_if_compiling:
+        events_to_wait = []
+        with CACHE_LOCK:
+            for data in WATCHED_PROJECTS.values():
+                if data.get("status") == "compiling":
+                    ev = data.get("ready_event")
+                    if ev and not ev.is_set():
+                        events_to_wait.append(ev)
+
+        start_w = time.time()
+        for ev in events_to_wait:
+            rem = max(0.1, wait_timeout - (time.time() - start_w))
+            if (time.time() - start_w) >= wait_timeout or not ev.wait(timeout=rem):
+                break
+
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
             return {
                 "total_errors": 0,
                 "projects_count": 0,
                 "projects": {},
-                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first.",
+                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first, or configure TSC_WATCH_DIR.",
             }
 
         summary = {}
         total = 0
         error_by_code: Dict[str, int] = {}
-        initializing_count = 0
+        compiling_count = 0
 
         for cfg_path, data in WATCHED_PROJECTS.items():
             errs = data.get("errors", [])
             count = len(errs)
             total += count
             status = data.get("status", "unknown")
-            if status == "initializing":
-                initializing_count += 1
+            if status == "compiling":
+                compiling_count += 1
             summary[data["relative_config"]] = {
                 "project_dir": data["project_dir"],
                 "status": status,
                 "errors": count,
+                "compile_duration_s": data.get("compile_duration_s"),
             }
             for e in errs:
                 code = e.get("code", "UNKNOWN")
@@ -837,8 +945,9 @@ def get_error_summary() -> Dict[str, Any]:
             "projects": summary,
             "most_common_error_codes": sorted(error_by_code.items(), key=lambda x: x[1], reverse=True)[:5],
         }
-        if initializing_count > 0:
-            result["notice"] = f"{initializing_count} project(s) still compiling initial pass."
+        if compiling_count > 0:
+            result["is_initial_compilation_pending"] = True
+            result["notice"] = f"{compiling_count} project(s) still compiling initial pass."
 
         return result
 
@@ -857,6 +966,7 @@ def list_watched_projects() -> Dict[str, Any]:
                 "project_dir": data["project_dir"],
                 "status": data["status"],
                 "error_count": len(data.get("errors", [])),
+                "compile_duration_s": data.get("compile_duration_s"),
                 "last_updated": data["last_updated"],
             })
 
@@ -878,10 +988,19 @@ def list_watched_projects() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def watch_project(project_path: str) -> Dict[str, Any]:
+def watch_project(
+    project_path: str,
+    wait_for_initial_compile: bool = True,
+    timeout_seconds: float = 30.0,
+) -> Dict[str, Any]:
     """
     Dynamically add and watch a new TypeScript project or directory without restarting the MCP server.
-    First verifies TypeScript compiler availability and rejects system/AppData directories.
+    First verifies TypeScript compiler availability, scans for tsconfig.json files, and waits for the initial compilation pass.
+
+    Args:
+        project_path: Path to project directory or tsconfig.json.
+        wait_for_initial_compile: If True, waits up to timeout_seconds for initial compilation to complete before returning (default True).
+        timeout_seconds: Maximum seconds to wait for initial compilation (default 30.0).
     """
     if not os.path.exists(project_path):
         return {"success": False, "error": f"Path not found: {project_path}"}
@@ -920,39 +1039,138 @@ def watch_project(project_path: str) -> Dict[str, Any]:
             "error": f"No tsconfig.json found in '{abs_project}' (searched up to 4 directories deep). Make sure this directory contains a TypeScript project.",
         }
 
+    start_t = time.time()
+    compilation_completed = True
+    if wait_for_initial_compile:
+        compilation_completed = wait_for_projects_compilation(configs, timeout=timeout_seconds)
+
+    elapsed_s = round(time.time() - start_t, 2)
+
+    total_errors = 0
+    project_details = []
+    with CACHE_LOCK:
+        for cfg in configs:
+            norm_cfg = normalize_path(cfg)
+            if norm_cfg in WATCHED_PROJECTS:
+                p_data = WATCHED_PROJECTS[norm_cfg]
+                err_cnt = len(p_data.get("errors", []))
+                total_errors += err_cnt
+                project_details.append({
+                    "tsconfig": p_data.get("relative_config", cfg),
+                    "status": p_data.get("status"),
+                    "error_count": err_cnt,
+                    "compile_duration_s": p_data.get("compile_duration_s"),
+                })
+
     return {
         "success": True,
         "project_path": normalize_path(abs_project),
         "found_tsconfigs": configs,
         "compiler_type": tsc_check.get("type"),
         "compiler_command": " ".join(tsc_check.get("command", [])),
-        "message": f"Verified 'tsc' ({tsc_check.get('type')}) and started background watchers for {len(configs)} configuration(s).",
+        "compilation_completed": compilation_completed,
+        "elapsed_seconds": elapsed_s,
+        "total_errors": total_errors,
+        "projects": project_details,
+        "message": (
+            f"Verified 'tsc' ({tsc_check.get('type')}) and compiled {len(configs)} configuration(s) in {elapsed_s}s ({total_errors} errors found)."
+            if compilation_completed else
+            f"Started background watchers for {len(configs)} configuration(s). Compilation continuing in background."
+        ),
     }
 
 
-
 @mcp.tool()
-def restart_tsc_watcher() -> Dict[str, Any]:
+def restart_tsc_watcher(
+    wait_for_initial_compile: bool = True,
+    timeout_seconds: float = 30.0,
+) -> Dict[str, Any]:
     """
-    Restart all active background TypeScript watchers and refresh diagnostics.
+    Restart all active background TypeScript watchers and recompile all projects.
+    Remembers and preserves all currently watched projects, and waits for compilation passes to finish (by default)
+    to guarantee accurate diagnostic results.
+
+    Args:
+        wait_for_initial_compile: If True, waits up to timeout_seconds for all projects to complete compilation before returning (default True).
+        timeout_seconds: Maximum seconds to wait for initial compilation across all projects (default 30.0).
     """
+    # 1. Collect all currently watched project directories before clearing cache
+    watched_dirs = set()
+    with CACHE_LOCK:
+        for data in WATCHED_PROJECTS.values():
+            p = data.get("project_dir")
+            if p and os.path.isdir(p):
+                watched_dirs.add(p)
+
     _cleanup_watchers()
     with CACHE_LOCK:
         WATCHED_PROJECTS.clear()
 
-    default_root = get_default_watch_dir()
-    if not default_root:
+    # If no projects were actively watched, check default watch dir
+    if not watched_dirs:
+        default_root = get_default_watch_dir()
+        if default_root and os.path.isdir(default_root):
+            watched_dirs.add(default_root)
+
+    if not watched_dirs:
         return {
             "success": True,
             "restarted_configs": [],
             "message": "Flushed watcher cache. Watcher is in standby mode. Set TSC_WATCH_DIR or call watch_project(project_path) to start monitoring a project.",
         }
 
-    configs = start_watching_project(default_root)
+    # 2. Re-start watching across all project roots
+    all_configs = []
+    for d in watched_dirs:
+        cfgs = start_watching_project(d)
+        all_configs.extend(cfgs)
+
+    if not all_configs:
+        return {
+            "success": True,
+            "restarted_configs": [],
+            "message": f"No tsconfig.json configurations found across watched directories: {list(watched_dirs)}",
+        }
+
+    # 3. Wait for all background watchers to complete their initial compilation pass
+    start_t = time.time()
+    compilation_completed = True
+    if wait_for_initial_compile:
+        compilation_completed = wait_for_projects_compilation(all_configs, timeout=timeout_seconds)
+
+    elapsed_s = round(time.time() - start_t, 2)
+
+    # 4. Gather consolidated summary
+    project_summaries = []
+    total_errors = 0
+    with CACHE_LOCK:
+        for cfg in all_configs:
+            norm_cfg = normalize_path(cfg)
+            if norm_cfg in WATCHED_PROJECTS:
+                p_data = WATCHED_PROJECTS[norm_cfg]
+                err_cnt = len(p_data.get("errors", []))
+                total_errors += err_cnt
+                project_summaries.append({
+                    "tsconfig": p_data.get("relative_config", cfg),
+                    "project_dir": p_data.get("project_dir"),
+                    "status": p_data.get("status"),
+                    "error_count": err_cnt,
+                    "compile_duration_s": p_data.get("compile_duration_s"),
+                })
+
+    if compilation_completed:
+        msg = f"Successfully restarted and recompiled {len(all_configs)} project configuration(s) in {elapsed_s}s ({total_errors} errors found)."
+    else:
+        msg = f"Restarted watchers for {len(all_configs)} configuration(s). Initial compilation is taking longer than {timeout_seconds}s and continuing in background."
+
     return {
         "success": True,
-        "restarted_configs": configs,
-        "message": f"Restarted watchers for {len(configs)} project(s).",
+        "compilation_completed": compilation_completed,
+        "elapsed_seconds": elapsed_s,
+        "restarted_configs": all_configs,
+        "total_errors": total_errors,
+        "projects": project_summaries,
+        "message": msg,
     }
 
 

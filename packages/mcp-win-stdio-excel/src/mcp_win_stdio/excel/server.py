@@ -12,6 +12,13 @@ import sqlite3
 from typing import Any, Optional, List, Dict, Union, Literal
 import pandas as pd
 import openpyxl
+from copy import copy
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment, numbers
+from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule, Rule
+from openpyxl.styles.differential import DifferentialStyle
+from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
+from openpyxl.chart import BarChart, LineChart, PieChart, AreaChart, Reference
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
@@ -68,6 +75,213 @@ def _format_dataframe_output(df: pd.DataFrame, format_type: str = "records") -> 
         return clean.to_csv(sep="\t", index=False)
     else:
         return _df_to_clean_records(df)
+
+
+# ============================================================================
+# EXCEL CELL FORMATTING & STYLING HELPERS
+# ============================================================================
+
+NUMBER_FORMAT_PRESETS = {
+    "currency": "$#,##0.00",
+    "currency_usd": "$#,##0.00",
+    "currency_eur": "€#,##0.00",
+    "currency_gbp": "£#,##0.00",
+    "currency_inr": "₹#,##0.00",
+    "currency_int": "$#,##0",
+    "percent": "0.0%",
+    "percent_2": "0.00%",
+    "percentage": "0.00%",
+    "number": "#,##0.00",
+    "decimal": "#,##0.00",
+    "decimal_1": "#,##0.0",
+    "integer": "#,##0",
+    "int": "#,##0",
+    "date": "yyyy-mm-dd",
+    "datetime": "yyyy-mm-dd hh:mm:ss",
+    "time": "hh:mm:ss",
+    "text": "@",
+    "scientific": "0.00E+00",
+}
+
+COLOR_SCALE_PRESETS = {
+    "green_yellow_red": {"min": "63BE7B", "mid": "FFEB84", "max": "F8696B"},
+    "red_yellow_green": {"min": "F8696B", "mid": "FFEB84", "max": "63BE7B"},
+    "green_white_red": {"min": "63BE7B", "mid": "FFFFFF", "max": "F8696B"},
+    "red_white_green": {"min": "F8696B", "mid": "FFFFFF", "max": "63BE7B"},
+    "blue_white_red": {"min": "5B9BD5", "mid": "FFFFFF", "max": "ED7D31"},
+    "white_green": {"min": "FFFFFF", "max": "63BE7B"},
+    "white_red": {"min": "FFFFFF", "max": "F8696B"},
+    "white_blue": {"min": "FFFFFF", "max": "5B9BD5"},
+}
+
+NAMED_HEX_COLORS = {
+    "black": "000000",
+    "white": "FFFFFF",
+    "red": "FF0000",
+    "green": "008000",
+    "blue": "0000FF",
+    "yellow": "FFFF00",
+    "orange": "FFA500",
+    "purple": "800080",
+    "gray": "808080",
+    "grey": "808080",
+    "navy": "000080",
+    "teal": "008080",
+    "silver": "C0C0C0",
+    "maroon": "800000",
+    "olive": "808000",
+    "lightgreen": "C6EFCE",
+    "darkgreen": "006100",
+    "lightred": "FFC7CE",
+    "darkred": "9C0006",
+    "lightyellow": "FFEB9C",
+    "darkyellow": "9C6500",
+    "lightblue": "D9E1F2",
+    "darkblue": "1F497D",
+}
+
+
+def _normalize_hex_color(color: Optional[str]) -> Optional[str]:
+    if not color:
+        return None
+    c = str(color).strip().lstrip("#")
+    if c.lower() in NAMED_HEX_COLORS:
+        return NAMED_HEX_COLORS[c.lower()].upper()
+    return c.upper()
+
+
+def _resolve_number_format(fmt: Optional[str]) -> Optional[str]:
+    if not fmt:
+        return None
+    fmt_lower = fmt.strip().lower()
+    return NUMBER_FORMAT_PRESETS.get(fmt_lower, fmt.strip())
+
+
+def _build_fill(fill_spec: Union[Dict[str, Any], str, None]) -> Optional[PatternFill]:
+    if not fill_spec:
+        return None
+    if isinstance(fill_spec, str):
+        color = _normalize_hex_color(fill_spec)
+        fill_type = "solid"
+    elif isinstance(fill_spec, dict):
+        color = _normalize_hex_color(fill_spec.get("color"))
+        fill_type = fill_spec.get("fill_type", "solid")
+    else:
+        return None
+    if not color:
+        return None
+    return PatternFill(start_color=color, end_color=color, fill_type=fill_type)
+
+
+def _build_border(border_spec: Union[Dict[str, Any], str, None]) -> Optional[Border]:
+    if not border_spec:
+        return None
+    if isinstance(border_spec, str):
+        border_spec = {"style": border_spec, "sides": "all"}
+
+    style = border_spec.get("style", "thin")
+    color = _normalize_hex_color(border_spec.get("color", "000000"))
+    sides = border_spec.get("sides", "all")
+    if isinstance(sides, str):
+        sides = [sides.lower()]
+    elif isinstance(sides, (list, tuple)):
+        sides = [str(s).lower() for s in sides]
+    else:
+        sides = ["all"]
+
+    side_obj = Side(style=style, color=color)
+    none_side = Side(style=None)
+
+    apply_all = "all" in sides
+    apply_outline = "outline" in sides
+    top = side_obj if (apply_all or apply_outline or "top" in sides) else none_side
+    bottom = side_obj if (apply_all or apply_outline or "bottom" in sides) else none_side
+    left = side_obj if (apply_all or apply_outline or "left" in sides) else none_side
+    right = side_obj if (apply_all or apply_outline or "right" in sides) else none_side
+
+    return Border(left=left, right=right, top=top, bottom=bottom)
+
+
+def _get_cells_in_range(sheet: Any, range_address: str) -> List[Any]:
+    """Return a flat list of cell objects from a range string (e.g. 'A1', 'A1:C5')."""
+    selected = sheet[range_address]
+    cells = []
+    if isinstance(selected, tuple):
+        for item in selected:
+            if isinstance(item, tuple):
+                cells.extend(item)
+            else:
+                cells.append(item)
+    else:
+        cells.append(selected)
+    return cells
+
+
+def _apply_style_to_cell(
+    cell: Any,
+    font_spec: Optional[Dict[str, Any]] = None,
+    fill_spec: Union[Dict[str, Any], str, None] = None,
+    border_spec: Union[Dict[str, Any], str, None] = None,
+    alignment_spec: Optional[Dict[str, Any]] = None,
+    number_format: Optional[str] = None,
+):
+    if font_spec:
+        cur_f = cell.font
+        color = _normalize_hex_color(font_spec.get("color"))
+        u_val = font_spec.get("underline")
+        underline = u_val if u_val in ["single", "double"] else ("single" if u_val is True else (None if u_val is False else None))
+        cell.font = Font(
+            name=font_spec.get("name") or (cur_f.name if cur_f and cur_f.name else "Calibri"),
+            size=font_spec.get("size") if font_spec.get("size") is not None else (cur_f.size if cur_f and cur_f.size else 11),
+            bold=font_spec.get("bold") if font_spec.get("bold") is not None else (cur_f.bold if cur_f else False),
+            italic=font_spec.get("italic") if font_spec.get("italic") is not None else (cur_f.italic if cur_f else False),
+            underline=underline if underline is not None else (cur_f.underline if cur_f else None),
+            strike=font_spec.get("strike") if font_spec.get("strike") is not None else (cur_f.strike if cur_f else False),
+            color=color if color is not None else (cur_f.color.rgb if cur_f and cur_f.color and hasattr(cur_f.color, "rgb") else None),
+        )
+
+    if fill_spec is not None:
+        fill_obj = _build_fill(fill_spec)
+        if fill_obj:
+            cell.fill = fill_obj
+
+    if border_spec is not None:
+        border_obj = _build_border(border_spec)
+        if border_obj:
+            cell.border = border_obj
+
+    if alignment_spec is not None:
+        cur_a = cell.alignment
+        cell.alignment = Alignment(
+            horizontal=alignment_spec.get("horizontal") or (cur_a.horizontal if cur_a else None),
+            vertical=alignment_spec.get("vertical") or (cur_a.vertical if cur_a else None),
+            wrap_text=alignment_spec.get("wrap_text") if alignment_spec.get("wrap_text") is not None else (cur_a.wrap_text if cur_a else None),
+            text_rotation=alignment_spec.get("text_rotation") if alignment_spec.get("text_rotation") is not None else (cur_a.text_rotation if cur_a else 0),
+            indent=alignment_spec.get("indent") if alignment_spec.get("indent") is not None else (cur_a.indent if cur_a else 0),
+        )
+
+    if number_format is not None:
+        cell.number_format = _resolve_number_format(number_format)
+
+
+def _handle_excel_lock(file_path: str, err: Exception) -> PermissionError:
+    filename = os.path.basename(file_path)
+    msg = (
+        f"FILE LOCKED BY EXCEL: The file '{filename}' ({file_path}) cannot be written to "
+        f"because it is currently open in Microsoft Excel desktop (or another process has an exclusive lock on it).\n\n"
+        f"🚨 AGENT ACTION REQUIRED: DO NOT attempt terminal workarounds, PowerShell commands, or custom Python scripts.\n"
+        f"👉 PLEASE ASK THE USER: 'Please save and close \"{filename}\" in Microsoft Excel so I can apply the updates.', "
+        f"and wait for the user to confirm before retrying."
+    )
+    return PermissionError(msg)
+
+
+def _safe_save_workbook(wb: Any, save_path: str):
+    """Save an openpyxl workbook with a clear instruction to the agent if locked by desktop Excel."""
+    try:
+        wb.save(save_path)
+    except (PermissionError, OSError) as e:
+        raise _handle_excel_lock(save_path, e) from e
 
 
 # ==========================================
@@ -531,14 +745,16 @@ def create_workbook(
         os.makedirs(out_dir, exist_ok=True)
 
     df = pd.DataFrame(data)
-    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-
-        df.to_excel(writer, sheet_name=sheet_name, index=False)
-        ws = writer.sheets[sheet_name]
-        for col in ws.columns:
-            max_len = max(len(str(cell.value or "")) for cell in col)
-            col_letter = openpyxl.utils.get_column_letter(col[0].column)
-            ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
+    try:
+        with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            ws = writer.sheets[sheet_name]
+            for col in ws.columns:
+                max_len = max(len(str(cell.value or "")) for cell in col)
+                col_letter = openpyxl.utils.get_column_letter(col[0].column)
+                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 50)
+    except (PermissionError, OSError) as e:
+        raise _handle_excel_lock(file_path, e) from e
 
     return {
         "status": "success",
@@ -574,7 +790,7 @@ def append_rows(
         sheet.append(row_values)
         appended_count += 1
 
-    wb.save(file_path)
+    _safe_save_workbook(wb, file_path)
     wb.close()
 
     return {
@@ -622,7 +838,7 @@ def add_sheet(
         ws.append(headers)
 
     all_sheets = list(wb.sheetnames)
-    wb.save(file_path)
+    _safe_save_workbook(wb, file_path)
     wb.close()
 
     return {
@@ -654,7 +870,7 @@ def rename_sheet(
 
     wb[old_name].title = new_name
     all_sheets = list(wb.sheetnames)
-    wb.save(file_path)
+    _safe_save_workbook(wb, file_path)
     wb.close()
 
     return {
@@ -685,7 +901,7 @@ def delete_sheet(
 
     wb.remove(wb[sheet_name])
     remaining_sheets = list(wb.sheetnames)
-    wb.save(file_path)
+    _safe_save_workbook(wb, file_path)
     wb.close()
 
     return {
@@ -701,10 +917,19 @@ def update_cells(
     file_path: str,
     updates: List[Dict[str, Any]],
     sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Update specific cell coordinates or formulas.
-    Example updates: [{"cell": "B5", "value": 1500}, {"cell": "C5", "value": "=A5*B5"}]
+    Update specific cell coordinates, formulas, and optional styles.
+    Example updates:
+      [
+        {"cell": "B5", "value": 1500, "number_format": "currency", "font": {"bold": True}},
+        {"cell": "C5", "value": "=A5*B5", "fill": "D9E1F2"}
+      ]
+
+    NOTE: If this file is currently open in Microsoft Excel desktop, saving will fail with
+    a locked file error. Ask the user to close the workbook in Excel and retry; do NOT
+    attempt terminal workarounds or custom Python scripts.
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
@@ -715,18 +940,704 @@ def update_cells(
     updated_count = 0
     for item in updates:
         coord = item.get("cell")
-        val = item.get("value")
-        if coord:
-            sheet[coord] = val
-            updated_count += 1
+        if not coord:
+            continue
+        
+        cell_obj = sheet[coord]
+        if "value" in item:
+            cell_obj.value = item.get("value")
 
-    wb.save(file_path)
+        # Optional styling
+        font_spec = item.get("font")
+        fill_spec = item.get("fill")
+        border_spec = item.get("border")
+        align_spec = item.get("alignment")
+        num_fmt = item.get("number_format")
+
+        if any(x is not None for x in (font_spec, fill_spec, border_spec, align_spec, num_fmt)):
+            _apply_style_to_cell(
+                cell_obj,
+                font_spec=font_spec,
+                fill_spec=fill_spec,
+                border_spec=border_spec,
+                alignment_spec=align_spec,
+                number_format=num_fmt,
+            )
+        updated_count += 1
+
+    save_target = output_path or file_path
+    _safe_save_workbook(wb, save_target)
     wb.close()
 
     return {
         "status": "success",
         "file_path": file_path,
+        "saved_path": save_target,
         "cells_updated": updated_count,
+    }
+
+
+@mcp.tool()
+def write_range(
+    file_path: str,
+    data: List[List[Any]],
+    start_cell: str = "A1",
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
+    clear_subsequent_rows: bool = False,
+) -> Dict[str, Any]:
+    """
+    Write a 2D matrix (list of rows) into a worksheet starting at start_cell (e.g. 'A2').
+    Significantly faster and more token-efficient than update_cells when writing tabular
+    rows, rebuilding entire sheets, or replacing tables.
+
+    Example:
+      data=[
+        ["AC01001", "AC", "Accessories", 1, "Power Distribution & Boards"],
+        ["AC01002", "AC", "Accessories", 1, "Power Distribution & Boards"]
+      ]
+      start_cell="A2"
+      clear_subsequent_rows=True  # (cleans out any old leftover rows below start_cell)
+
+    NOTE: If this file is currently open in Microsoft Excel desktop, saving will fail with
+    a locked file error. Ask the user to close the workbook in Excel and retry; do NOT
+    attempt terminal workarounds or custom Python scripts.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    start_row, start_col = coordinate_to_tuple(start_cell)
+
+    if clear_subsequent_rows and sheet.max_row >= start_row:
+        rows_to_delete = sheet.max_row - start_row + 1
+        if rows_to_delete > 0:
+            sheet.delete_rows(start_row, rows_to_delete)
+
+    cells_written = 0
+    for r_offset, row in enumerate(data):
+        current_row = start_row + r_offset
+        for c_offset, val in enumerate(row):
+            current_col = start_col + c_offset
+            cell_obj = sheet.cell(row=current_row, column=current_col)
+            cell_obj.value = val
+            cells_written += 1
+
+    save_target = output_path or file_path
+    _safe_save_workbook(wb, save_target)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "sheet_name": sheet.title,
+        "start_cell": start_cell,
+        "rows_written": len(data),
+        "cells_written": cells_written,
+    }
+
+
+# ============================================================================
+# 1B. STYLING, CONDITIONAL FORMATTING & LAYOUT TOOLS
+# ============================================================================
+
+@mcp.tool()
+def format_cells(
+    file_path: str,
+    range_address: Optional[str] = None,
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
+    font: Optional[Dict[str, Any]] = None,
+    fill: Optional[Union[Dict[str, Any], str]] = None,
+    border: Optional[Union[Dict[str, Any], str]] = None,
+    alignment: Optional[Dict[str, Any]] = None,
+    number_format: Optional[str] = None,
+    batch_formats: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Format a range of cells (e.g. 'A1:E1', 'B2:B20', 'C5') or multiple ranges with custom styles.
+
+    Parameters:
+    - file_path: Path to the .xlsx workbook.
+    - range_address: Cell coordinate or range string (e.g., 'A1:H1', 'B2:B50', 'C5').
+    - sheet_name: Optional worksheet name (defaults to active sheet).
+    - output_path: Optional output path (if None, modifies workbook in-place).
+    - font: Dict with styling options:
+        {"name": "Calibri", "size": 12, "bold": True, "italic": False, "color": "FF0000", "underline": "single", "strike": False}
+    - fill: Hex color string (e.g. "1F497D", "#D9E1F2", "lightgreen") or dict {"color": "1F497D", "fill_type": "solid"}.
+    - border: Border style string ("thin", "thick", "double", "dashed") or dict
+        {"style": "thin", "color": "000000", "sides": ["top", "bottom", "left", "right"]}.
+    - alignment: Dict with alignment options:
+        {"horizontal": "center", "vertical": "center", "wrap_text": True, "text_rotation": 0, "indent": 0}.
+    - number_format: Preset ("currency", "percent", "decimal", "integer", "date") or custom Excel format string (e.g. "$#,##0.00").
+    - batch_formats: Optional list of formatting rules for multiple ranges in one turn:
+        [
+          {"range": "A1:E1", "fill": "1F497D", "font": {"bold": True, "color": "FFFFFF"}, "alignment": {"horizontal": "center"}},
+          {"range": "D2:D100", "number_format": "currency"},
+          {"range": "E2:E100", "number_format": "percent"}
+        ]
+
+    NOTE: If this file is currently open in Microsoft Excel desktop, saving will fail with
+    a locked file error. Ask the user to close the workbook in Excel and retry; do NOT
+    attempt terminal workarounds or custom Python scripts.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    operations = []
+    if batch_formats:
+        operations.extend(batch_formats)
+    if range_address:
+        operations.append({
+            "range": range_address,
+            "font": font,
+            "fill": fill,
+            "border": border,
+            "alignment": alignment,
+            "number_format": number_format,
+        })
+
+    if not operations:
+        wb.close()
+        return {
+            "status": "warning",
+            "message": "No formatting applied: specify range_address or batch_formats.",
+            "file_path": file_path,
+            "cells_formatted": 0,
+        }
+
+    total_cells = 0
+    for op in operations:
+        r_addr = op.get("range") or op.get("range_address")
+        if not r_addr:
+            continue
+        cells = _get_cells_in_range(sheet, r_addr)
+        op_font = op.get("font")
+        op_fill = op.get("fill")
+        op_border = op.get("border")
+        op_align = op.get("alignment")
+        op_num = op.get("number_format")
+
+        for cell in cells:
+            _apply_style_to_cell(
+                cell,
+                font_spec=op_font,
+                fill_spec=op_fill,
+                border_spec=op_border,
+                alignment_spec=op_align,
+                number_format=op_num,
+            )
+            total_cells += 1
+
+    save_target = output_path or file_path
+    _safe_save_workbook(wb, save_target)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "ranges_formatted": len(operations),
+        "cells_formatted": total_cells,
+    }
+
+
+@mcp.tool()
+def apply_conditional_formatting(
+    file_path: str,
+    range_address: str,
+    rule_type: str,
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
+    operator: Optional[str] = None,
+    formula: Optional[List[str]] = None,
+    fill_color: Optional[str] = None,
+    font_color: Optional[str] = None,
+    bold: Optional[bool] = None,
+    color_scale_preset: Optional[str] = None,
+    color_scale: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Apply conditional formatting rules to an Excel sheet.
+
+    Rule types supported:
+    1. 'cell_is': Highlights cells based on comparison operator
+       - operator: 'greaterThan', 'lessThan', 'equal', 'notEqual', 'between', 'notBetween', 'greaterThanOrEqual', 'lessThanOrEqual'.
+       - formula: e.g. ["100"] or ["50", "100"] for between.
+       - fill_color: Hex color string (e.g. "C6EFCE" for soft green, "FFC7CE" for soft red).
+       - font_color: Hex color string (e.g. "006100" for dark green, "9C0006" for dark red).
+       - bold: Optional boolean.
+
+    2. 'color_scale': Applies 2-color or 3-color heatmap gradients.
+       - color_scale_preset: 'green_yellow_red', 'red_yellow_green', 'green_white_red', 'red_white_green', 'blue_white_red', 'white_green', 'white_red', 'white_blue'.
+       - color_scale: Custom dict with 'min', 'mid' (optional), 'max' hex colors (e.g. {"min": "63BE7B", "mid": "FFEB84", "max": "F8696B"}).
+
+    3. 'duplicate_values' / 'unique_values':
+       - Highlights duplicate or unique cells in the range with fill_color/font_color.
+
+    4. 'formula':
+       - Evaluates custom Excel formula (e.g. formula=["$B2>100"] or formula=["ISBLANK(C2)"]).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    norm_fill = _normalize_hex_color(fill_color)
+    norm_font = _normalize_hex_color(font_color)
+    fill_obj = PatternFill(start_color=norm_fill, end_color=norm_fill, fill_type="solid") if norm_fill else None
+    font_obj = Font(color=norm_font, bold=bold) if (norm_font or bold is not None) else None
+
+    rt = rule_type.lower().replace("-", "_")
+
+    if rt == "cell_is":
+        op = operator or "greaterThan"
+        form_list = formula or ["0"]
+        rule = CellIsRule(operator=op, formula=form_list, stopIfTrue=True, fill=fill_obj, font=font_obj)
+        sheet.conditional_formatting.add(range_address, rule)
+
+    elif rt == "color_scale":
+        preset_dict = None
+        if color_scale_preset and color_scale_preset.lower() in COLOR_SCALE_PRESETS:
+            preset_dict = COLOR_SCALE_PRESETS[color_scale_preset.lower()]
+        elif color_scale:
+            preset_dict = color_scale
+
+        if not preset_dict:
+            preset_dict = COLOR_SCALE_PRESETS["green_yellow_red"]
+
+        min_c = _normalize_hex_color(preset_dict.get("min", "63BE7B"))
+        mid_c = _normalize_hex_color(preset_dict.get("mid"))
+        max_c = _normalize_hex_color(preset_dict.get("max", "F8696B"))
+
+        if mid_c:
+            scale_rule = ColorScaleRule(
+                start_type="min",
+                start_color=min_c,
+                mid_type="percentile",
+                mid_value=50,
+                mid_color=mid_c,
+                end_type="max",
+                end_color=max_c,
+            )
+        else:
+            scale_rule = ColorScaleRule(start_type="min", start_color=min_c, end_type="max", end_color=max_c)
+        sheet.conditional_formatting.add(range_address, scale_rule)
+
+    elif rt in ("duplicate_values", "unique_values"):
+        dxf_type = "duplicateValues" if rt == "duplicate_values" else "uniqueValues"
+        dxf = DifferentialStyle(font=font_obj, fill=fill_obj)
+        rule = Rule(type=dxf_type, dxf=dxf, stopIfTrue=True)
+        sheet.conditional_formatting.add(range_address, rule)
+
+    elif rt == "formula":
+        form_list = formula or ["$A1>0"]
+        rule = FormulaRule(formula=form_list, stopIfTrue=True, fill=fill_obj, font=font_obj)
+        sheet.conditional_formatting.add(range_address, rule)
+
+    else:
+        wb.close()
+        raise ValueError(
+            f"Unsupported rule_type '{rule_type}'. Supported: 'cell_is', 'color_scale', 'duplicate_values', 'unique_values', 'formula'."
+        )
+
+    save_target = output_path or file_path
+    _safe_save_workbook(wb, save_target)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "range_address": range_address,
+        "rule_type": rt,
+        "operator": operator if rt == "cell_is" else None,
+    }
+
+
+@mcp.tool()
+def set_sheet_layout_and_freeze(
+    file_path: str,
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
+    column_widths: Optional[Dict[str, float]] = None,
+    auto_fit_columns: bool = False,
+    row_heights: Optional[Dict[Union[int, str], float]] = None,
+    freeze_panes: Optional[str] = None,
+    show_grid_lines: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Configure worksheet layout, column widths, auto-fitting, row heights, and freeze panes.
+
+    Parameters:
+    - file_path: Path to the .xlsx workbook.
+    - sheet_name: Optional worksheet name (defaults to active sheet).
+    - output_path: Optional output path (if None, modifies in-place).
+    - column_widths: Dict mapping column letter to width in characters (e.g. {"A": 15, "B": 30, "C": 20}).
+    - auto_fit_columns: If True, automatically measures text lengths across all columns and sets optimal column widths with padding.
+    - row_heights: Dict mapping row index to height in points (e.g. {"1": 28, "2": 20}).
+    - freeze_panes: Cell coordinate to freeze at (e.g. "A2" freezes header row 1, "B2" freezes col A & row 1, "None" or "" unfreezes).
+    - show_grid_lines: True to display gridlines, False to hide them.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    results = {}
+
+    if auto_fit_columns:
+        col_widths = {}
+        for col in sheet.columns:
+            col_letter = get_column_letter(col[0].column)
+            max_len = 0
+            for cell in col:
+                if cell.value is not None:
+                    for line in str(cell.value).split("\n"):
+                        if len(line) > max_len:
+                            max_len = len(line)
+            calculated = max(max_len + 3, 10.0)
+            sheet.column_dimensions[col_letter].width = calculated
+            col_widths[col_letter] = calculated
+        results["auto_fit_columns"] = col_widths
+
+    if column_widths:
+        for col_letter, width in column_widths.items():
+            clean_letter = col_letter.strip().upper()
+            sheet.column_dimensions[clean_letter].width = float(width)
+        results["custom_column_widths"] = column_widths
+
+    if row_heights:
+        for row_idx, height in row_heights.items():
+            clean_idx = int(str(row_idx).strip())
+            sheet.row_dimensions[clean_idx].height = float(height)
+        results["row_heights"] = row_heights
+
+    if freeze_panes is not None:
+        if str(freeze_panes).lower() in ("none", "", "false", "null"):
+            sheet.freeze_panes = None
+            results["freeze_panes"] = None
+        else:
+            sheet.freeze_panes = str(freeze_panes).strip().upper()
+            results["freeze_panes"] = sheet.freeze_panes
+
+    if show_grid_lines is not None:
+        if hasattr(sheet, "views") and sheet.views.sheetView:
+            sheet.views.sheetView[0].showGridLines = bool(show_grid_lines)
+        else:
+            sheet.sheet_view.showGridLines = bool(show_grid_lines)
+        results["show_grid_lines"] = show_grid_lines
+
+    save_target = output_path or file_path
+    _safe_save_workbook(wb, save_target)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "sheet_name": sheet.title,
+        "settings_applied": results,
+    }
+
+
+@mcp.tool()
+def create_chart(
+    file_path: str,
+    chart_type: str,
+    data_range: str,
+    categories_range: Optional[str] = None,
+    title: Optional[str] = None,
+    target_cell: str = "E2",
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
+    x_axis_title: Optional[str] = None,
+    y_axis_title: Optional[str] = None,
+    width: float = 16.0,
+    height: float = 10.0,
+) -> Dict[str, Any]:
+    """
+    Create an embedded native Excel chart (column, bar, line, pie, area) and insert it into a sheet.
+
+    Parameters:
+    - file_path: Path to the .xlsx workbook.
+    - chart_type: 'col' (or 'column'), 'bar' (horizontal), 'line', 'pie', 'area'.
+    - data_range: Coordinates of numeric series including header (e.g. 'B1:C10').
+    - categories_range: Coordinates of X-axis labels/categories excluding header (e.g. 'A2:A10').
+    - title: Title displayed above the chart.
+    - target_cell: Top-left cell coordinate where the chart will be placed (default 'E2').
+    - sheet_name: Worksheet name (defaults to active sheet).
+    - output_path: Optional output path (if None, modifies in-place).
+    - x_axis_title / y_axis_title: Optional axis labels.
+    - width / height: Chart dimensions in cm (default 16 x 10).
+
+    NOTE: If this file is currently open in Microsoft Excel desktop, saving will fail with
+    a locked file error. Ask the user to close the workbook in Excel and retry; do NOT
+    attempt terminal workarounds or custom Python scripts.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    ct = chart_type.lower().strip()
+    if ct in ("col", "column"):
+        chart = BarChart()
+        chart.type = "col"
+    elif ct == "bar":
+        chart = BarChart()
+        chart.type = "bar"
+    elif ct == "line":
+        chart = LineChart()
+    elif ct == "pie":
+        chart = PieChart()
+    elif ct == "area":
+        chart = AreaChart()
+    else:
+        wb.close()
+        raise ValueError(
+            f"Unsupported chart_type '{chart_type}'. Supported types: 'col', 'bar', 'line', 'pie', 'area'."
+        )
+
+    if title:
+        chart.title = title
+    chart.width = width
+    chart.height = height
+
+    if x_axis_title and hasattr(chart, "x_axis") and chart.x_axis:
+        chart.x_axis.title = x_axis_title
+    if y_axis_title and hasattr(chart, "y_axis") and chart.y_axis:
+        chart.y_axis.title = y_axis_title
+
+    min_col, min_row, max_col, max_row = range_boundaries(data_range)
+    data_ref = Reference(sheet, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
+    chart.add_data(data_ref, titles_from_data=True)
+
+    if categories_range:
+        c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
+        cats_ref = Reference(sheet, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
+        chart.set_categories(cats_ref)
+
+    sheet.add_chart(chart, target_cell)
+
+    save_target = output_path or file_path
+    _safe_save_workbook(wb, save_target)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "sheet_name": sheet.title,
+        "chart_type": ct,
+        "target_cell": target_cell,
+        "title": title,
+    }
+
+
+@mcp.tool()
+def clean_and_deduplicate_sheet(
+    file_path: str,
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None,
+    deduplicate_columns: Optional[List[str]] = None,
+    trim_text: bool = True,
+    normalize_dates: bool = False,
+    date_columns: Optional[List[str]] = None,
+    drop_empty_rows: bool = True,
+    drop_empty_columns: bool = False,
+    fill_nulls: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    Perform automated high-speed data cleaning, standardization, and deduplication on an Excel sheet using Pandas.
+
+    Parameters:
+    - file_path: Path to the .xlsx workbook.
+    - sheet_name: Optional worksheet name (defaults to active sheet).
+    - output_path: Optional output path (if None, modifies in-place).
+    - deduplicate_columns: List of column names to check for duplicates (or all columns if None).
+    - trim_text: Strip leading and trailing whitespace from text values (default True).
+    - normalize_dates: Attempt parsing and standardizing dates to YYYY-MM-DD.
+    - date_columns: Optional list of specific column names to normalize dates on.
+    - drop_empty_rows: Remove rows that are completely blank (default True).
+    - drop_empty_columns: Remove columns that are completely blank (default False).
+    - fill_nulls: Optional value to replace remaining null/NaN cells with.
+
+    Returns cleaning metrics: initial_rows, final_rows, duplicates_removed, empty_rows_dropped.
+
+    NOTE: If this file is currently open in Microsoft Excel desktop, saving will fail with
+    a locked file error. Ask the user to close the workbook in Excel and retry; do NOT
+    attempt terminal workarounds or custom Python scripts.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb_meta = openpyxl.load_workbook(file_path, read_only=True)
+    target_sheet = sheet_name if sheet_name and sheet_name in wb_meta.sheetnames else wb_meta.sheetnames[0]
+    wb_meta.close()
+
+    df = pd.read_excel(file_path, sheet_name=target_sheet)
+    initial_rows = len(df)
+
+    empty_rows_dropped = 0
+    if drop_empty_rows:
+        before = len(df)
+        df = df.dropna(how="all")
+        empty_rows_dropped = before - len(df)
+
+    empty_cols_dropped = 0
+    if drop_empty_columns:
+        before_c = len(df.columns)
+        df = df.dropna(axis=1, how="all")
+        empty_cols_dropped = before_c - len(df.columns)
+
+    if trim_text:
+        for col in df.select_dtypes(include=["object", "string"]).columns:
+            df[col] = df[col].astype(str).str.strip().replace({"nan": None, "None": None, "<NA>": None})
+
+    if normalize_dates:
+        target_date_cols = date_columns if date_columns else list(df.select_dtypes(include=["object", "string", "datetime"]).columns)
+        for col in target_date_cols:
+            if col in df.columns:
+                try:
+                    parsed = pd.to_datetime(df[col], errors="coerce")
+                    if parsed.notnull().sum() > 0:
+                        df[col] = parsed.dt.strftime("%Y-%m-%d")
+                except Exception:
+                    pass
+
+    duplicates_removed = 0
+    if deduplicate_columns:
+        valid_cols = [c for c in deduplicate_columns if c in df.columns]
+        if valid_cols:
+            before_d = len(df)
+            df = df.drop_duplicates(subset=valid_cols)
+            duplicates_removed = before_d - len(df)
+    else:
+        before_d = len(df)
+        df = df.drop_duplicates()
+        duplicates_removed = before_d - len(df)
+
+    if fill_nulls is not None:
+        df = df.fillna(fill_nulls)
+
+    save_target = output_path or file_path
+
+    try:
+        with pd.ExcelWriter(save_target, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            df.to_excel(writer, sheet_name=target_sheet, index=False)
+    except Exception:
+        try:
+            with pd.ExcelWriter(save_target, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name=target_sheet, index=False)
+        except (PermissionError, OSError) as e:
+            raise _handle_excel_lock(save_target, e) from e
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "sheet_name": target_sheet,
+        "initial_rows": initial_rows,
+        "final_rows": len(df),
+        "duplicates_removed": duplicates_removed,
+        "empty_rows_dropped": empty_rows_dropped,
+        "empty_columns_dropped": empty_cols_dropped,
+    }
+
+
+@mcp.tool()
+def transform_sheet_data(
+    file_path: str,
+    source_sheet: Optional[str] = None,
+    output_sheet: str = "Transformed_Summary",
+    group_by: Optional[List[str]] = None,
+    aggregations: Optional[Dict[str, str]] = None,
+    filter_expr: Optional[str] = None,
+    sort_by: Optional[str] = None,
+    ascending: bool = True,
+    output_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Perform advanced Python/Pandas in-memory aggregation and transformation on an Excel sheet
+    (similar to Python in Excel =PY()), and write the result into a new or existing sheet tab.
+
+    Parameters:
+    - file_path: Path to the .xlsx workbook.
+    - source_sheet: Source worksheet name.
+    - output_sheet: Destination worksheet tab to write the transformed table to.
+    - group_by: Columns to group by (e.g. ['Category', 'Region']).
+    - aggregations: Aggregation mapping (e.g. {'Sales': 'sum', 'Quantity': 'mean', 'Order_ID': 'count'}).
+    - filter_expr: Optional Pandas query filter (e.g. 'Sales > 500').
+    - sort_by: Column to sort final result by.
+    - ascending: Sort direction (default True).
+    - output_path: Optional output path.
+
+    NOTE: If this file is currently open in Microsoft Excel desktop, saving will fail with
+    a locked file error. Ask the user to close the workbook in Excel and retry; do NOT
+    attempt terminal workarounds or custom Python scripts.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb_meta = openpyxl.load_workbook(file_path, read_only=True)
+    target_src = source_sheet if source_sheet and source_sheet in wb_meta.sheetnames else wb_meta.sheetnames[0]
+    wb_meta.close()
+
+    df = pd.read_excel(file_path, sheet_name=target_src)
+    initial_rows = len(df)
+
+    if filter_expr:
+        try:
+            df = df.query(filter_expr)
+        except Exception as e:
+            raise ValueError(f"Invalid filter_expr '{filter_expr}': {e}") from e
+
+    if group_by:
+        valid_gb = [c for c in group_by if c in df.columns]
+        if valid_gb:
+            if aggregations:
+                valid_aggs = {k: v for k, v in aggregations.items() if k in df.columns}
+                if valid_aggs:
+                    df = df.groupby(valid_gb).agg(valid_aggs).reset_index()
+                else:
+                    df = df.groupby(valid_gb).size().reset_index(name="Count")
+            else:
+                df = df.groupby(valid_gb).size().reset_index(name="Count")
+
+    if sort_by and sort_by in df.columns:
+        df = df.sort_values(by=sort_by, ascending=ascending)
+
+    save_target = output_path or file_path
+
+    try:
+        with pd.ExcelWriter(save_target, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            df.to_excel(writer, sheet_name=output_sheet, index=False)
+    except Exception:
+        try:
+            with pd.ExcelWriter(save_target, engine="openpyxl") as writer:
+                df.to_excel(writer, sheet_name=output_sheet, index=False)
+        except (PermissionError, OSError) as e:
+            raise _handle_excel_lock(save_target, e) from e
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_target,
+        "source_sheet": target_src,
+        "output_sheet": output_sheet,
+        "initial_rows": initial_rows,
+        "result_rows": len(df),
+        "columns": list(df.columns),
     }
 
 
@@ -1266,17 +2177,20 @@ def reconcile_and_merge(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    with pd.ExcelWriter(output_file_path, engine="openpyxl") as writer:
-        df_reconciled.to_excel(writer, sheet_name="1_Reconciled_Matches", index=False)
-        df_fuzzy.to_excel(writer, sheet_name="2_Probable_Fuzzy_Matches", index=False)
-        df_unmatched.to_excel(writer, sheet_name="3_Unmatched_Exceptions", index=False)
+    try:
+        with pd.ExcelWriter(output_file_path, engine="openpyxl") as writer:
+            df_reconciled.to_excel(writer, sheet_name="1_Reconciled_Matches", index=False)
+            df_fuzzy.to_excel(writer, sheet_name="2_Probable_Fuzzy_Matches", index=False)
+            df_unmatched.to_excel(writer, sheet_name="3_Unmatched_Exceptions", index=False)
 
-        for sname in ["1_Reconciled_Matches", "2_Probable_Fuzzy_Matches", "3_Unmatched_Exceptions"]:
-            ws = writer.sheets[sname]
-            for col in ws.columns:
-                max_len = max(len(str(cell.value or "")) for cell in col)
-                col_letter = openpyxl.utils.get_column_letter(col[0].column)
-                ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 45)
+            for sname in ["1_Reconciled_Matches", "2_Probable_Fuzzy_Matches", "3_Unmatched_Exceptions"]:
+                ws = writer.sheets[sname]
+                for col in ws.columns:
+                    max_len = max(len(str(cell.value or "")) for cell in col)
+                    col_letter = openpyxl.utils.get_column_letter(col[0].column)
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 3, 10), 45)
+    except (PermissionError, OSError) as e:
+        raise _handle_excel_lock(output_file_path, e) from e
 
     return {
         "status": "success",
@@ -1322,11 +2236,14 @@ def recalculate_and_save(file_path: str) -> Dict[str, Any]:
         excel = win32com.client.DispatchEx("Excel.Application")
         excel.Visible = False
         excel.DisplayAlerts = False
-        wb = excel.Workbooks.Open(abs_path)
-        excel.CalculateFull()
-        wb.Save()
-        wb.Close()
-        wb = None
+        try:
+            wb = excel.Workbooks.Open(abs_path)
+            excel.CalculateFull()
+            wb.Save()
+            wb.Close()
+            wb = None
+        except Exception as e:
+            raise _handle_excel_lock(abs_path, e) from e
         return {
             "status": "success",
             "message": "Workbook formulas recalculated and saved using native Microsoft Excel.",
@@ -1425,12 +2342,15 @@ def refresh_data_and_pivots(file_path: str) -> Dict[str, Any]:
         excel = win32com.client.DispatchEx("Excel.Application")
         excel.Visible = False
         excel.DisplayAlerts = False
-        wb = excel.Workbooks.Open(abs_path)
-        wb.RefreshAll()
-        excel.CalculateUntilAsyncQueriesDone()
-        wb.Save()
-        wb.Close()
-        wb = None
+        try:
+            wb = excel.Workbooks.Open(abs_path)
+            wb.RefreshAll()
+            excel.CalculateUntilAsyncQueriesDone()
+            wb.Save()
+            wb.Close()
+            wb = None
+        except Exception as e:
+            raise _handle_excel_lock(abs_path, e) from e
         return {
             "status": "success",
             "message": "All data connections and PivotTables refreshed successfully.",
@@ -1474,12 +2394,15 @@ def run_vba_macro(
         excel = win32com.client.DispatchEx("Excel.Application")
         excel.Visible = False
         excel.DisplayAlerts = False
-        wb = excel.Workbooks.Open(abs_path)
-        macro_args = args or []
-        macro_res = excel.Application.Run(macro_name, *macro_args)
-        wb.Save()
-        wb.Close()
-        wb = None
+        try:
+            wb = excel.Workbooks.Open(abs_path)
+            macro_args = args or []
+            macro_res = excel.Application.Run(macro_name, *macro_args)
+            wb.Save()
+            wb.Close()
+            wb = None
+        except Exception as e:
+            raise _handle_excel_lock(abs_path, e) from e
         return {
             "status": "success",
             "macro_name": macro_name,
@@ -1711,7 +2634,7 @@ def search_and_replace_cells(
     save_path = None
     if not dry_run and replacements:
         save_path = output_path or file_path
-        wb.save(save_path)
+        _safe_save_workbook(wb, save_path)
     wb.close()
 
     return {

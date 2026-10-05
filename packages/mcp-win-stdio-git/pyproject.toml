@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-git"
-version = "0.2.4"
+version = "0.2.5"
 description = "Unified Git & GitHub Model Context Protocol (MCP) server for Windows & Claude: 33 tools combining local Git repository management (init, remotes, restore, bookmarks, branching, commits, diffs) and remote GitHub CLI (gh) operations with hybrid synergy workflows."
 readme = "README.md"
 

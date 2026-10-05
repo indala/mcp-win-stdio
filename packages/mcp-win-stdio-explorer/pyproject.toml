@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-explorer"
-version = "0.2.4"
+version = "0.2.5"
 description = "Lightweight Model Context Protocol (MCP) server for token-safe workspace exploration: collapsible directory trees, dynamic .gitignore resolution, in-file grep, RapidFuzz fuzzy search, and AST code outline."
 readme = "README.md"
 requires-python = ">=3.10"

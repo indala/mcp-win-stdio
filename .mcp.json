@@ -1,0 +1,73 @@
+{
+  "mcpServers": {
+    "excel": {
+      "command": "mws",
+      "args": [
+        "run",
+        "excel"
+      ]
+    },
+    "word": {
+      "command": "mws",
+      "args": [
+        "run",
+        "word"
+      ]
+    },
+    "explorer": {
+      "command": "mws",
+      "args": [
+        "run",
+        "explorer"
+      ],
+      "env": {
+        "EXPLORER_ROOT": "Z:\\projects\\mcp-win-stdio"
+      }
+    },
+    "tsc": {
+      "command": "mws",
+      "args": [
+        "run",
+        "tsc"
+      ],
+      "env": {
+        "TSC_WATCH_DIR": "Z:\\projects\\mcp-win-stdio"
+      }
+    },
+    "db": {
+      "command": "mws",
+      "args": [
+        "run",
+        "db"
+      ]
+    },
+    "git": {
+      "command": "mws",
+      "args": [
+        "run",
+        "git"
+      ]
+    },
+    "ssh": {
+      "command": "mws",
+      "args": [
+        "run",
+        "ssh"
+      ]
+    },
+    "rag": {
+      "command": "mws",
+      "args": [
+        "run",
+        "rag"
+      ]
+    },
+    "excel-db": {
+      "command": "mws",
+      "args": [
+        "run",
+        "excel-db"
+      ]
+    }
+  }
+}

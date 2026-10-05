@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-ssh"
-version = "0.2.4"
+version = "0.2.5"
 description = "Advanced Multi-SSH Connection & Remote Management Model Context Protocol (MCP) server for Windows & Claude: 25+ tools for multi-host pooling, ~/.ssh/config auto-discovery, PTY interactive shells, SFTP file management, systemd/docker services, background jobs, and local port forwarding tunnels."
 readme = "README.md"
 

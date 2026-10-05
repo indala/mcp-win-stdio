@@ -759,6 +759,209 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("\nDiagnostic complete.\n")
 
 
+ALL_BUILTIN_SERVERS = ["rag", "excel-db", "excel", "db", "explorer", "git", "ssh", "tsc", "word"]
+
+def get_server_agents_guide(servers: List[str]) -> str:
+    """Generate tailored AGENTS.md markdown guide for specific active servers."""
+    lines = [
+        "# Repository Agent Guidelines",
+        "",
+        "This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite.",
+        "",
+        "## 🛠️ Active Tools & Recommended Selection",
+        ""
+    ]
+    guide_map = {
+        "db": "* **Database Operations:** Use `db` MCP (`read_query`, `execute_query`, `describe_table`).",
+        "excel": "* **Spreadsheets & Excel:** Use `excel` MCP (`preview_sheet`, `update_cells`, `profile_sheet`).",
+        "excel-db": "* **High-Speed Pipelines & Streaming:** Use `excel-db` MCP (`db_to_excel_stream`, `excel_to_db_upsert`, `query_unified_sources`, `reconcile_db_vs_excel`).",
+        "rag": "* **Documentation & Web RAG:** Use `rag` MCP (`crawl_and_index_url`, `query_knowledge_base`, `get_knowledge_tree`).",
+        "explorer": "* **Code Navigation:** Use `explorer` MCP (`get_directory_tree`, `fuzzy_find`, `grep_search`).",
+        "git": "* **Git & PRs:** Use `git` MCP for status, diffs, commits, and GitHub API interactions.",
+        "ssh": "* **Remote Shells:** Use `ssh` MCP for multi-host pooling and SFTP.",
+        "tsc": "* **TypeScript:** Use `tsc` MCP for 0ms compiler diagnostic checks.",
+        "word": "* **Word Documents:** Use `word` MCP for typography, layout, and document generation."
+    }
+    for s in servers:
+        s_norm = s.lower().strip()
+        if s_norm in guide_map:
+            lines.append(guide_map[s_norm])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_server_entry(s_name: str, is_vscode: bool, cwd: Path) -> Dict[str, Any]:
+    """Build smart MCP server config entry with appropriate environment variables for the target client."""
+    entry: Dict[str, Any] = {"command": "mws", "args": ["run", s_name]}
+    env: Dict[str, str] = {}
+
+    # 1. TypeScript Compiler Watch Directory
+    if s_name == "tsc":
+        env["TSC_WATCH_DIR"] = "${workspaceFolder}" if is_vscode else str(cwd)
+
+    # 2. Explorer Workspace Root
+    elif s_name == "explorer":
+        env["EXPLORER_ROOT"] = "${workspaceFolder}" if is_vscode else str(cwd)
+
+    # 3. Local SQLite database auto-detection
+    elif s_name in ("db", "excel-db"):
+        try:
+            sqlite_candidates = [
+                f for f in cwd.glob("*.db") if f.is_file()
+            ] + [
+                f for f in cwd.glob("*.sqlite*") if f.is_file()
+            ]
+            if sqlite_candidates:
+                first_db = sqlite_candidates[0]
+                rel_sql = str(first_db.relative_to(cwd)).replace("\\", "/")
+                env["SQLITE_DATABASE"] = f"${{workspaceFolder}}/{rel_sql}" if is_vscode else str(first_db)
+        except Exception:
+            pass
+
+    if env:
+        entry["env"] = env
+
+    return entry
+
+
+def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, overwrite: bool = False) -> Dict[str, Any]:
+    """Write or update .vscode/mcp.json, .mcp.json, and AGENTS.md in target directory with smart client environment variables."""
+    cwd = target_dir or Path.cwd()
+    vscode_dir = cwd / ".vscode"
+    vscode_dir.mkdir(parents=True, exist_ok=True)
+
+    vscode_file = vscode_dir / "mcp.json"
+    root_file = cwd / ".mcp.json"
+
+    # Read existing configurations if updating
+    existing_vscode_servers = {}
+    existing_root_servers = {}
+    if not overwrite and vscode_file.exists():
+        try:
+            with open(vscode_file, "r", encoding="utf-8") as f:
+                existing_vscode_servers = json.load(f).get("mcpServers", {})
+        except Exception:
+            pass
+
+    if not overwrite and root_file.exists():
+        try:
+            with open(root_file, "r", encoding="utf-8") as f:
+                existing_root_servers = json.load(f).get("mcpServers", {})
+        except Exception:
+            pass
+
+    for s in servers:
+        s_norm = s.lower().strip()
+        if s_norm:
+            existing_vscode_servers[s_norm] = _build_server_entry(s_norm, is_vscode=True, cwd=cwd)
+            existing_root_servers[s_norm] = _build_server_entry(s_norm, is_vscode=False, cwd=cwd)
+
+    with open(vscode_file, "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": existing_vscode_servers}, f, indent=2)
+
+    with open(root_file, "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": existing_root_servers}, f, indent=2)
+
+    agents_md = cwd / "AGENTS.md"
+    content = get_server_agents_guide(list(existing_vscode_servers.keys()))
+    with open(agents_md, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return {"cwd": cwd, "servers": list(existing_vscode_servers.keys())}
+
+
+def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Remove server(s) from .vscode/mcp.json, .mcp.json, and refresh AGENTS.md."""
+    cwd = target_dir or Path.cwd()
+    vscode_file = cwd / ".vscode" / "mcp.json"
+    root_file = cwd / ".mcp.json"
+
+    existing_servers = {}
+    if vscode_file.exists():
+        try:
+            with open(vscode_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                existing_servers = data.get("mcpServers", {})
+        except Exception:
+            pass
+
+    for s in servers:
+        s_norm = s.lower().strip()
+        existing_servers.pop(s_norm, None)
+
+    mcp_config = {"mcpServers": existing_servers}
+
+    if vscode_file.parent.exists():
+        with open(vscode_file, "w", encoding="utf-8") as f:
+            json.dump(mcp_config, f, indent=2)
+
+    with open(root_file, "w", encoding="utf-8") as f:
+        json.dump(mcp_config, f, indent=2)
+
+    agents_md = cwd / "AGENTS.md"
+    content = get_server_agents_guide(list(existing_servers.keys()))
+    with open(agents_md, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    return {"cwd": cwd, "servers": list(existing_servers.keys())}
+
+
+def cmd_init_project(args: argparse.Namespace) -> None:
+    """Initialize zero-config MCP configuration in current project/repository."""
+    targets = getattr(args, "servers", [])
+    if not targets or targets == ["all"]:
+        # Auto-discover installed servers
+        avail = list_available_servers()
+        installed_servers = [name for name, info in avail.items() if info.get("is_installed", False)]
+        targets = installed_servers if installed_servers else ALL_BUILTIN_SERVERS
+
+    result = setup_project_mcp(targets, overwrite=True)
+    cwd = result["cwd"]
+    configured = ", ".join(result["servers"])
+
+    print(f"\n✅ Successfully initialized mws auto-configuration in: {cwd}")
+    print(f"   • Active Servers ({len(result['servers'])}): {configured}")
+    print("   • Created: .vscode/mcp.json (for Antigravity, VS Code, GitHub Copilot)")
+    print("   • Created: .mcp.json (for Claude Code CLI, Cursor, Windsurf)")
+    print("   • Created: AGENTS.md (Tailored AI Agent tool instructions)\n")
+
+
+def cmd_setup_project(args: argparse.Namespace) -> None:
+    """Add specific MCP server(s) to the current repository configuration."""
+    targets = args.servers
+    if not targets:
+        print("Error: Specify at least one server to add (e.g. 'mws setup-project excel db').", file=sys.stderr)
+        sys.exit(1)
+
+    result = setup_project_mcp(targets, overwrite=False)
+    cwd = result["cwd"]
+    configured = ", ".join(result["servers"])
+
+    print(f"\n✅ Added server(s) {targets} to project: {cwd}")
+    print(f"   • Total Active Servers ({len(result['servers'])}): {configured}")
+    print("   • Updated: .vscode/mcp.json")
+    print("   • Updated: .mcp.json")
+    print("   • Updated: AGENTS.md\n")
+
+
+def cmd_remove_project(args: argparse.Namespace) -> None:
+    """Remove specific MCP server(s) from the current repository configuration."""
+    targets = args.servers
+    if not targets:
+        print("Error: Specify at least one server to remove (e.g. 'mws remove-project excel').", file=sys.stderr)
+        sys.exit(1)
+
+    result = remove_project_mcp(targets)
+    cwd = result["cwd"]
+    configured = ", ".join(result["servers"]) if result["servers"] else "None"
+
+    print(f"\n✅ Removed server(s) {targets} from project: {cwd}")
+    print(f"   • Remaining Active Servers ({len(result['servers'])}): {configured}")
+    print("   • Updated: .vscode/mcp.json")
+    print("   • Updated: .mcp.json")
+    print("   • Updated: AGENTS.md\n")
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -794,6 +997,16 @@ def main() -> None:
     sub_setup.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_setup.set_defaults(func=cmd_setup)
 
+    # setup-project / add-project / add
+    sub_setup_proj = subparsers.add_parser("setup-project", aliases=["add-project", "add"], help="Add specific MCP server(s) to current project (.vscode/mcp.json, .mcp.json, AGENTS.md)")
+    sub_setup_proj.add_argument("servers", nargs="+", help="Server name(s) to add (e.g. 'excel', 'db', 'tsc')")
+    sub_setup_proj.set_defaults(func=cmd_setup_project)
+
+    # remove-project
+    sub_rm_proj = subparsers.add_parser("remove-project", help="Remove specific MCP server(s) from current project")
+    sub_rm_proj.add_argument("servers", nargs="+", help="Server name(s) to remove (e.g. 'excel', 'word')")
+    sub_rm_proj.set_defaults(func=cmd_remove_project)
+
     # remove
     sub_remove = subparsers.add_parser("remove", help="Remove server(s) from Claude Desktop and CLI")
     sub_remove.add_argument("server", help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
@@ -814,14 +1027,19 @@ def main() -> None:
     sub_doctor = subparsers.add_parser("doctor", help="Check system health, dependencies, and COM readiness")
     sub_doctor.set_defaults(func=cmd_doctor)
 
+    # init-project / init
+    sub_init = subparsers.add_parser("init-project", aliases=["init"], help="Initialize zero-config MCP setup (.vscode/mcp.json, .mcp.json, AGENTS.md) in current repository")
+    sub_init.add_argument("servers", nargs="*", default=[], help="Optional list of servers to configure (e.g. 'excel db tsc'). If omitted, all servers are configured.")
+    sub_init.set_defaults(func=cmd_init_project)
+
     # fix-path / path
     sub_path = subparsers.add_parser("fix-path", aliases=["path"], help="Check and configure Python Scripts directory in Windows User PATH")
     sub_path.add_argument("--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH")
     sub_path.set_defaults(func=cmd_fix_path)
 
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
-    known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc"}
-    known_cmds = {"guide", "run", "setup", "doctor", "remove", "install", "update", "uninstall", "fix-path", "path"}
+    known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc", "rag", "excel-db"}
+    known_cmds = {"guide", "run", "setup", "setup-project", "add", "add-project", "remove-project", "doctor", "remove", "install", "update", "uninstall", "fix-path", "path", "init", "init-project"}
     if len(sys.argv) >= 3 and sys.argv[1].lower() in known_srvs and sys.argv[2].lower() in known_cmds:
         srv_token = sys.argv[1].lower()
         cmd_token = sys.argv[2].lower()

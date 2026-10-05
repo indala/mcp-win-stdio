@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-win-stdio-excel-db"
+version = "0.2.5"
+description = "High-Performance Excel & Database Power Pipeline MCP Server: Zero-Context Streaming, Cross-Source Joins, and Diff Auditing."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "Mohan Kumar Indala" }
+]
+keywords = ["mcp", "excel", "database", "pipeline", "etl", "duckdb", "sql", "streaming", "analytics", "stdio"]
+
+dependencies = [
+    "mcp>=1.2.0",
+]
+
+[project.scripts]
+mcp-win-stdio-excel-db = "mcp_win_stdio.excel_db.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_win_stdio/excel_db"]

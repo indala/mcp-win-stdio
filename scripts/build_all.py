@@ -28,6 +28,8 @@ PACKAGES = [
     ROOT_DIR / "packages" / "mcp-win-stdio-db",
     ROOT_DIR / "packages" / "mcp-win-stdio-git",
     ROOT_DIR / "packages" / "mcp-win-stdio-ssh",
+    ROOT_DIR / "packages" / "mcp-win-stdio-rag",
+    ROOT_DIR / "packages" / "mcp-win-stdio-excel-db",
 ]
 
 
