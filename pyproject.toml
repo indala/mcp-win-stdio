@@ -69,6 +69,7 @@ all = [
     "mcp-win-stdio-git>=0.2.5",
     "mcp-win-stdio-ssh>=0.2.5",
     "mcp-win-stdio-rag>=0.2.5",
+    "mcp-win-stdio-excel-db>=0.2.5",
 ]
 
 [project.scripts]

@@ -14,7 +14,7 @@ Description:
   spacing & indentation, typography (fonts, sizes, hex colors), tables, outline,
   floating/inline images, and metadata from .docx and legacy .doc files.
 
-Available Tools (10 Tools):
+Available Tools (20 Tools):
 --------------------------------------------------------------------------------
 1.  get_document_layout
     - Extracts paper sizes (Letter, A4), margins across 4 units (inches, cm, mm, pt),
@@ -60,6 +60,47 @@ Available Tools (10 Tools):
 10. search_word_document
     - Searches for keywords or regex patterns across body, headers, footers, and table cells.
     - Args: file_path (str), query (str), case_sensitive (bool, default=False)
+
+11. edit_paragraph
+    - Modifies existing paragraph text, style, or formatting in place.
+    - Args: file_path (str), paragraph_index (int), text (str), style (optional str)
+
+12. insert_table
+    - Inserts a new formatted table with headers and data rows.
+    - Args: file_path (str), headers (list), rows (list of lists), style (optional str)
+
+13. inspect_revisions_and_comments
+    - Extracts comments, tracked insertions, and tracked deletions.
+    - Args: file_path (str)
+
+DOCUMENT AUTHORING & EXPORT
+14. create_document
+    - Creates a new empty .docx file with custom page setup, paper size, orientation, and margins.
+    - Args: file_path (str), title (optional str), author (optional str), paper_size (str), orientation (str)
+
+15. add_paragraph
+    - Appends a styled paragraph with custom font family, size, bold, italic, hex color, alignment, spacing.
+    - Args: file_path (str), text (str), style (str), font_name (str), font_size_pt (float), color_hex (str)
+
+16. add_heading
+    - Appends a heading (level 1-9) or Title (level 0).
+    - Args: file_path (str), text (str), level (int)
+
+17. fill_template
+    - Populates placeholders (e.g. {{name}}, {{date}}) across paragraphs, tables, and headers/footers.
+    - Args: template_path (str), output_path (str), replacements (dict)
+
+18. replace_text
+    - Global find-and-replace across the entire document.
+    - Args: file_path (str), search_text (str), replace_text (str)
+
+19. insert_image
+    - Inserts an image with dimensions and optional caption.
+    - Args: file_path (str), image_path (str), width_inches (float), height_inches (float), caption (str)
+
+20. export_to_pdf
+    - Exports .docx to high-fidelity PDF using native Windows Word COM automation.
+    - Args: file_path (str), output_pdf_path (optional str)
 
 --------------------------------------------------------------------------------
 Example Prompts for Claude:

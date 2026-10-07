@@ -1,23 +1,26 @@
 # mcp-win-stdio-word
 
-Windows-optimized **Model Context Protocol (MCP)** server for Microsoft Word documents (`.docx` and `.doc`): 10 high-precision inspection, layout geometry, typography, and image extraction tools for Claude.
+Windows-optimized **Model Context Protocol (MCP)** server for Microsoft Word documents (`.docx` and `.doc`): 20 high-precision inspection, layout geometry, typography, document authoring, templating, and native COM PDF export tools for Claude.
 
 Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🚀 Features (10 Tools)
+## 🚀 Features (20 Tools)
 
-- **Advanced Page Layout Geometry**: Extracts paper sizes (Letter, A4), exact margins across 4 units (inches, cm, mm, pt), printable area, and section break types (Continuous vs New Page).
-- **Multi-Column Analysis**: Detects multi-column layouts (IEEE / academic journal style), column widths, gaps, and separator lines.
-- **Paragraph Spacing & Indentation**: Inspects line spacing (single, 1.15, 1.5, double, exact pt), space before/after in pt, first-line indents, hanging indents, and pagination rules (widow/orphan control).
-- **Typography & Formatting**: Extracts font families (Times New Roman, Arial, Calibri), font sizes in pt, hex colors (`#002060`), highlights, and paragraph alignments.
-- **Image & Visuals Extraction**: Identifies inline vs floating anchor images, placement offsets, dimensions, and header/footer logo positions.
-- **Tables & Full Reader**: Extracts tables in Markdown or structured JSON, outlines, and complete document bodies.
+- **Complete Document Authoring**: Create new `.docx` documents (`create_document`) with paper sizes (A4, Letter, Legal, A3), orientations, margins, and core metadata.
+- **Rich Paragraphs & Headings**: Append formatted headings (`add_heading`) and paragraphs (`add_paragraph`) with custom font families, sizes, hex colors, alignments, and line spacing.
+- **Automated Template Population**: Fill placeholder tokens like `{{client_name}}` and `{{invoice_date}}` (`fill_template`) across paragraphs, tables, and headers/footers while preserving styling.
+- **Native Windows Word COM PDF Export**: High-fidelity `.pdf` generation (`export_to_pdf`) powered by Microsoft Word desktop automation.
+- **Find, Replace & Images**: Document-wide search & replace (`replace_text`) and image embedding with dimension scaling and captions (`insert_image`).
+- **Advanced Page Layout Geometry**: Extracts paper sizes, exact margins across 4 units (inches, cm, mm, pt), printable area, and multi-column layout (IEEE / academic style).
+- **Paragraph Spacing & Indentation**: Inspects line spacing, space before/after, first-line & hanging indents, and widow/orphan control.
+- **Typography & Formatting**: Extracts font families, sizes in pt, hex colors, highlights, and paragraph alignments.
+- **Tables, Outlines & Reader**: Extracts tables in Markdown or structured JSON, outlines, and complete document bodies.
 
 ---
 
-## 🛠️ Included Tools (10 Tools)
+## 🛠️ Included Tools (20 Tools)
 
 1. `get_document_layout`: Paper sizes, margins in 4 units (in, cm, mm, pt), multi-column layout, printable area.
 2. `get_paragraph_spacing_and_indentation`: Line spacing, space before/after (pt), first-line & hanging indents.
@@ -29,6 +32,16 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 8. `get_document_metadata`: Author, title, revision, word count, timestamps.
 9. `read_word_document`: Complete body paragraphs, tables, and headers with formatting.
 10. `search_word_document`: Keyword and regex search across body, headers, footers, and tables.
+11. `edit_paragraph`: Modifies existing paragraph text, style, or formatting in place.
+12. `insert_table`: Inserts a new formatted table with headers and data rows.
+13. `inspect_revisions_and_comments`: Extracts comments, tracked insertions, and tracked deletions.
+14. `create_document`: Creates a new empty .docx file with custom page setup, paper size, orientation, and margins.
+15. `add_paragraph`: Appends a styled paragraph with custom font family, size, bold, italic, hex color, alignment, spacing.
+16. `add_heading`: Appends a heading (level 1-9) or Title (level 0).
+17. `fill_template`: Populates placeholders across paragraphs, tables, and headers/footers while preserving styles.
+18. `replace_text`: Global find-and-replace across the entire document.
+19. `insert_image`: Inserts an image with dimensions and optional caption.
+20. `export_to_pdf`: Exports .docx to high-fidelity PDF using native Windows Word COM automation.
 
 ---
 

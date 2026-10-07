@@ -10,7 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Ensure Windows console uses UTF-8 without crashing on cp1252
 if sys.platform == "win32":
@@ -124,10 +124,12 @@ def cmd_guide(args: argparse.Namespace) -> None:
         "github": "git",
         "database": "db",
         "workspace-explorer": "explorer",
+        "excel-db": "excel_db",
+        "exceldb": "excel_db",
     }
     target = target_aliases.get(target, target)
 
-    known_servers = ["git", "db", "excel", "explorer", "word", "tsc", "ssh"]
+    known_servers = ["git", "db", "excel", "explorer", "word", "tsc", "ssh", "rag", "excel_db"]
 
     def _get_guide_func(srv_name: str):
         # Look for guide function in server package or legacy guides module
@@ -262,16 +264,30 @@ def cmd_setup(args: argparse.Namespace) -> None:
         if sys.stdin.isatty():
             print("\n=== 🛠️  mcp-win-stdio Setup Wizard ===")
             print("Select an MCP server to configure:")
-            print("  [1] excel     (20 tools: Pandas queries, RapidFuzz reconciliation, Office COM)")
-            print("  [2] word      (10 tools: Multi-unit margins, multi-columns, typography, images)")
-            print("  [3] explorer  (11 tools: Token-safe tree, .gitignore, regex grep, AST outline)")
-            print("  [4] tsc       (6 tools: TypeScript diagnostic watcher, 0ms cache)")
-            print("  [5] db        (20 tools: Polyglot PostgreSQL & MySQL DBA manager)")
-            print("  [6] git       (26 tools: Local Git branching, commits, diffs, conflicts, & GitHub PRs)")
-            print("  [7] all       (Configure all servers)")
-            print("  [8] Exit")
-            choice = input("\nEnter choice (1-8) [default: 1]: ").strip() or "1"
-            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "git", "7": "all"}
+            print("  [1] excel     (44 tools: Pandas queries, RapidFuzz reconciliation, native tables, Office COM)")
+            print("  [2] word      (20 tools: Multi-unit margins, typography, authoring, template filling, COM PDF)")
+            print("  [3] explorer  (14 tools: Token-safe collapsible tree, .gitignore, regex grep, AST outline)")
+            print("  [4] tsc       (8 tools: TypeScript diagnostic watcher, 0ms cache, fix suggestions)")
+            print("  [5] db        (31 tools: Polyglot PostgreSQL & MySQL DBA manager, ERDs, diffs, locks, imports)")
+            print("  [6] git       (46 tools: Local Git branching, commits, diffs, conflicts, & GitHub PRs/issues)")
+            print("  [7] ssh       (34 tools: Multi-host pooling, SFTP, interactive PTY shells, background jobs)")
+            print("  [8] rag       (8 tools: Headless Playwright crawler, codebase indexer, hybrid BM25 + vector search)")
+            print("  [9] excel-db  (9 tools: Zero-context streaming, master dataset audit diffs, transactional migrations)")
+            print("  [10] all      (Configure all 9 servers)")
+            print("  [11] Exit")
+            choice = input("\nEnter choice (1-11) [default: 10]: ").strip() or "10"
+            mapping = {
+                "1": "excel",
+                "2": "word",
+                "3": "explorer",
+                "4": "tsc",
+                "5": "db",
+                "6": "git",
+                "7": "ssh",
+                "8": "rag",
+                "9": "excel-db",
+                "10": "all",
+            }
             if choice not in mapping:
                 print("Setup cancelled.")
                 return
@@ -279,7 +295,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    selected_servers = ["excel", "word", "explorer", "tsc", "db", "git"] if target.lower() == "all" else [target.lower()]
+    selected_servers = list(BUILTIN_SERVERS.keys()) if target.lower() == "all" else [target.lower()]
 
     for srv_name in selected_servers:
         srv = get_server_info(srv_name)
@@ -456,7 +472,6 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     if not target:
         if sys.stdin.isatty():
             print("\n=== 🗑️  mcp-win-stdio Uninstaller ===")
-            print("Select an option to uninstall:")
             print("  [1] excel     -> Uninstall mcp-win-stdio-excel & remove from Claude")
             print("  [2] word      -> Uninstall mcp-win-stdio-word & remove from Claude")
             print("  [3] explorer  -> Uninstall mcp-win-stdio-explorer & remove from Claude")
@@ -464,10 +479,12 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             print("  [5] db        -> Uninstall mcp-win-stdio-db & remove from Claude")
             print("  [6] git       -> Uninstall mcp-win-stdio-git & remove from Claude")
             print("  [7] ssh       -> Uninstall mcp-win-stdio-ssh & remove from Claude")
-            print("  [8] all       -> Uninstall all 7 MCP servers & remove from Claude (keeps mws CLI)")
-            print("  [9] self      -> Uninstall mws CLI itself (mcp-win-stdio)")
-            print("  [10] Exit")
-            choice = input("\nEnter choice (1-10) [default: 8]: ").strip() or "8"
+            print("  [8] rag       -> Uninstall mcp-win-stdio-rag & remove from Claude")
+            print("  [9] excel-db  -> Uninstall mcp-win-stdio-excel-db & remove from Claude")
+            print("  [10] all      -> Uninstall all 9 MCP servers & remove from Claude (keeps mws CLI)")
+            print("  [11] self     -> Uninstall mws CLI itself (mcp-win-stdio)")
+            print("  [12] Exit")
+            choice = input("\nEnter choice (1-12) [default: 10]: ").strip() or "10"
             mapping = {
                 "1": "excel",
                 "2": "word",
@@ -476,8 +493,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
                 "5": "db",
                 "6": "git",
                 "7": "ssh",
-                "8": "all",
-                "9": "self",
+                "8": "rag",
+                "9": "excel-db",
+                "10": "all",
+                "11": "self",
             }
             if choice not in mapping:
                 print("Uninstall cancelled.")
@@ -486,7 +505,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    known_servers = ["excel", "word", "explorer", "tsc", "db", "git", "ssh"]
+    known_servers = ["excel", "word", "explorer", "tsc", "db", "git", "ssh", "rag", "excel-db"]
 
     if target == "self":
         print("\n==> 🧹 Uninstalling mws CLI core package (mcp-win-stdio)...")
@@ -824,62 +843,78 @@ def _build_server_entry(s_name: str, is_vscode: bool, cwd: Path) -> Dict[str, An
     return entry
 
 
-def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, overwrite: bool = False) -> Dict[str, Any]:
-    """Write or update .vscode/mcp.json, .mcp.json, and AGENTS.md in target directory with smart client environment variables."""
+def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, overwrite: bool = False, clean_deprecated_vscode: bool = True) -> Dict[str, Any]:
+    """
+    Write or update root .mcp.json and AGENTS.md in target directory with smart client environment variables.
+    Handles migration and cleanup from deprecated .vscode/mcp.json (deprecated in VS Code 1.106+).
+    """
     cwd = target_dir or Path.cwd()
-    vscode_dir = cwd / ".vscode"
-    vscode_dir.mkdir(parents=True, exist_ok=True)
-
-    vscode_file = vscode_dir / "mcp.json"
     root_file = cwd / ".mcp.json"
+    vscode_file = cwd / ".vscode" / "mcp.json"
 
     # Read existing configurations if updating
-    existing_vscode_servers = {}
-    existing_root_servers = {}
-    if not overwrite and vscode_file.exists():
-        try:
-            with open(vscode_file, "r", encoding="utf-8") as f:
-                existing_vscode_servers = json.load(f).get("mcpServers", {})
-        except Exception:
-            pass
-
+    existing_servers: Dict[str, Any] = {}
     if not overwrite and root_file.exists():
         try:
             with open(root_file, "r", encoding="utf-8") as f:
-                existing_root_servers = json.load(f).get("mcpServers", {})
+                existing_servers = json.load(f).get("mcpServers", {})
         except Exception:
             pass
+
+    # Check for legacy .vscode/mcp.json to migrate servers
+    migrated_from_legacy = False
+    if vscode_file.exists():
+        try:
+            with open(vscode_file, "r", encoding="utf-8") as f:
+                legacy_servers = json.load(f).get("mcpServers", {})
+                for k, v in legacy_servers.items():
+                    if k not in existing_servers or overwrite:
+                        existing_servers[k] = v
+                        migrated_from_legacy = True
+        except Exception:
+            pass
+
+        # Clean up deprecated .vscode/mcp.json if requested to avoid VS Code 1.106+ warnings
+        if clean_deprecated_vscode:
+            try:
+                vscode_file.unlink()
+                vscode_dir = vscode_file.parent
+                if vscode_dir.exists() and not any(vscode_dir.iterdir()):
+                    vscode_dir.rmdir()
+            except Exception:
+                pass
 
     for s in servers:
         s_norm = s.lower().strip()
         if s_norm:
-            existing_vscode_servers[s_norm] = _build_server_entry(s_norm, is_vscode=True, cwd=cwd)
-            existing_root_servers[s_norm] = _build_server_entry(s_norm, is_vscode=False, cwd=cwd)
-
-    with open(vscode_file, "w", encoding="utf-8") as f:
-        json.dump({"mcpServers": existing_vscode_servers}, f, indent=2)
+            existing_servers[s_norm] = _build_server_entry(s_norm, is_vscode=True, cwd=cwd)
 
     with open(root_file, "w", encoding="utf-8") as f:
-        json.dump({"mcpServers": existing_root_servers}, f, indent=2)
+        json.dump({"mcpServers": existing_servers}, f, indent=2)
 
     agents_md = cwd / "AGENTS.md"
-    content = get_server_agents_guide(list(existing_vscode_servers.keys()))
+    content = get_server_agents_guide(list(existing_servers.keys()))
     with open(agents_md, "w", encoding="utf-8") as f:
         f.write(content)
 
-    return {"cwd": cwd, "servers": list(existing_vscode_servers.keys())}
+    return {
+        "cwd": cwd,
+        "servers": list(existing_servers.keys()),
+        "migrated_from_legacy_vscode": migrated_from_legacy,
+        "config_file": str(root_file)
+    }
 
 
 def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Remove server(s) from .vscode/mcp.json, .mcp.json, and refresh AGENTS.md."""
+    """Remove server(s) from .mcp.json, clean up any legacy .vscode/mcp.json, and refresh AGENTS.md."""
     cwd = target_dir or Path.cwd()
-    vscode_file = cwd / ".vscode" / "mcp.json"
     root_file = cwd / ".mcp.json"
+    vscode_file = cwd / ".vscode" / "mcp.json"
 
-    existing_servers = {}
-    if vscode_file.exists():
+    existing_servers: Dict[str, Any] = {}
+    if root_file.exists():
         try:
-            with open(vscode_file, "r", encoding="utf-8") as f:
+            with open(root_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 existing_servers = data.get("mcpServers", {})
         except Exception:
@@ -891,19 +926,23 @@ def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) ->
 
     mcp_config = {"mcpServers": existing_servers}
 
-    if vscode_file.parent.exists():
-        with open(vscode_file, "w", encoding="utf-8") as f:
-            json.dump(mcp_config, f, indent=2)
-
     with open(root_file, "w", encoding="utf-8") as f:
         json.dump(mcp_config, f, indent=2)
+
+    if vscode_file.exists():
+        try:
+            vscode_file.unlink()
+            if vscode_file.parent.exists() and not any(vscode_file.parent.iterdir()):
+                vscode_file.parent.rmdir()
+        except Exception:
+            pass
 
     agents_md = cwd / "AGENTS.md"
     content = get_server_agents_guide(list(existing_servers.keys()))
     with open(agents_md, "w", encoding="utf-8") as f:
         f.write(content)
 
-    return {"cwd": cwd, "servers": list(existing_servers.keys())}
+    return {"cwd": cwd, "servers": list(existing_servers.keys()), "config_file": str(root_file)}
 
 
 def cmd_init_project(args: argparse.Namespace) -> None:
@@ -921,9 +960,10 @@ def cmd_init_project(args: argparse.Namespace) -> None:
 
     print(f"\n✅ Successfully initialized mws auto-configuration in: {cwd}")
     print(f"   • Active Servers ({len(result['servers'])}): {configured}")
-    print("   • Created: .vscode/mcp.json (for Antigravity, VS Code, GitHub Copilot)")
-    print("   • Created: .mcp.json (for Claude Code CLI, Cursor, Windsurf)")
-    print("   • Created: AGENTS.md (Tailored AI Agent tool instructions)\n")
+    print("   • Created: .mcp.json (Unified standard for VS Code 1.106+, Antigravity, Claude Code, Cursor, Windsurf)")
+    if result.get("migrated_from_legacy_vscode"):
+        print("   • Migrated & cleaned: Deprecated .vscode/mcp.json (VS Code 1.106+ deprecation)")
+    print("   • Created: AGENTS.md (Tailored AI Agent tool guidelines)\n")
 
 
 def cmd_setup_project(args: argparse.Namespace) -> None:
@@ -939,8 +979,9 @@ def cmd_setup_project(args: argparse.Namespace) -> None:
 
     print(f"\n✅ Added server(s) {targets} to project: {cwd}")
     print(f"   • Total Active Servers ({len(result['servers'])}): {configured}")
-    print("   • Updated: .vscode/mcp.json")
-    print("   • Updated: .mcp.json")
+    print("   • Updated: .mcp.json (Unified standard for VS Code 1.106+, Antigravity, Claude Code, Cursor)")
+    if result.get("migrated_from_legacy_vscode"):
+        print("   • Migrated & cleaned: Deprecated .vscode/mcp.json (VS Code 1.106+ deprecation)")
     print("   • Updated: AGENTS.md\n")
 
 
@@ -957,7 +998,6 @@ def cmd_remove_project(args: argparse.Namespace) -> None:
 
     print(f"\n✅ Removed server(s) {targets} from project: {cwd}")
     print(f"   • Remaining Active Servers ({len(result['servers'])}): {configured}")
-    print("   • Updated: .vscode/mcp.json")
     print("   • Updated: .mcp.json")
     print("   • Updated: AGENTS.md\n")
 
@@ -998,7 +1038,7 @@ def main() -> None:
     sub_setup.set_defaults(func=cmd_setup)
 
     # setup-project / add-project / add
-    sub_setup_proj = subparsers.add_parser("setup-project", aliases=["add-project", "add"], help="Add specific MCP server(s) to current project (.vscode/mcp.json, .mcp.json, AGENTS.md)")
+    sub_setup_proj = subparsers.add_parser("setup-project", aliases=["add-project", "add"], help="Add specific MCP server(s) to current project (.mcp.json, AGENTS.md)")
     sub_setup_proj.add_argument("servers", nargs="+", help="Server name(s) to add (e.g. 'excel', 'db', 'tsc')")
     sub_setup_proj.set_defaults(func=cmd_setup_project)
 
@@ -1028,7 +1068,7 @@ def main() -> None:
     sub_doctor.set_defaults(func=cmd_doctor)
 
     # init-project / init
-    sub_init = subparsers.add_parser("init-project", aliases=["init"], help="Initialize zero-config MCP setup (.vscode/mcp.json, .mcp.json, AGENTS.md) in current repository")
+    sub_init = subparsers.add_parser("init-project", aliases=["init"], help="Initialize zero-config MCP setup (.mcp.json, AGENTS.md) in current repository")
     sub_init.add_argument("servers", nargs="*", default=[], help="Optional list of servers to configure (e.g. 'excel db tsc'). If omitted, all servers are configured.")
     sub_init.set_defaults(func=cmd_init_project)
 

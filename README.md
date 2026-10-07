@@ -8,18 +8,20 @@ Windows-optimized **Model Context Protocol (MCP)** suite and interactive CLI hub
 
 ---
 
-## 🌟 Highlights (130 Tools Across 7 Modular Servers)
+## 🌟 Highlights (214 Tools Across 9 Modular Servers)
 
 * **Interactive CLI Hub (`mws`)**: Run `mws` alone to view all servers, live installation status (`[Installed]` vs `[Not Installed]`), and quick commands.
 * **Safe, Transparent Setup (`mws setup <server>` / `mws add <server>`)**: Installs missing dependencies on-demand, generates exact copy-pasteable JSON configuration for Claude Desktop and Claude Code CLI, and asks confirmation before making any automated edits (always creating `.bak` backups).
-* **Dynamic Guide Merging (`mws guide [server]`)**: View comprehensive tool schemas, prompt recipes, and diagnostic checks for individual servers (`mws ssh guide`, `mws git guide`, `mws db guide`) or all installed servers merged (`mws guide all`).
-* **Multi-SSH & Remote Management MCP (27 Tools)**: Advanced multi-host connection pooling, auto-discovery of `~/.ssh/config` aliases/identity files/ProxyJump, sticky active host routing, command execution, elevated `sudo` automation, interactive PTY terminal sessions, detached background jobs, systemd/docker/pm2 service inspection, package listing, log tailing, comprehensive SFTP file management, and background local port forwarding tunnels.
-* **Git & GitHub MCP (33 Tools)**: Unified local Git repository management (init, remotes, restore, bookmarks, branching, commits, paginated diffs, conflicts) and remote GitHub CLI (`gh`) operations (PR checks, releases, issues, Actions) with hybrid synergy workflows.
-* **Polyglot Database MCP (23 Tools)**: Unified PostgreSQL & MySQL database manager with cross-database switching, cross-schema auto-resolution, fast JSON queries, DBA administrative operations (safety-guarded DROP, CREATE, CLONE), active connection monitoring, index health audits, schema diffing, and native dump/restore utilities.
-* **Excel MCP (20 Tools)**: High-speed Pandas data queries, multi-column reconciliation with RapidFuzz, cell & formula editing, and native Windows Excel COM automation (PDF exports, recalculation, pivot refreshes, VBA macros).
-* **Word MCP (10 Tools)**: Multi-unit page layout geometry (margins in inches, cm, mm, pt), multi-column layout analysis, paragraph spacing/indentation, typography (fonts, sizes, hex colors), and floating/inline header image extraction.
-* **Workspace Explorer MCP (11 Tools)**: Token-safe directory exploration, collapsible heavy folders (`node_modules`, `.next`, `.git`), dynamic `.gitignore` parsing, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outline extraction.
-* **TypeScript Diagnostic Watcher MCP (6 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection across multi-tsconfig projects.
+* **Dynamic Guide Merging (`mws guide [server]`)**: View comprehensive tool schemas, prompt recipes, and diagnostic checks for individual servers (`mws excel-db guide`, `mws ssh guide`, `mws git guide`, `mws db guide`) or all installed servers merged (`mws guide all`).
+* **Excel MCP (44 Tools)**: High-speed Pandas data queries, multi-column reconciliation with RapidFuzz, native styled Excel Tables (ListObjects), row/column structural mutations, formula templates, cell merging, workbook diffing, and native Windows Excel COM automation (PDF exports, recalculation, pivot refreshes, VBA macros).
+* **Git & GitHub MCP (46 Tools)**: Unified local Git repository management (init, remotes, restore, bookmarks, branching, commits, paginated diffs, conflicts) and remote GitHub CLI (`gh`) operations (PR checks, releases, issues, Actions) with hybrid synergy workflows.
+* **Multi-SSH & Remote Management MCP (34 Tools)**: Advanced multi-host connection pooling, auto-discovery of `~/.ssh/config` aliases/identity files/ProxyJump, sticky active host routing, command execution, elevated `sudo` automation, interactive PTY terminal sessions, detached background jobs, systemd/docker/pm2 service inspection, package listing, log tailing, comprehensive SFTP file management, and background local port forwarding tunnels.
+* **Polyglot Database MCP (31 Tools)**: Unified PostgreSQL & MySQL database manager with cross-database switching, cross-schema auto-resolution, fast JSON queries, DBA administrative operations (safety-guarded DROP, CREATE, CLONE), active connection monitoring, index health audits, schema diffing with migration SQL, Mermaid ERD diagrams, row-level data diffing, slow queries, lock blocking trees, CSV/JSON streaming export, and transactional batch CSV import.
+* **Word MCP (20 Tools)**: Multi-unit page layout geometry (margins in inches, cm, mm, pt), multi-column layout analysis, paragraph spacing/indentation, typography (fonts, sizes, hex colors), floating/inline header image extraction, document authoring, template placeholder filling, and native Word COM PDF export.
+* **Workspace Explorer MCP (14 Tools)**: Token-safe directory exploration, collapsible heavy folders (`node_modules`, `.next`, `.git`), dynamic `.gitignore` parsing, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outline extraction.
+* **Excel & DB Power Engine MCP (9 Tools)**: Zero-context streaming from database to Excel, chunked Excel-to-DB upserting, in-memory cross-source SQL joins, automated reconciliation diffs, multi-master datasets comparison with tolerance, transactional migration generation, and custom Python template pipelines.
+* **TypeScript Diagnostic Watcher MCP (8 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection across multi-tsconfig projects.
+* **RAG MCP (8 Tools)**: Multi-collection asynchronous Playwright web crawling, codebase indexing with incremental SHA-256 caching, zero-clone remote GitHub streaming, and hybrid BM25 + dense semantic vector search.
 * **Extensible User Plugins**: Drop any standalone Python MCP script into `~/.mcp-win-stdio/plugins/` and it is immediately discovered, runnable, and configurable.
 
 ---
@@ -30,23 +32,27 @@ Each server is published as an independent, lightweight PyPI package. Installing
 
 | Server | Standalone Package | Tools | Primary Capabilities |
 | :--- | :--- | :---: | :--- |
-| **SSH** | `pip install mcp-win-stdio-ssh` | 27 | Multi-host pooling, ~/.ssh/config discovery, PTY shells, background jobs, systemd/docker, package management, SFTP, port forwarding |
-| **Git & GitHub** | `pip install mcp-win-stdio-git` | 33 | Local Git init/remotes/restore/bookmarks/branches, commits, diffs + GitHub PR checks, releases, issues, Actions |
-| **Database** | `pip install mcp-win-stdio-db` | 23 | PostgreSQL & MySQL pooling, cross-schema resolution, index audits, schema diffs, DBA management, dump/restore |
-| **Excel** | `pip install mcp-win-stdio-excel` | 20 | Pandas queries, RapidFuzz reconciliation, OpenPyXL, native Excel COM automation |
-| **Word** | `pip install mcp-win-stdio-word` | 10 | Margins (in, cm, mm, pt), multi-column IEEE layout, typography, image extraction |
-| **Explorer** | `pip install mcp-win-stdio-explorer` | 11 | Token-safe tree, .gitignore resolution, in-file grep, AST outlines |
-| **TypeScript** | `pip install mcp-win-stdio-tsc` | 6 | 0ms in-memory compilation error cache, multi-tsconfig watchers |
+| **Excel** | `pip install mcp-win-stdio-excel` | 44 | Native Excel Tables, row/col mutations, formulas, Pandas queries, RapidFuzz reconciliation, Office COM automation |
+| **Git & GitHub** | `pip install mcp-win-stdio-git` | 46 | Local Git init/remotes/restore/bookmarks/branches, commits, diffs + GitHub PR checks, releases, issues, Actions |
+| **SSH** | `pip install mcp-win-stdio-ssh` | 34 | Multi-host pooling, ~/.ssh/config discovery, PTY shells, background jobs, systemd/docker, package management, SFTP, tunnels |
+| **Database** | `pip install mcp-win-stdio-db` | 31 | PostgreSQL & MySQL pooling, cross-schema resolution, index audits, schema diffs, Mermaid ERD, slow queries, lock trees |
+| **Word** | `pip install mcp-win-stdio-word` | 20 | Margins (in, cm, mm, pt), multi-column layout, typography, document authoring, template filling, Office COM PDF export |
+| **Explorer** | `pip install mcp-win-stdio-explorer` | 14 | Token-safe collapsible tree, .gitignore resolution, in-file grep, AST outlines, fuzzy search |
+| **Excel & DB** | `pip install mcp-win-stdio-excel-db` | 9 | Zero-context streaming, cross-joins, master reconciliation with tolerance, transactional migration plan, dry-run sync |
+| **TypeScript** | `pip install mcp-win-stdio-tsc` | 8 | 0ms in-memory compilation error cache, multi-tsconfig watchers, fix suggestions |
+| **RAG** | `pip install mcp-win-stdio-rag` | 8 | Async Playwright crawling, codebase indexing, zero-clone GitHub ingest, hybrid BM25 + vector search |
 
 ### Install Individual Servers:
 ```powershell
-pip install mcp-win-stdio-ssh
-pip install mcp-win-stdio-git
-pip install mcp-win-stdio-db
 pip install mcp-win-stdio-excel
+pip install mcp-win-stdio-git
+pip install mcp-win-stdio-ssh
+pip install mcp-win-stdio-db
 pip install mcp-win-stdio-word
 pip install mcp-win-stdio-explorer
+pip install mcp-win-stdio-excel-db
 pip install mcp-win-stdio-tsc
+pip install mcp-win-stdio-rag
 ```
 
 ### Or Install the Complete Suite:

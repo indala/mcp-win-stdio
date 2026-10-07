@@ -23,7 +23,7 @@ Server vs Connection vs Database Resolution:
   • 'use_database' switches to a connection alias (e.g. 'showreel'), a database name,
     or a sibling database on the active/specified server.
 
-Available Tools (25 Tools):
+Available Tools (31 Tools):
 --------------------------------------------------------------------------------
 CONNECTION MANAGEMENT
 1.  list_connections
@@ -141,6 +141,32 @@ DBA MANAGEMENT
 25. restore_database
     - Restores database from SQL dump file using native psql or mysql.
     - Args: database (str), dumpFilePath (str), server/connection (optional str)
+
+HEALTH, AUDITING & VISUALIZATION
+26. generate_erd
+    - Generates Entity-Relationship Diagram in GitHub/Mermaid markdown syntax directly from foreign keys.
+    - Args: schema (optional str), tables (optional list), include_columns (bool), connection/server (optional str)
+
+27. diff_data
+    - Row-level data comparison between two tables/schemas/databases with key matching and field diffs.
+    - Args: table1 (str), table2 (optional str), key_columns (optional list), max_differences (int)
+
+28. list_slow_queries
+    - Inspects slow queries via pg_stat_statements or performance_schema / processlist.
+    - Args: limit (int), min_duration_ms (float), connection/server (optional str)
+
+29. get_locks
+    - Real-time blocking dependency trees, lock wait durations, and active lock distributions.
+    - Args: connection/server (optional str)
+
+STREAMING & ETL
+30. export_table
+    - Streams table contents or SQL query results directly to CSV, JSON, or TSV on disk.
+    - Args: table_or_query (str), output_path (str), format (str), is_query (bool)
+
+31. import_csv
+    - Batch imports CSV file into table with transaction safety, on_conflict handling, and dry-run rollback.
+    - Args: table_name (str), csv_path (str), delimiter (str), on_conflict (str), dry_run (bool)
 
 --------------------------------------------------------------------------------
 Error Handling:

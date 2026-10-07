@@ -4,6 +4,7 @@ Unified Database MCP Server for PostgreSQL and MySQL
 Part of mcp-win-stdio.
 """
 
+import csv
 import decimal
 import os
 import sys
@@ -353,6 +354,13 @@ def _get_connection(target_name: Optional[str] = None, fallback_server: Optional
     if not name:
         raise ValueError("No database connection specified and no active connection set.")
 
+    # 0. Raw database URL
+    if any(name.startswith(p) for p in ("postgresql://", "postgres://", "mysql://")):
+        info = _parse_url(name)
+        info["name"] = info.get("database") or "custom"
+        info["url"] = name
+        return info
+
     # 1. Exact match in registry
     if name in _CONNECTION_REGISTRY:
         return _CONNECTION_REGISTRY[name]
@@ -406,6 +414,19 @@ def _get_connection(target_name: Optional[str] = None, fallback_server: Optional
         _CONNECTION_REGISTRY[name] = info
         _RAW_CONFIG[name] = new_url
         return info
+
+    # 6. Fallback: try connecting to local postgresql://postgres:postgres@localhost:5432/{name}
+    try:
+        candidate_url = f"postgresql://postgres:postgres@localhost:5432/{name}"
+        conn = psycopg2.connect(candidate_url)
+        conn.close()
+        info = _parse_url(candidate_url)
+        info["name"] = name
+        info["url"] = candidate_url
+        _CONNECTION_REGISTRY[name] = info
+        return info
+    except Exception:
+        pass
 
     raise ValueError(f"Connection or database '{name}' not found. Available connections: {list(_RAW_CONFIG.keys())}")
 
@@ -2660,6 +2681,895 @@ def audit_database_health(
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
         return _format_db_error(e, engine)
+
+
+
+def _clean_mermaid_type(data_type: str) -> str:
+    dt = (data_type or "").lower().strip()
+    if "char" in dt or "text" in dt:
+        return "string"
+    if "int" in dt or "serial" in dt:
+        return "int"
+    if any(k in dt for k in ("numeric", "decimal", "real", "double", "float")):
+        return "float"
+    if "bool" in dt:
+        return "boolean"
+    if any(k in dt for k in ("date", "time", "timestamp")):
+        return "datetime"
+    if "uuid" in dt:
+        return "uuid"
+    if "json" in dt:
+        return "json"
+    clean = re.sub(r'[^a-zA-Z0-9_]', '_', dt)
+    return clean or "string"
+
+
+def _serialize_db_val(v: Any) -> Any:
+    if v is None:
+        return None
+    if isinstance(v, (datetime, date, time)):
+        return v.isoformat()
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, uuid.UUID):
+        return str(v)
+    if isinstance(v, bytes):
+        return v.hex()
+    return v
+
+
+@mcp.tool()
+def generate_erd(
+    schema: Optional[str] = None,
+    tables: Optional[List[str]] = None,
+    include_columns: bool = True,
+    connection: Optional[str] = None,
+    server: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Generate an Entity-Relationship Diagram (ERD) in GitHub/Mermaid markdown syntax.
+    Extracts all tables, columns, primary keys, and foreign key relationships directly
+    from database catalog metadata.
+    
+    Args:
+        schema: Target schema (PostgreSQL) or database (MySQL). If None, uses active/public schema.
+        tables: Optional list of table names to filter ERD scope (e.g. ['materials', 'props_inventory']).
+        include_columns: If True, includes column definitions with PK/FK annotations inside table blocks.
+        connection: Optional connection name or URL (defaults to active connection).
+        server: Optional server or connection alias.
+    """
+    try:
+        info = _get_connection(_resolve_conn(connection, server))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    try:
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                with conn.cursor() as cur:
+                    target_schema = schema.strip() if schema else "public"
+                    cur.execute("""
+                        SELECT 
+                            tc.table_schema, 
+                            tc.table_name, 
+                            kcu.column_name, 
+                            ccu.table_schema AS foreign_table_schema,
+                            ccu.table_name AS foreign_table_name,
+                            ccu.column_name AS foreign_column_name,
+                            tc.constraint_name
+                        FROM information_schema.table_constraints tc
+                        JOIN information_schema.key_column_usage kcu
+                          ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                        JOIN information_schema.constraint_column_usage ccu
+                          ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+                        WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s
+                    """, (target_schema,))
+                    fks = cur.fetchall()
+
+                    cur.execute("""
+                        SELECT c.table_schema, c.table_name, c.column_name, c.data_type,
+                               CASE WHEN pk.column_name IS NOT NULL THEN TRUE ELSE FALSE END as is_pk
+                        FROM information_schema.columns c
+                        LEFT JOIN (
+                            SELECT tc.table_schema, tc.table_name, kcu.column_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                            WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s
+                        ) pk ON pk.table_schema = c.table_schema AND pk.table_name = c.table_name AND pk.column_name = c.column_name
+                        WHERE c.table_schema = %s
+                        ORDER BY c.table_name, c.ordinal_position;
+                    """, (target_schema, target_schema))
+                    all_cols = cur.fetchall()
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                with conn.cursor() as cur:
+                    target_schema = schema.strip() if schema else info["database"]
+                    cur.execute("""
+                        SELECT 
+                            TABLE_SCHEMA as table_schema,
+                            TABLE_NAME as table_name,
+                            COLUMN_NAME as column_name,
+                            REFERENCED_TABLE_SCHEMA as foreign_table_schema,
+                            REFERENCED_TABLE_NAME as foreign_table_name,
+                            REFERENCED_COLUMN_NAME as foreign_column_name,
+                            CONSTRAINT_NAME as constraint_name
+                        FROM information_schema.KEY_COLUMN_USAGE
+                        WHERE REFERENCED_TABLE_NAME IS NOT NULL AND TABLE_SCHEMA = %s
+                    """, (target_schema,))
+                    fks = cur.fetchall()
+
+                    cur.execute("""
+                        SELECT c.TABLE_SCHEMA as table_schema, c.TABLE_NAME as table_name, c.COLUMN_NAME as column_name, c.DATA_TYPE as data_type,
+                               CASE WHEN c.COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END as is_pk
+                        FROM information_schema.COLUMNS c
+                        WHERE c.TABLE_SCHEMA = %s
+                        ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
+                    """, (target_schema,))
+                    all_cols = cur.fetchall()
+            finally:
+                conn.close()
+
+        table_filter_set = set(t.lower() for t in tables) if tables else None
+
+        filtered_fks = []
+        for fk in fks:
+            p = fk["foreign_table_name"]
+            c = fk["table_name"]
+            if table_filter_set and (p.lower() not in table_filter_set and c.lower() not in table_filter_set):
+                continue
+            filtered_fks.append(fk)
+
+        table_cols_map = {}
+        for col in all_cols:
+            t = col["table_name"]
+            if table_filter_set and t.lower() not in table_filter_set:
+                continue
+            table_cols_map.setdefault(t, []).append(col)
+
+        mermaid_lines = ["erDiagram"]
+        seen_rels = set()
+        for fk in filtered_fks:
+            p = fk["foreign_table_name"]
+            c = fk["table_name"]
+            col = fk["column_name"]
+            rel_key = (p, c, col)
+            if rel_key not in seen_rels:
+                seen_rels.add(rel_key)
+                mermaid_lines.append(f'    {p} ||--o{{ {c} : "{col}"')
+
+        fk_cols_per_table = set((fk["table_name"], fk["column_name"]) for fk in fks)
+
+        if include_columns:
+            for t_name, c_list in table_cols_map.items():
+                mermaid_lines.append(f"    {t_name} {{")
+                for col in c_list:
+                    c_type = _clean_mermaid_type(col["data_type"])
+                    c_name = col["column_name"]
+                    markers = []
+                    if col.get("is_pk"):
+                        markers.append("PK")
+                    if (t_name, c_name) in fk_cols_per_table:
+                        markers.append("FK")
+                    marker_str = f" {' '.join(markers)}" if markers else ""
+                    mermaid_lines.append(f"        {c_type} {c_name}{marker_str}")
+                mermaid_lines.append("    }")
+
+        mermaid_str = "\n".join(mermaid_lines)
+        return {
+            "connection": info["name"],
+            "engine": info["engine"],
+            "schema": target_schema,
+            "tables_count": len(table_cols_map),
+            "foreign_keys_count": len(filtered_fks),
+            "mermaid": mermaid_str,
+            "markdown": f"```mermaid\n{mermaid_str}\n```"
+        }
+    except Exception as e:
+        return _format_db_error(e, info.get("engine", "unknown"))
+
+
+@mcp.tool()
+def diff_data(
+    table1: str,
+    table2: Optional[str] = None,
+    key_columns: Optional[List[str]] = None,
+    schema1: Optional[str] = None,
+    schema2: Optional[str] = None,
+    connection1: Optional[str] = None,
+    connection2: Optional[str] = None,
+    max_differences: int = 100
+) -> Dict[str, Any]:
+    """
+    Compare row data between two tables (or across schemas/connections).
+    Identifies rows only in source, rows only in target, and rows with modified values
+    with column-by-column diffs.
+    
+    Args:
+        table1: Source table name (e.g. 'materials').
+        table2: Target table name. If omitted, defaults to table1 (useful for comparing across schemas/connections).
+        key_columns: Primary key or unique identifier columns for matching rows. Auto-detected if omitted.
+        schema1: Schema for table1 (Postgres).
+        schema2: Schema for table2 (defaults to schema1 if omitted).
+        connection1: Source connection name/alias.
+        connection2: Target connection name/alias (defaults to connection1).
+        max_differences: Maximum number of differing rows to return in details (default: 100).
+    """
+    try:
+        info1 = _get_connection(_resolve_conn(connection1, None))
+        info2 = _get_connection(_resolve_conn(connection2 or connection1, None))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    t1_name = table1.strip()
+    t2_name = (table2 or table1).strip()
+    s1_name = schema1.strip() if schema1 else None
+    s2_name = (schema2 or schema1).strip() if (schema2 or schema1) else None
+
+    # Fetch data from source table
+    rows1 = []
+    pks1 = []
+    try:
+        if info1["engine"] == "postgres":
+            conn1 = _get_pg_client(info1)
+            try:
+                with conn1.cursor() as cur1:
+                    res1 = _resolve_pg_table(cur1, t1_name, s1_name)
+                    s1 = res1["schema"]
+                    t1 = res1["table"]
+                    if not key_columns:
+                        cur1.execute("""
+                            SELECT kcu.column_name
+                            FROM information_schema.table_constraints tc
+                            JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                            WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s AND tc.table_name = %s
+                        """, (s1, t1))
+                        pks1 = [r["column_name"] for r in cur1.fetchall()]
+                    cur1.execute(f'SELECT * FROM "{s1}"."{t1}" LIMIT 50000;')
+                    rows1 = cur1.fetchall()
+            finally:
+                conn1.close()
+        else:
+            conn1 = _get_mysql_client(info1)
+            try:
+                with conn1.cursor() as cur1:
+                    s1 = s1_name or info1["database"]
+                    t1 = t1_name
+                    if not key_columns:
+                        cur1.execute("SHOW KEYS FROM `{}` WHERE Key_name = 'PRIMARY'".format(t1))
+                        pks1 = [r["Column_name"] for r in cur1.fetchall()]
+                    cur1.execute(f"SELECT * FROM `{t1}` LIMIT 50000;")
+                    rows1 = cur1.fetchall()
+            finally:
+                conn1.close()
+    except Exception as e:
+        return _format_db_error(e, info1.get("engine", "unknown"), f"Querying {table1}")
+
+    # Fetch data from target table
+    rows2 = []
+    try:
+        if info2["engine"] == "postgres":
+            conn2 = _get_pg_client(info2)
+            try:
+                with conn2.cursor() as cur2:
+                    res2 = _resolve_pg_table(cur2, t2_name, s2_name)
+                    s2 = res2["schema"]
+                    t2 = res2["table"]
+                    cur2.execute(f'SELECT * FROM "{s2}"."{t2}" LIMIT 50000;')
+                    rows2 = cur2.fetchall()
+            finally:
+                conn2.close()
+        else:
+            conn2 = _get_mysql_client(info2)
+            try:
+                with conn2.cursor() as cur2:
+                    s2 = s2_name or info2["database"]
+                    t2 = t2_name
+                    cur2.execute(f"SELECT * FROM `{t2}` LIMIT 50000;")
+                    rows2 = cur2.fetchall()
+            finally:
+                conn2.close()
+    except Exception as e:
+        return _format_db_error(e, info2.get("engine", "unknown"), f"Querying {table2}")
+
+    resolved_keys = key_columns or pks1
+    if not resolved_keys:
+        return {
+            "error": True,
+            "message": f"Table '{table1}' has no primary key. Please specify 'key_columns' explicitly for comparison."
+        }
+
+    # Index by key
+    map1 = {tuple(str(_serialize_db_val(r.get(k))) for k in resolved_keys): r for r in rows1}
+    map2 = {tuple(str(_serialize_db_val(r.get(k))) for k in resolved_keys): r for r in rows2}
+
+    keys1 = set(map1.keys())
+    keys2 = set(map2.keys())
+
+    missing_in_target_keys = keys1 - keys2
+    missing_in_source_keys = keys2 - keys1
+    common_keys = keys1 & keys2
+
+    missing_in_target = [{k: _serialize_db_val(v) for k, v in map1[k].items()} for k in list(missing_in_target_keys)[:max_differences]]
+    missing_in_source = [{k: _serialize_db_val(v) for k, v in map2[k].items()} for k in list(missing_in_source_keys)[:max_differences]]
+
+    modified_rows = []
+    identical_count = 0
+
+    for k in common_keys:
+        r1 = map1[k]
+        r2 = map2[k]
+        diffs = {}
+        all_cols = set(list(r1.keys()) + list(r2.keys()))
+        for col in all_cols:
+            v1 = _serialize_db_val(r1.get(col))
+            v2 = _serialize_db_val(r2.get(col))
+            if v1 != v2:
+                diffs[col] = {"source": v1, "target": v2}
+        if diffs:
+            if len(modified_rows) < max_differences:
+                modified_rows.append({"key": list(k), "differences": diffs})
+        else:
+            identical_count += 1
+
+    return {
+        "source": f"{info1['name']}:{s1}.{t1}",
+        "target": f"{info2['name']}:{s2}.{t2}",
+        "key_columns": resolved_keys,
+        "total_source_rows": len(rows1),
+        "total_target_rows": len(rows2),
+        "identical_rows_count": identical_count,
+        "modified_rows_count": len(common_keys) - identical_count,
+        "missing_in_target_count": len(missing_in_target_keys),
+        "missing_in_source_count": len(missing_in_source_keys),
+        "modified_rows_sample": modified_rows,
+        "missing_in_target_sample": missing_in_target,
+        "missing_in_source_sample": missing_in_source
+    }
+
+
+@mcp.tool()
+def list_slow_queries(
+    limit: int = 20,
+    min_duration_ms: float = 100.0,
+    connection: Optional[str] = None,
+    server: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Inspect slow database queries using pg_stat_statements / pg_stat_activity (PostgreSQL)
+    or performance_schema / processlist (MySQL).
+    
+    Args:
+        limit: Maximum number of slow queries to return (default: 20).
+        min_duration_ms: Minimum execution time threshold in milliseconds (default: 100.0).
+        connection: Optional connection name or URL.
+        server: Optional server or connection alias.
+    """
+    try:
+        info = _get_connection(_resolve_conn(connection, server))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    try:
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                with conn.cursor() as cur:
+                    has_pg_stat = False
+                    try:
+                        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements';")
+                        has_pg_stat = bool(cur.fetchone())
+                    except Exception:
+                        pass
+
+                    if has_pg_stat:
+                        cur.execute("""
+                            SELECT 
+                                query, 
+                                calls, 
+                                round(total_exec_time::numeric, 2) AS total_time_ms,
+                                round(mean_exec_time::numeric, 2) AS mean_time_ms,
+                                round(max_exec_time::numeric, 2) AS max_time_ms,
+                                rows AS total_rows
+                            FROM pg_stat_statements
+                            WHERE mean_exec_time >= %s
+                            ORDER BY total_exec_time DESC
+                            LIMIT %s;
+                        """, (min_duration_ms, limit))
+                        queries = cur.fetchall()
+                        return {
+                            "connection": info["name"],
+                            "engine": "postgres",
+                            "source": "pg_stat_statements",
+                            "queries_count": len(queries),
+                            "slow_queries": [
+                                {
+                                    "query": q["query"],
+                                    "calls": q["calls"],
+                                    "total_time_ms": float(q["total_time_ms"]),
+                                    "mean_time_ms": float(q["mean_time_ms"]),
+                                    "max_time_ms": float(q["max_time_ms"]),
+                                    "rows": q["total_rows"]
+                                }
+                                for q in queries
+                            ]
+                        }
+                    else:
+                        cur.execute("""
+                            SELECT 
+                                pid, 
+                                usename, 
+                                application_name, 
+                                client_addr, 
+                                state, 
+                                round(extract(epoch from (now() - query_start)) * 1000) AS duration_ms, 
+                                query
+                            FROM pg_stat_activity
+                            WHERE state != 'idle' 
+                              AND pid != pg_backend_pid()
+                              AND query NOT ILIKE '%%pg_stat_activity%%'
+                            ORDER BY query_start ASC
+                            LIMIT %s;
+                        """, (limit,))
+                        queries = cur.fetchall()
+                        return {
+                            "connection": info["name"],
+                            "engine": "postgres",
+                            "source": "pg_stat_activity (active long-running)",
+                            "pg_stat_statements_installed": False,
+                            "hint": "Install pg_stat_statements extension (CREATE EXTENSION IF NOT EXISTS pg_stat_statements) for historical aggregated query statistics.",
+                            "queries_count": len(queries),
+                            "active_queries": [
+                                {
+                                    "pid": q["pid"],
+                                    "user": q["usename"],
+                                    "application": q["application_name"],
+                                    "duration_ms": float(q["duration_ms"]) if q["duration_ms"] else 0,
+                                    "state": q["state"],
+                                    "query": q["query"]
+                                }
+                                for q in queries
+                            ]
+                        }
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                with conn.cursor() as cur:
+                    try:
+                        cur.execute("""
+                            SELECT 
+                                DIGEST_TEXT AS query, 
+                                COUNT_STAR AS calls, 
+                                ROUND(SUM_TIMER_WAIT / 1000000000, 2) AS total_time_ms,
+                                ROUND(AVG_TIMER_WAIT / 1000000000, 2) AS mean_time_ms,
+                                ROUND(MAX_TIMER_WAIT / 1000000000, 2) AS max_time_ms,
+                                SUM_ROWS_EXAMINED AS total_rows
+                            FROM performance_schema.events_statements_summary_by_digest
+                            WHERE (AVG_TIMER_WAIT / 1000000000) >= %s
+                            ORDER BY SUM_TIMER_WAIT DESC
+                            LIMIT %s;
+                        """, (min_duration_ms, limit))
+                        queries = cur.fetchall()
+                        return {
+                            "connection": info["name"],
+                            "engine": "mysql",
+                            "source": "performance_schema",
+                            "queries_count": len(queries),
+                            "slow_queries": queries
+                        }
+                    except Exception:
+                        cur.execute("SHOW FULL PROCESSLIST;")
+                        procs = cur.fetchall()
+                        return {
+                            "connection": info["name"],
+                            "engine": "mysql",
+                            "source": "processlist",
+                            "queries_count": len(procs),
+                            "active_queries": procs
+                        }
+            finally:
+                conn.close()
+    except Exception as e:
+        return _format_db_error(e, info.get("engine", "unknown"))
+
+
+@mcp.tool()
+def get_locks(
+    connection: Optional[str] = None,
+    server: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Inspect active database locks and query blocking dependency trees.
+    Reveals hanging transactions, blocking PIDs, locked tables, and lock wait times.
+    
+    Args:
+        connection: Optional connection name or URL.
+        server: Optional server or connection alias.
+    """
+    try:
+        info = _get_connection(_resolve_conn(connection, server))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    try:
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT
+                            blocked_locks.pid     AS blocked_pid,
+                            blocked_activity.usename  AS blocked_user,
+                            blocking_locks.pid    AS blocking_pid,
+                            blocking_activity.usename AS blocking_user,
+                            blocked_activity.query    AS blocked_statement,
+                            blocking_activity.query   AS blocking_statement,
+                            round(extract(epoch from (now() - blocked_activity.query_start)) * 1000) AS blocked_duration_ms
+                        FROM pg_catalog.pg_locks blocked_locks
+                        JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+                        JOIN pg_catalog.pg_locks blocking_locks 
+                            ON blocking_locks.locktype = blocked_locks.locktype
+                            AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+                            AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+                            AND blocking_locks.pid != blocked_locks.pid
+                        JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+                        WHERE NOT blocked_locks.granted;
+                    """)
+                    blockings = cur.fetchall()
+
+                    cur.execute("""
+                        SELECT mode, locktype, count(*) as count
+                        FROM pg_locks
+                        GROUP BY mode, locktype
+                        ORDER BY count DESC;
+                    """)
+                    lock_counts = cur.fetchall()
+
+                    return {
+                        "connection": info["name"],
+                        "engine": "postgres",
+                        "status": "blocking_detected" if blockings else "healthy",
+                        "blocking_trees_count": len(blockings),
+                        "blocking_trees": [
+                            {
+                                "blocked_pid": b["blocked_pid"],
+                                "blocked_user": b["blocked_user"],
+                                "blocking_pid": b["blocking_pid"],
+                                "blocking_user": b["blocking_user"],
+                                "blocked_statement": b["blocked_statement"][:200] if b["blocked_statement"] else None,
+                                "blocking_statement": b["blocking_statement"][:200] if b["blocking_statement"] else None,
+                                "blocked_duration_ms": float(b["blocked_duration_ms"]) if b["blocked_duration_ms"] else 0,
+                                "kill_command": f"SELECT pg_terminate_backend({b['blocking_pid']});"
+                            }
+                            for b in blockings
+                        ],
+                        "active_locks_summary": [
+                            {"lock_type": l["locktype"], "mode": l["mode"], "count": l["count"]}
+                            for l in lock_counts
+                        ]
+                    }
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                with conn.cursor() as cur:
+                    try:
+                        cur.execute("""
+                            SELECT 
+                                r.trx_id waiting_trx_id, 
+                                r.trx_mysql_thread_id waiting_thread, 
+                                r.trx_query waiting_query,
+                                b.trx_id blocking_trx_id, 
+                                b.trx_mysql_thread_id blocking_thread, 
+                                b.trx_query blocking_query
+                            FROM performance_schema.data_lock_waits w
+                            JOIN performance_schema.data_locks b ON b.ENGINE_LOCK_ID = w.BLOCKING_ENGINE_LOCK_ID
+                            JOIN performance_schema.data_locks r ON r.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID;
+                        """)
+                        blocks = cur.fetchall()
+                        return {
+                            "connection": info["name"],
+                            "engine": "mysql",
+                            "blocking_count": len(blocks),
+                            "blocking_trees": blocks
+                        }
+                    except Exception:
+                        return {
+                            "connection": info["name"],
+                            "engine": "mysql",
+                            "blocking_count": 0,
+                            "message": "No lock contention detected."
+                        }
+            finally:
+                conn.close()
+    except Exception as e:
+        return _format_db_error(e, info.get("engine", "unknown"))
+
+
+@mcp.tool()
+def export_table(
+    table_or_query: str,
+    output_path: str,
+    format: str = "csv",
+    is_query: bool = False,
+    schema: Optional[str] = None,
+    connection: Optional[str] = None,
+    server: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Export an entire table or SQL query result directly to a file (CSV, JSON, or TSV) on disk.
+    Executes in streaming batches without loading intermediate records into LLM context.
+    
+    Args:
+        table_or_query: Table name (e.g. 'materials') or raw SQL query if is_query=True.
+        output_path: Destination file path (e.g. 'exports/materials.csv').
+        format: Export format: 'csv', 'json', or 'tsv' (default: 'csv').
+        is_query: Set to True if table_or_query is a custom SQL SELECT statement.
+        schema: Optional schema name if exporting a table in PostgreSQL.
+        connection: Optional connection name or URL.
+        server: Optional server or connection alias.
+    """
+    try:
+        info = _get_connection(_resolve_conn(connection, server))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    target_file = Path(output_path).resolve()
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+
+    fmt = format.lower().strip()
+    if fmt not in ("csv", "json", "tsv"):
+        return {"error": True, "message": f"Unsupported format '{format}'. Use 'csv', 'json', or 'tsv'."}
+
+    try:
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                with conn.cursor() as cur:
+                    if is_query:
+                        sql = table_or_query
+                    else:
+                        resolved = _resolve_pg_table(cur, table_or_query, schema)
+                        sql = f'SELECT * FROM "{resolved["schema"]}"."{resolved["table"]}";'
+
+                    cur.execute(sql)
+                    col_names = [d[0] for d in cur.description] if cur.description else []
+                    
+                    rows_count = 0
+                    if fmt == "json":
+                        with open(target_file, "w", encoding="utf-8") as f:
+                            f.write("[\n")
+                            first = True
+                            while True:
+                                batch = cur.fetchmany(2000)
+                                if not batch:
+                                    break
+                                for row in batch:
+                                    rows_count += 1
+                                    d = {c: _serialize_db_val(row[c]) for c in col_names}
+                                    if not first:
+                                        f.write(",\n")
+                                    f.write("  " + json.dumps(d))
+                                    first = False
+                            f.write("\n]\n")
+                    else:
+                        delim = "\t" if fmt == "tsv" else ","
+                        with open(target_file, "w", newline="", encoding="utf-8") as f:
+                            writer = csv.writer(f, delimiter=delim)
+                            writer.writerow(col_names)
+                            while True:
+                                batch = cur.fetchmany(2000)
+                                if not batch:
+                                    break
+                                for row in batch:
+                                    rows_count += 1
+                                    writer.writerow([_serialize_db_val(row[c]) for c in col_names])
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                with conn.cursor() as cur:
+                    sql = table_or_query if is_query else f"SELECT * FROM `{table_or_query}`;"
+                    cur.execute(sql)
+                    col_names = [d[0] for d in cur.description] if cur.description else []
+                    
+                    rows_count = 0
+                    if fmt == "json":
+                        with open(target_file, "w", encoding="utf-8") as f:
+                            f.write("[\n")
+                            first = True
+                            while True:
+                                batch = cur.fetchmany(2000)
+                                if not batch:
+                                    break
+                                for row in batch:
+                                    rows_count += 1
+                                    d = {c: _serialize_db_val(row[c]) for c in col_names}
+                                    if not first:
+                                        f.write(",\n")
+                                    f.write("  " + json.dumps(d))
+                                    first = False
+                            f.write("\n]\n")
+                    else:
+                        delim = "\t" if fmt == "tsv" else ","
+                        with open(target_file, "w", newline="", encoding="utf-8") as f:
+                            writer = csv.writer(f, delimiter=delim)
+                            writer.writerow(col_names)
+                            while True:
+                                batch = cur.fetchmany(2000)
+                                if not batch:
+                                    break
+                                for row in batch:
+                                    rows_count += 1
+                                    writer.writerow([_serialize_db_val(row[c]) for c in col_names])
+            finally:
+                conn.close()
+
+        return {
+            "status": "success",
+            "output_path": str(target_file),
+            "rows_exported": rows_count,
+            "columns": col_names,
+            "file_size_bytes": target_file.stat().st_size
+        }
+    except Exception as e:
+        return _format_db_error(e, info.get("engine", "unknown"), table_or_query)
+
+
+@mcp.tool()
+def import_csv(
+    table_name: str,
+    csv_path: str,
+    delimiter: str = ",",
+    schema: Optional[str] = None,
+    if_exists: str = "append",
+    on_conflict: str = "error",
+    batch_size: int = 1000,
+    dry_run: bool = False,
+    connection: Optional[str] = None,
+    server: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Bulk import a CSV file directly into a database table with batching and transaction safety.
+    Supports dry-run validation (checks all rows against constraints, then safely rolls back).
+    
+    Args:
+        table_name: Destination database table name.
+        csv_path: Path to the source CSV file.
+        delimiter: CSV delimiter character (default: ',').
+        schema: Target schema name (PostgreSQL).
+        if_exists: 'append' to insert rows, or 'truncate' to clear table before inserting.
+        on_conflict: 'error' (fail on unique constraint violation) or 'ignore' (skip conflicting rows).
+        batch_size: Batch size for chunked INSERT execution (default: 1000).
+        dry_run: If True, executes the entire insert inside a transaction and rolls back (validates syntax & constraints).
+        connection: Optional connection name or URL.
+        server: Optional server or connection alias.
+    """
+    try:
+        info = _get_connection(_resolve_conn(connection, server))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    src_file = Path(csv_path).resolve()
+    if not src_file.exists():
+        return {"error": True, "message": f"CSV file not found: {csv_path}"}
+
+    try:
+        with open(src_file, "r", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter=delimiter)
+            headers = next(reader, None)
+            if not headers:
+                return {"error": True, "message": "CSV file is empty or missing headers."}
+            rows = [r for r in reader if any(r)]
+
+        if not rows:
+            return {"status": "success", "message": "CSV contained headers but no data rows.", "rows_inserted": 0}
+
+        quoted_cols = ", ".join(f'"{h.strip()}"' for h in headers)
+        
+        if info["engine"] == "postgres":
+            conn = _get_pg_client(info)
+            try:
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    resolved = _resolve_pg_table(cur, table_name, schema)
+                    full_tbl = f'"{resolved["schema"]}"."{resolved["table"]}"'
+
+                    if if_exists.lower() == "truncate" and not dry_run:
+                        cur.execute(f"TRUNCATE TABLE {full_tbl} CASCADE;")
+
+                    placeholders = ", ".join(["%s"] * len(headers))
+                    conflict_clause = " ON CONFLICT DO NOTHING" if on_conflict.lower() == "ignore" else ""
+                    insert_sql = f"INSERT INTO {full_tbl} ({quoted_cols}) VALUES ({placeholders}){conflict_clause}"
+
+                    cleaned_rows = [
+                        [None if (val is None or str(val).strip() == "") else val for val in row]
+                        for row in rows
+                    ]
+
+                    from psycopg2.extras import execute_batch
+                    execute_batch(cur, insert_sql, cleaned_rows, page_size=batch_size)
+
+                    if dry_run:
+                        conn.rollback()
+                        return {
+                            "status": "dry_run_success",
+                            "message": f"Dry-run simulation succeeded! {len(cleaned_rows)} rows validated against table {full_tbl} constraints without committing.",
+                            "table": full_tbl,
+                            "rows_validated": len(cleaned_rows),
+                            "columns": headers,
+                            "dry_run": True
+                        }
+                    else:
+                        conn.commit()
+                        return {
+                            "status": "success",
+                            "message": f"Successfully inserted {len(cleaned_rows)} rows into {full_tbl}.",
+                            "table": full_tbl,
+                            "rows_inserted": len(cleaned_rows),
+                            "columns": headers,
+                            "dry_run": False
+                        }
+            except Exception as e:
+                conn.rollback()
+                return _format_db_error(e, "postgres", f"INSERT INTO {table_name}")
+            finally:
+                conn.close()
+        else:
+            conn = _get_mysql_client(info)
+            try:
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    t = table_name.strip()
+                    if if_exists.lower() == "truncate" and not dry_run:
+                        cur.execute(f"TRUNCATE TABLE `{t}`;")
+
+                    mysql_cols = ", ".join(f'`{h.strip()}`' for h in headers)
+                    placeholders = ", ".join(["%s"] * len(headers))
+                    verb = "INSERT IGNORE INTO" if on_conflict.lower() == "ignore" else "INSERT INTO"
+                    insert_sql = f"{verb} `{t}` ({mysql_cols}) VALUES ({placeholders})"
+
+                    cleaned_rows = [
+                        [None if (val is None or str(val).strip() == "") else val for val in row]
+                        for row in rows
+                    ]
+
+                    cur.executemany(insert_sql, cleaned_rows)
+
+                    if dry_run:
+                        conn.rollback()
+                        return {
+                            "status": "dry_run_success",
+                            "message": f"Dry-run simulation succeeded! {len(cleaned_rows)} rows validated without committing.",
+                            "table": t,
+                            "rows_validated": len(cleaned_rows),
+                            "columns": headers,
+                            "dry_run": True
+                        }
+                    else:
+                        conn.commit()
+                        return {
+                            "status": "success",
+                            "message": f"Successfully inserted {len(cleaned_rows)} rows into `{t}`.",
+                            "table": t,
+                            "rows_inserted": len(cleaned_rows),
+                            "columns": headers,
+                            "dry_run": False
+                        }
+            except Exception as e:
+                conn.rollback()
+                return _format_db_error(e, "mysql", f"INSERT INTO {table_name}")
+            finally:
+                conn.close()
+    except Exception as e:
+        return _format_db_error(e, info.get("engine", "unknown"))
 
 
 def main():

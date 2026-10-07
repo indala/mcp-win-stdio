@@ -12,7 +12,7 @@ This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite.
 * **Git & PRs:** Use `git` MCP for status, diffs, commits, and GitHub API interactions.
 * **Remote Shells:** Use `ssh` MCP for multi-host pooling and SFTP.
 * **Documentation & Web RAG:** Use `rag` MCP (`crawl_and_index_url`, `query_knowledge_base`, `get_knowledge_tree`).
-* **High-Speed Pipelines & Streaming:** Use `excel-db` MCP (`db_to_excel_stream`, `excel_to_db_upsert`, `query_unified_sources`, `reconcile_db_vs_excel`).
+* **High-Speed Pipelines & Streaming:** Use `excel-db` MCP (`db_to_excel_stream`, `excel_to_db_upsert`, `query_unified_sources`, `reconcile_db_vs_excel`, `compare_master_datasets`, `generate_master_migration_plan`, `sync_master_to_db`, `py_template_pipeline`).
 
 ## ⚠️ Excel File Locking Protocol (CRITICAL)
 

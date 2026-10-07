@@ -5,6 +5,7 @@ and Native Windows Microsoft Excel (COM Automation via PyWin32).
 """
 
 import os
+from pathlib import Path
 import math
 import json
 import re
@@ -19,6 +20,7 @@ from openpyxl.styles.differential import DifferentialStyle
 from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
 from openpyxl.chart import BarChart, LineChart, PieChart, AreaChart, Reference
+from openpyxl.worksheet.table import Table, TableStyleInfo
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
@@ -730,11 +732,11 @@ def search_text(
 @mcp.tool()
 def create_workbook(
     file_path: str,
-    data: List[Dict[str, Any]],
+    data: Union[List[Dict[str, Any]], List[List[Any]]],
     sheet_name: str = "Sheet1",
 ) -> Dict[str, Any]:
     """
-    Create a new Excel file from a list of record dictionaries.
+    Create a new Excel file from a list of record dictionaries or a 2D matrix of rows.
     Automatically sets up headers and adjusts column widths.
     """
     if not data:
@@ -744,7 +746,12 @@ def create_workbook(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    df = pd.DataFrame(data)
+    if isinstance(data, list) and len(data) > 0 and isinstance(data[0], (list, tuple)):
+        headers = [str(h) for h in data[0]]
+        rows = data[1:]
+        df = pd.DataFrame(rows, columns=headers)
+    else:
+        df = pd.DataFrame(data)
     try:
         with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
@@ -3000,5 +3007,578 @@ def search_and_replace_cells(
     }
 
 
+# ============================================================================
+# 8. NATIVE EXCEL TABLES, STRUCTURED MUTATIONS & WORKBOOK DIFF
+# ============================================================================
+
+@mcp.tool()
+def create_table(
+    file_path: str,
+    range_address: str,
+    table_name: str,
+    sheet_name: Optional[str] = None,
+    table_style: Optional[str] = "TableStyleMedium9",
+    show_filter: bool = True,
+    show_row_stripes: bool = True,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Convert a rectangular cell range (e.g. 'A1:F50') into a native styled Excel Table (ListObject) with auto-filters.
+    
+    Args:
+        file_path: Path to Excel workbook.
+        range_address: Rectangular range address (e.g. 'A1:H25').
+        table_name: Unique table identifier (e.g. 'tbl_MaterialsSummary'). Letters, numbers, and underscores only.
+        sheet_name: Target sheet name (defaults to active sheet).
+        table_style: Excel table style name (e.g. 'TableStyleMedium9', 'TableStyleLight1', 'TableStyleDark2').
+        show_filter: Whether to display dropdown filter arrows on header cells.
+        show_row_stripes: Whether to apply alternating banded row colors.
+        output_path: Optional destination path (overwrites file_path if None).
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    # Clean table name
+    clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name.strip())
+    if not clean_name or clean_name[0].isdigit():
+        clean_name = f"Tbl_{clean_name}"
+
+    # Check for existing table name collision
+    for existing_sheet in wb.worksheets:
+        if clean_name in existing_sheet.tables:
+            raise ValueError(f"Table name '{clean_name}' already exists in sheet '{existing_sheet.title}'.")
+
+    # Ensure top-row headers are strings to satisfy openpyxl requirements
+    min_col, min_row, max_col, max_row = range_boundaries(range_address.upper())
+    for col_i in range(min_col, max_col + 1):
+        c_val = ws.cell(row=min_row, column=col_i).value
+        if c_val is None or not isinstance(c_val, str):
+            ws.cell(row=min_row, column=col_i, value=str(c_val) if c_val is not None else f"Column_{col_i}")
+
+    tab = Table(displayName=clean_name, ref=range_address.upper())
+    if table_style:
+        style = TableStyleInfo(
+            name=table_style,
+            showFirstColumn=False,
+            showLastColumn=False,
+            showRowStripes=show_row_stripes,
+            showColumnStripes=False
+        )
+        tab.tableStyleInfo = style
+
+    if not show_filter:
+        tab.autoFilter = None
+
+    ws.add_table(tab)
+
+    save_path = output_path or file_path
+    _safe_save_workbook(wb, save_path)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_path,
+        "sheet_name": ws.title,
+        "table_name": clean_name,
+        "range": range_address.upper(),
+        "table_style": table_style,
+        "show_filter": show_filter
+    }
+
+
+@mcp.tool()
+def list_tables(
+    file_path: str,
+    sheet_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    List all native Excel Tables (ListObjects) in a workbook, including their sheet locations, range bounds, and column names.
+
+    Args:
+        file_path: Path to Excel workbook.
+        sheet_name: Optional filter for a specific sheet name.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path, read_only=False)
+    tables_found = []
+
+    target_sheets = [wb[sheet_name]] if (sheet_name and sheet_name in wb.sheetnames) else wb.worksheets
+
+    for ws in target_sheets:
+        for t_key in list(ws.tables):
+            tab = ws.tables[t_key] if isinstance(t_key, str) else t_key
+            min_col, min_row, max_col, max_row = range_boundaries(tab.ref)
+            headers = []
+            for col_idx in range(min_col, max_col + 1):
+                val = ws.cell(row=min_row, column=col_idx).value
+                headers.append(str(val) if val is not None else f"Column_{col_idx}")
+
+            tables_found.append({
+                "sheet": ws.title,
+                "name": getattr(tab, "name", str(t_key)),
+                "displayName": getattr(tab, "displayName", str(t_key)),
+                "range": tab.ref,
+                "columns": headers,
+                "column_count": len(headers),
+                "row_count": max(0, max_row - min_row),
+                "style": tab.tableStyleInfo.name if tab.tableStyleInfo else None
+            })
+
+    wb.close()
+
+    return {
+        "file_path": file_path,
+        "total_tables": len(tables_found),
+        "tables": tables_found
+    }
+
+
+@mcp.tool()
+def insert_column(
+    file_path: str,
+    col_index: Optional[int] = None,
+    col_idx: Optional[int] = None,
+    sheet_name: Optional[str] = None,
+    header_name: Optional[str] = None,
+    header: Optional[str] = None,
+    values: Optional[List[Any]] = None,
+    formula_template: Optional[str] = None,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Insert a new column at a 1-indexed column position, shifting subsequent columns right.
+    Optionally populates a header, row values, or formulas (e.g. '=B{row}*C{row}').
+
+    Args:
+        file_path: Path to Excel workbook.
+        col_index: 1-indexed column position (e.g. 2 for Column B).
+        col_idx: Alias for col_index.
+        sheet_name: Sheet name or index.
+        header_name: Optional header text for row 1.
+        header: Alias for header_name.
+        values: Optional list of values for subsequent data rows (starting at row 2).
+        formula_template: Optional formula template with {row} placeholder (e.g. '=B{row}*C{row}').
+        output_path: Optional destination path.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    target_col = col_index if col_index is not None else col_idx
+    if target_col is None:
+        raise ValueError("Either 'col_index' or 'col_idx' must be provided.")
+    target_header = header_name if header_name is not None else header
+
+    wb = openpyxl.load_workbook(file_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    ws.insert_cols(target_col, amount=1)
+
+    if target_header is not None:
+        ws.cell(row=1, column=target_col, value=str(target_header))
+
+    if values:
+        for idx, val in enumerate(values):
+            ws.cell(row=idx + 2, column=target_col, value=_clean_val(val))
+
+    if formula_template:
+        max_r = ws.max_row
+        for r in range(2, max_r + 1):
+            f_str = formula_template.format(row=r)
+            ws.cell(row=r, column=target_col, value=f_str)
+
+    save_path = output_path or file_path
+    _safe_save_workbook(wb, save_path)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_path,
+        "sheet_name": ws.title,
+        "column_inserted_index": target_col,
+        "column_letter": get_column_letter(target_col),
+        "header_name": target_header,
+        "total_columns": ws.max_column
+    }
+
+
+@mcp.tool()
+def delete_column(
+    file_path: str,
+    col_identifier: Union[int, str],
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Delete a column from a worksheet by 1-indexed column number, column letter ('C'), or header name.
+    Subsequent columns shift left automatically.
+
+    Args:
+        file_path: Path to Excel workbook.
+        col_identifier: 1-indexed column index (e.g. 3), column letter (e.g. 'C'), or header name (e.g. 'Unit Cost').
+        sheet_name: Sheet name or index.
+        output_path: Optional destination path.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    target_idx = None
+    if isinstance(col_identifier, int) or (isinstance(col_identifier, str) and col_identifier.isdigit()):
+        target_idx = int(col_identifier)
+    elif isinstance(col_identifier, str):
+        c_str = col_identifier.strip()
+        if len(c_str) <= 3 and c_str.isalpha():
+            target_idx = column_index_from_string(c_str.upper())
+        else:
+            # Search row 1 headers
+            for c_idx in range(1, ws.max_column + 1):
+                val = ws.cell(row=1, column=c_idx).value
+                if val is not None and str(val).strip().lower() == c_str.lower():
+                    target_idx = c_idx
+                    break
+
+    if not target_idx or target_idx < 1 or target_idx > ws.max_column:
+        wb.close()
+        raise ValueError(f"Could not resolve column '{col_identifier}' in sheet '{ws.title}'.")
+
+    col_letter_deleted = get_column_letter(target_idx)
+    ws.delete_cols(target_idx, amount=1)
+
+    save_path = output_path or file_path
+    _safe_save_workbook(wb, save_path)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_path,
+        "sheet_name": ws.title,
+        "deleted_column_index": target_idx,
+        "deleted_column_letter": col_letter_deleted,
+        "remaining_columns": ws.max_column
+    }
+
+
+@mcp.tool()
+def insert_rows(
+    file_path: str,
+    row_index: Optional[int] = None,
+    row_idx: Optional[int] = None,
+    amount: int = 1,
+    count: Optional[int] = None,
+    sheet_name: Optional[str] = None,
+    data: Optional[List[List[Any]]] = None,
+    rows_data: Optional[List[List[Any]]] = None,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Insert one or more blank or populated rows starting at a 1-indexed row position.
+    Subsequent rows are shifted down automatically.
+
+    Args:
+        file_path: Path to Excel workbook.
+        row_index: 1-indexed row position where rows will be inserted.
+        row_idx: Alias for row_index.
+        amount: Number of rows to insert (default 1).
+        count: Alias for amount.
+        sheet_name: Sheet name or index.
+        data: Optional list of row lists containing values to write into inserted rows.
+        rows_data: Alias for data.
+        output_path: Optional destination path.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    target_row = row_index if row_index is not None else row_idx
+    if target_row is None:
+        raise ValueError("Either 'row_index' or 'row_idx' must be provided.")
+    row_data = data or rows_data
+    num_rows = len(row_data) if row_data else (count if count is not None else max(1, amount))
+
+    wb = openpyxl.load_workbook(file_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    ws.insert_rows(target_row, amount=num_rows)
+
+    if row_data:
+        for r_offset, row_vals in enumerate(row_data):
+            for c_idx, val in enumerate(row_vals):
+                ws.cell(row=target_row + r_offset, column=c_idx + 1, value=_clean_val(val))
+
+    save_path = output_path or file_path
+    _safe_save_workbook(wb, save_path)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_path,
+        "sheet_name": ws.title,
+        "inserted_at_row": target_row,
+        "rows_inserted_count": num_rows,
+        "total_rows": ws.max_row
+    }
+
+
+@mcp.tool()
+def delete_rows(
+    file_path: str,
+    row_index: Optional[int] = None,
+    row_idx: Optional[int] = None,
+    amount: int = 1,
+    count: Optional[int] = None,
+    sheet_name: Optional[str] = None,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Delete one or more rows from a worksheet by 1-indexed row number.
+    Subsequent rows shift up automatically.
+
+    Args:
+        file_path: Path to Excel workbook.
+        row_index: 1-indexed row number to delete.
+        row_idx: Alias for row_index.
+        amount: Number of consecutive rows to delete (default 1).
+        count: Alias for amount.
+        sheet_name: Sheet name or index.
+        output_path: Optional destination path.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    target_row = row_index if row_index is not None else row_idx
+    if target_row is None:
+        raise ValueError("Either 'row_index' or 'row_idx' must be provided.")
+    num_rows = count if count is not None else max(1, amount)
+
+    wb = openpyxl.load_workbook(file_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    ws.delete_rows(target_row, amount=num_rows)
+
+    save_path = output_path or file_path
+    _safe_save_workbook(wb, save_path)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_path,
+        "sheet_name": ws.title,
+        "deleted_start_row": target_row,
+        "deleted_rows_count": num_rows,
+        "remaining_rows": ws.max_row
+    }
+
+
+@mcp.tool()
+def merge_cells(
+    file_path: str,
+    range_address: str,
+    sheet_name: Optional[str] = None,
+    value: Optional[Any] = None,
+    alignment: Optional[Dict[str, str]] = None,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Merge a rectangular cell range (e.g. 'A1:D1') with optional text and center/middle alignment.
+
+    Args:
+        file_path: Path to Excel workbook.
+        range_address: Rectangular range string (e.g. 'B2:E2').
+        sheet_name: Sheet name or index.
+        value: Optional value to assign to the top-left merged anchor cell.
+        alignment: Optional dict e.g. {'horizontal': 'center', 'vertical': 'center', 'wrap_text': True}.
+        output_path: Optional destination path.
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    wb = openpyxl.load_workbook(file_path)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+    ws.merge_cells(range_address)
+    min_col, min_row, _, _ = range_boundaries(range_address)
+    top_left_cell = ws.cell(row=min_row, column=min_col)
+
+    if value is not None:
+        top_left_cell.value = value
+
+    if alignment:
+        top_left_cell.alignment = Alignment(
+            horizontal=alignment.get("horizontal", "center"),
+            vertical=alignment.get("vertical", "center"),
+            wrap_text=alignment.get("wrap_text", False)
+        )
+
+    save_path = output_path or file_path
+    _safe_save_workbook(wb, save_path)
+    wb.close()
+
+    return {
+        "status": "success",
+        "file_path": file_path,
+        "saved_path": save_path,
+        "sheet_name": ws.title,
+        "merged_range": range_address.upper(),
+        "anchor_cell": top_left_cell.coordinate,
+        "value": value
+    }
+
+
+@mcp.tool()
+def diff_workbooks(
+    file_path_a: str,
+    file_path_b: str,
+    sheet_name: Optional[str] = None,
+    key_column: Optional[str] = None,
+    numeric_tolerance: float = 0.001,
+    output_report_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Deterministically compare two Excel workbooks cell-by-cell or row-by-row on a key column.
+    Reports added sheets, missing sheets, altered cell coordinates, and value diffs.
+
+    Args:
+        file_path_a: Baseline Excel file path.
+        file_path_b: Comparison Excel file path.
+        sheet_name: Specific sheet name to compare (if omitted, compares all shared sheets).
+        key_column: Optional header column to align rows on instead of absolute coordinates.
+        numeric_tolerance: Maximum numeric difference threshold considered identical (default 0.001).
+        output_report_path: Optional path to write a visual styled diff workbook.
+    """
+    p_a = Path(file_path_a).resolve()
+    p_b = Path(file_path_b).resolve()
+    if not p_a.exists():
+        raise FileNotFoundError(f"File not found: {p_a}")
+    if not p_b.exists():
+        raise FileNotFoundError(f"File not found: {p_b}")
+
+    xl_a = pd.ExcelFile(p_a)
+    xl_b = pd.ExcelFile(p_b)
+    try:
+        sheets_a = set(xl_a.sheet_names)
+        sheets_b = set(xl_b.sheet_names)
+
+        shared_sheets = [sheet_name] if sheet_name else [s for s in xl_a.sheet_names if s in sheets_b]
+        sheets_only_in_a = list(sheets_a - sheets_b)
+        sheets_only_in_b = list(sheets_b - sheets_a)
+
+        all_diffs = []
+        total_mismatches = 0
+
+        for s in shared_sheets:
+            df_a = xl_a.parse(s)
+            df_b = xl_b.parse(s)
+
+            df_a.columns = [str(c).strip() for c in df_a.columns]
+            df_b.columns = [str(c).strip() for c in df_b.columns]
+
+            if key_column and key_column in df_a.columns and key_column in df_b.columns:
+                # Key-based comparison
+                merged = pd.merge(df_a, df_b, on=key_column, how="outer", suffixes=("_a", "_b"), indicator=True)
+                shared_cols = [c for c in df_a.columns if c in df_b.columns and c != key_column]
+
+                for _, row in merged[merged["_merge"] == "both"].iterrows():
+                    for col in shared_cols:
+                        v_a = row.get(f"{col}_a")
+                        v_b = row.get(f"{col}_b")
+                        if pd.isna(v_a) and pd.isna(v_b):
+                            continue
+                        if isinstance(v_a, (int, float)) and isinstance(v_b, (int, float)) and not isinstance(v_a, bool) and not isinstance(v_b, bool):
+                            if abs(float(v_a) - float(v_b)) > numeric_tolerance:
+                                all_diffs.append({
+                                    "sheet": s,
+                                    "key": row[key_column],
+                                    "field": col,
+                                    "value_a": _clean_val(v_a),
+                                    "value_b": _clean_val(v_b),
+                                    "delta": round(float(v_b) - float(v_a), 4)
+                                })
+                                total_mismatches += 1
+                        elif str(v_a).strip() != str(v_b).strip():
+                            all_diffs.append({
+                                "sheet": s,
+                                "key": row[key_column],
+                                "field": col,
+                                "value_a": _clean_val(v_a),
+                                "value_b": _clean_val(v_b),
+                                "delta": None
+                            })
+                            total_mismatches += 1
+            else:
+                # Coordinate-based cell comparison
+                max_r = max(len(df_a), len(df_b))
+                shared_cols = [c for c in df_a.columns if c in df_b.columns]
+
+                for r_idx in range(max_r):
+                    for col in shared_cols:
+                        v_a = df_a.iloc[r_idx][col] if r_idx < len(df_a) else None
+                        v_b = df_b.iloc[r_idx][col] if r_idx < len(df_b) else None
+                        if pd.isna(v_a) and pd.isna(v_b):
+                            continue
+                        if isinstance(v_a, (int, float)) and isinstance(v_b, (int, float)) and not isinstance(v_a, bool) and not isinstance(v_b, bool):
+                            if abs(float(v_a) - float(v_b)) > numeric_tolerance:
+                                all_diffs.append({
+                                    "sheet": s,
+                                    "row": r_idx + 2,
+                                    "column": col,
+                                    "value_a": _clean_val(v_a),
+                                    "value_b": _clean_val(v_b),
+                                    "delta": round(float(v_b) - float(v_a), 4)
+                                })
+                                total_mismatches += 1
+                        elif str(v_a).strip() != str(v_b).strip():
+                            all_diffs.append({
+                                "sheet": s,
+                                "row": r_idx + 2,
+                                "column": col,
+                                "value_a": _clean_val(v_a),
+                                "value_b": _clean_val(v_b),
+                                "delta": None
+                            })
+                            total_mismatches += 1
+
+        report_path = None
+        if output_report_path and all_diffs:
+            out_p = Path(output_report_path).resolve()
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            diff_df = pd.DataFrame(all_diffs)
+            with pd.ExcelWriter(out_p, engine="openpyxl") as writer:
+                diff_df.to_excel(writer, sheet_name="Differences", index=False)
+            report_path = str(out_p)
+
+        return {
+            "status": "success",
+            "file_a": str(p_a),
+            "file_b": str(p_b),
+            "sheets_only_in_a": sheets_only_in_a,
+            "sheets_only_in_b": sheets_only_in_b,
+            "shared_sheets_audited": shared_sheets,
+            "total_differences_count": total_mismatches,
+            "sample_differences": all_diffs[:20],
+            "diff_report_file": report_path
+        }
+    finally:
+        try:
+            xl_a.close()
+        except Exception:
+            pass
+        try:
+            xl_b.close()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     mcp.run()
+

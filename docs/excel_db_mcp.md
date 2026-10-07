@@ -64,6 +64,19 @@
 ### 5. `db_to_excel_template`
 * **Purpose:** Inject database query outputs into pre-designed Excel template files, preserving charts, pivot tables, and corporate styling.
 
+### 6. `compare_master_datasets` (Deterministic Reconciliation Engine)
+* **Purpose:** Compare two master datasets (Excel vs Excel, DB vs Excel, or DB vs DB) with column mapping and numeric tolerance.
+* **Outputs:** Multi-tab styled audit workbook (`Audit Overview`, `Field Differences`, `New Records`, `Missing Records`).
+
+### 7. `generate_master_migration_plan` (Safe SQL Generator)
+* **Purpose:** Generate atomic, transactional PostgreSQL/MySQL UPSERT migration SQL from an Excel master with foreign key pre-flight validation.
+
+### 8. `sync_master_to_db` (Safe Transactional Synchronizer)
+* **Purpose:** Synchronize master data directly against database with `dry_run=True` simulation ensuring constraint verification before committing.
+
+### 9. `py_template_pipeline` (Python Multi-Table Template Constructor)
+* **Purpose:** Execute custom Python/Pandas logic over database queries or spreadsheets to split data into multiple DataFrames (e.g. Materials Summary + Serialized Inventory) and populate styled tables into an Excel template.
+
 ---
 
 ## 📁 Package Layout in Monorepo

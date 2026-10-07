@@ -1,13 +1,16 @@
 # mcp-win-stdio-excel
 
-Windows-native **Model Context Protocol (MCP)** server for Microsoft Excel: 34 tools combining high-speed Pandas querying, OpenPyXL bulk write & editing, professional styling & conditional formatting, charts, data cleaning, transformations, RapidFuzz reconciliation, and native Windows Excel COM automation.
+Windows-native **Model Context Protocol (MCP)** server for Microsoft Excel: 44 tools combining high-speed Pandas querying, OpenPyXL bulk write & editing, native Excel Tables (`ListObject`), column/row structural mutations, cell merging, professional styling & conditional formatting, charts, data cleaning, transformations, RapidFuzz reconciliation, diff auditor, and native Windows Excel COM automation.
 
 Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🚀 Features (34 Tools)
+## 🚀 Features (44 Tools)
 
+- **Native Excel Tables (`ListObject`)**: Create named, styled tables (`create_table`) with auto-filters and list all tables across sheets (`list_tables`).
+- **Structural Row & Column Mutations**: Insert/delete columns with dynamic formula templates (`insert_column`, `delete_column`), insert/delete rows (`insert_rows`, `delete_rows`), and merge cell ranges (`merge_cells`).
+- **Deterministic Workbook Diffing**: Compare two workbooks cell-by-cell or key-aligned with numeric tolerance (`diff_workbooks`).
 - **Vectorized Data Queries**: High-speed Pandas slicing, filtering, and aggregation on large spreadsheets (`query_rows`, `query_excel_sql`).
 - **Bulk 2D Matrix Writing**: High-efficiency table writes (`write_range`) with automatic leftover row cleanup (`clear_subsequent_rows=True`).
 - **Professional Cell Styling & Layout**: Apply fonts, hex colors, fills, borders, text wrapping, and currency/percent/date formats (`format_cells`).
@@ -22,9 +25,10 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🛠️ Included Tools (34 Tools)
+## 🛠️ Included Tools (44 Tools)
 
-* **Inspection**: `get_workbook_info`, `preview_sheet`, `get_column_values`, `compare_column_values`, `summarize_column`, `search_text`, `profile_sheet`.
+* **Inspection**: `get_workbook_info`, `preview_sheet`, `get_column_values`, `compare_column_values`, `summarize_column`, `search_text`, `profile_sheet`, `list_tables`.
+* **Structural & Tables**: `create_table`, `insert_column`, `delete_column`, `insert_rows`, `delete_rows`, `merge_cells`, `diff_workbooks`.
 * **Querying & Slices**: `query_rows` (Pandas vectorized expressions), `read_range`, `query_excel_sql` (in-memory SQLite queries).
 * **Editing & Export**: `create_workbook`, `append_rows`, `write_range` (bulk 2D write), `update_cells` (values + inline styles), `add_sheet`, `rename_sheet`, `delete_sheet`, `export_to_csv`, `export_to_json`, `audit_formulas`, `search_and_replace_cells`.
 * **Styling & Layout**: `format_cells`, `apply_conditional_formatting`, `set_sheet_layout_and_freeze`.

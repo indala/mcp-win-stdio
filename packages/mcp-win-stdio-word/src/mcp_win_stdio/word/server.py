@@ -17,7 +17,7 @@ except (ImportError, ModuleNotFoundError):
 import docx
 from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.shared import Inches, Pt, Cm
+from docx.shared import Inches, Pt, Cm, RGBColor
 from docx.oxml.ns import nsmap
 
 # Register namespaces
@@ -1307,6 +1307,416 @@ def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[
     except Exception as e:
         return {"error": str(e)}
 
+
+
+
+@mcp.tool()
+def create_document(
+    file_path: str,
+    title: Optional[str] = None,
+    author: Optional[str] = None,
+    paper_size: str = "A4",
+    orientation: str = "portrait",
+    margin_inches: float = 1.0,
+    overwrite: bool = True
+) -> Dict[str, Any]:
+    """
+    Create a new empty Microsoft Word (.docx) document with custom page setup, margins, and metadata.
+    
+    Args:
+        file_path: Path to the new .docx file to create.
+        title: Optional document title to set in core metadata and insert as Title heading.
+        author: Optional author name to set in core metadata.
+        paper_size: 'A4' (default), 'Letter', 'Legal', or 'A3'.
+        orientation: 'portrait' (default) or 'landscape'.
+        margin_inches: Margins on all sides in inches (default: 1.0).
+        overwrite: Whether to overwrite if the file already exists (default: True).
+    """
+    try:
+        abs_path = os.path.abspath(file_path.strip('"\''))
+        if os.path.exists(abs_path) and not overwrite:
+            return {"error": f"File already exists: {abs_path}. Set overwrite=True to replace it."}
+
+        os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+        doc = docx.Document()
+        section = doc.sections[0]
+
+        # Page size
+        p_size = paper_size.upper().strip()
+        if p_size == "LETTER":
+            w, h = Inches(8.5), Inches(11.0)
+        elif p_size == "LEGAL":
+            w, h = Inches(8.5), Inches(14.0)
+        elif p_size == "A3":
+            w, h = Inches(11.69), Inches(16.54)
+        else:
+            w, h = Inches(8.27), Inches(11.69)
+
+        if orientation.lower() == "landscape":
+            section.orientation = WD_ORIENT.LANDSCAPE
+            section.page_width = max(w, h)
+            section.page_height = min(w, h)
+        else:
+            section.orientation = WD_ORIENT.PORTRAIT
+            section.page_width = min(w, h)
+            section.page_height = max(w, h)
+
+        section.top_margin = Inches(margin_inches)
+        section.bottom_margin = Inches(margin_inches)
+        section.left_margin = Inches(margin_inches)
+        section.right_margin = Inches(margin_inches)
+
+        if author:
+            doc.core_properties.author = author
+        if title:
+            doc.core_properties.title = title
+            doc.add_heading(title, level=0)
+
+        doc.save(abs_path)
+        return {
+            "status": "success",
+            "file_path": abs_path,
+            "title": title,
+            "paper_size": paper_size,
+            "orientation": orientation,
+            "margin_inches": margin_inches,
+            "file_size_bytes": os.path.getsize(abs_path)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def add_paragraph(
+    file_path: str,
+    text: str,
+    style: Optional[str] = None,
+    font_name: Optional[str] = None,
+    font_size_pt: Optional[float] = None,
+    bold: bool = False,
+    italic: bool = False,
+    underline: bool = False,
+    color_hex: Optional[str] = None,
+    alignment: Optional[str] = None,
+    space_before_pt: Optional[float] = None,
+    space_after_pt: Optional[float] = None,
+    line_spacing: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Append a styled paragraph to a Word document.
+    
+    Args:
+        file_path: Path to the .docx document.
+        text: Paragraph text content.
+        style: Built-in style name (e.g. 'Normal', 'List Bullet', 'List Number', 'Quote').
+        font_name: Font family name (e.g. 'Calibri', 'Times New Roman', 'Arial').
+        font_size_pt: Font size in points (e.g. 11, 12, 14).
+        bold: Whether text is bold.
+        italic: Whether text is italic.
+        underline: Whether text is underlined.
+        color_hex: Text hex color code without '#' (e.g. '002060', 'C00000').
+        alignment: 'left', 'center', 'right', or 'justify'.
+        space_before_pt: Paragraph spacing before in points.
+        space_after_pt: Paragraph spacing after in points.
+        line_spacing: Line spacing multiple (e.g. 1.0, 1.15, 1.5, 2.0).
+    """
+    try:
+        doc = load_document(file_path)
+        p = doc.add_paragraph(style=style) if style else doc.add_paragraph()
+        run = p.add_run(text)
+
+        if font_name:
+            run.font.name = font_name
+        if font_size_pt:
+            run.font.size = Pt(font_size_pt)
+        if bold:
+            run.bold = True
+        if italic:
+            run.italic = True
+        if underline:
+            run.underline = True
+        if color_hex:
+            clean_hex = color_hex.lstrip("#")
+            if len(clean_hex) == 6:
+                r, g, b = int(clean_hex[0:2], 16), int(clean_hex[2:4], 16), int(clean_hex[4:6], 16)
+                run.font.color.rgb = RGBColor(r, g, b)
+
+        if alignment:
+            align_map = {
+                "center": WD_ALIGN_PARAGRAPH.CENTER,
+                "right": WD_ALIGN_PARAGRAPH.RIGHT,
+                "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+                "left": WD_ALIGN_PARAGRAPH.LEFT
+            }
+            if alignment.lower() in align_map:
+                p.alignment = align_map[alignment.lower()]
+
+        pf = p.paragraph_format
+        if space_before_pt is not None:
+            pf.space_before = Pt(space_before_pt)
+        if space_after_pt is not None:
+            pf.space_after = Pt(space_after_pt)
+        if line_spacing is not None:
+            pf.line_spacing = line_spacing
+
+        clean_path = os.path.abspath(file_path.strip('"\''))
+        doc.save(clean_path)
+        return {
+            "status": "success",
+            "file_path": clean_path,
+            "paragraph_index": len(doc.paragraphs) - 1,
+            "text_length": len(text)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def add_heading(
+    file_path: str,
+    text: str,
+    level: int = 1
+) -> Dict[str, Any]:
+    """
+    Append a heading (level 1-9) or Title (level 0) to a Word document.
+    
+    Args:
+        file_path: Path to the .docx document.
+        text: Heading text content.
+        level: Heading level from 0 (Title) to 9 (default: 1).
+    """
+    try:
+        doc = load_document(file_path)
+        safe_level = max(0, min(9, int(level)))
+        doc.add_heading(text, level=safe_level)
+        clean_path = os.path.abspath(file_path.strip('"\''))
+        doc.save(clean_path)
+        return {
+            "status": "success",
+            "file_path": clean_path,
+            "heading": text,
+            "level": safe_level
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def fill_template(
+    template_path: str,
+    output_path: str,
+    replacements: Dict[str, str]
+) -> Dict[str, Any]:
+    """
+    Populate a Word document template by replacing placeholder tags (e.g. {{client_name}}, {{date}}, {{total_amount}})
+    across body paragraphs, tables, headers, and footers while preserving styles.
+    
+    Args:
+        template_path: Path to the source .docx template file.
+        output_path: Destination path for the populated .docx file.
+        replacements: Key-value dictionary of placeholders to replacement strings (e.g. {"{{client_name}}": "Acme Inc"}).
+    """
+    try:
+        doc = load_document(template_path)
+        total_replaced = 0
+
+        def replace_in_p(p):
+            nonlocal total_replaced
+            for old_token, new_val in replacements.items():
+                if old_token in p.text:
+                    replaced_in_runs = False
+                    for run in p.runs:
+                        if old_token in run.text:
+                            run.text = run.text.replace(old_token, str(new_val))
+                            replaced_in_runs = True
+                            total_replaced += 1
+                    if not replaced_in_runs and old_token in p.text:
+                        p.text = p.text.replace(old_token, str(new_val))
+                        total_replaced += 1
+
+        for p in doc.paragraphs:
+            replace_in_p(p)
+
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        replace_in_p(p)
+
+        for sec in doc.sections:
+            for h in (sec.header, sec.first_page_header, sec.even_page_header):
+                if h:
+                    for p in h.paragraphs:
+                        replace_in_p(p)
+            for f in (sec.footer, sec.first_page_footer, sec.even_page_footer):
+                if f:
+                    for p in f.paragraphs:
+                        replace_in_p(p)
+
+        dest = os.path.abspath(output_path.strip('"\''))
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        doc.save(dest)
+        return {
+            "status": "success",
+            "template_path": os.path.abspath(template_path),
+            "output_path": dest,
+            "placeholders_count": len(replacements),
+            "total_replacements_applied": total_replaced
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def replace_text(
+    file_path: str,
+    search_text: str,
+    replace_text: str,
+    match_case: bool = False,
+    output_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Find and replace text across the entire Word document (paragraphs and tables).
+    
+    Args:
+        file_path: Path to the .docx document.
+        search_text: Substring to find.
+        replace_text: Replacement substring.
+        match_case: Whether to match case sensitive (default: False).
+        output_path: Optional output path (overwrites file_path if omitted).
+    """
+    try:
+        doc = load_document(file_path)
+        replacements_count = 0
+        flags = 0 if match_case else re.IGNORECASE
+        pattern = re.compile(re.escape(search_text), flags)
+
+        def do_replace(p):
+            nonlocal replacements_count
+            if pattern.search(p.text):
+                count_in_p = len(pattern.findall(p.text))
+                p.text = pattern.sub(replace_text, p.text)
+                replacements_count += count_in_p
+
+        for p in doc.paragraphs:
+            do_replace(p)
+
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        do_replace(p)
+
+        dest = os.path.abspath((output_path or file_path).strip('"\''))
+        doc.save(dest)
+        return {
+            "status": "success",
+            "file_path": dest,
+            "search_text": search_text,
+            "occurrences_replaced": replacements_count
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def insert_image(
+    file_path: str,
+    image_path: str,
+    width_inches: Optional[float] = None,
+    height_inches: Optional[float] = None,
+    caption: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Insert an image into a Word document with optional scaling and caption.
+    
+    Args:
+        file_path: Path to the target .docx document.
+        image_path: Path to the image file (.png, .jpg, .jpeg, etc.).
+        width_inches: Image width in inches (preserves aspect ratio if height omitted).
+        height_inches: Image height in inches (preserves aspect ratio if width omitted).
+        caption: Optional caption text placed below the image.
+    """
+    try:
+        clean_img = os.path.abspath(image_path.strip('"\''))
+        if not os.path.exists(clean_img):
+            return {"error": f"Image file not found: {clean_img}"}
+
+        doc = load_document(file_path)
+        w = Inches(width_inches) if width_inches else None
+        h = Inches(height_inches) if height_inches else None
+
+        doc.add_picture(clean_img, width=w, height=h)
+        if caption:
+            p = doc.add_paragraph(caption, style="Caption")
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        dest = os.path.abspath(file_path.strip('"\''))
+        doc.save(dest)
+        return {
+            "status": "success",
+            "file_path": dest,
+            "image_path": clean_img,
+            "width_inches": width_inches,
+            "height_inches": height_inches,
+            "caption": caption
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def export_to_pdf(
+    file_path: str,
+    output_pdf_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Export a Microsoft Word document (.docx) to a high-fidelity PDF file using Windows Word COM automation.
+    
+    Args:
+        file_path: Path to the source .docx file.
+        output_pdf_path: Optional destination path for the .pdf file (defaults to same name with .pdf extension).
+    """
+    try:
+        abs_docx = os.path.abspath(file_path.strip('"\''))
+        if not os.path.exists(abs_docx):
+            return {"error": f"Source document not found: {abs_docx}"}
+
+        if output_pdf_path:
+            abs_pdf = os.path.abspath(output_pdf_path.strip('"\''))
+        else:
+            abs_pdf = os.path.splitext(abs_docx)[0] + ".pdf"
+
+        os.makedirs(os.path.dirname(abs_pdf), exist_ok=True)
+
+        try:
+            import win32com.client
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = False
+            try:
+                wdoc = word.Documents.Open(abs_docx)
+                wdoc.SaveAs2(abs_pdf, FileFormat=17) # 17 = wdFormatPDF
+                wdoc.Close(False)
+            finally:
+                word.Quit()
+        except Exception as com_err:
+            try:
+                docx2pdf = __import__("docx2pdf")
+                docx2pdf.convert(abs_docx, abs_pdf)
+            except Exception as d2p_err:
+                return {
+                    "error": f"Failed to export PDF via Word COM: {com_err}. Ensure Microsoft Word is installed."
+                }
+
+        return {
+            "status": "success",
+            "source_docx": abs_docx,
+            "output_pdf": abs_pdf,
+            "pdf_size_bytes": os.path.getsize(abs_pdf)
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":

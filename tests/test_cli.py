@@ -38,15 +38,15 @@ def test_discovery():
     assert "rag" in servers
     assert "excel-db" in servers
 
-    assert servers["excel"]["tools_count"] == 36
-    assert servers["word"]["tools_count"] == 13
+    assert servers["excel"]["tools_count"] == 44
+    assert servers["word"]["tools_count"] == 20
     assert servers["explorer"]["tools_count"] == 14
     assert servers["tsc"]["tools_count"] == 8
-    assert servers["db"]["tools_count"] == 25
+    assert servers["db"]["tools_count"] == 31
     assert servers["git"]["tools_count"] == 46
     assert servers["ssh"]["tools_count"] == 34
     assert servers["rag"]["tools_count"] == 8
-    assert servers["excel-db"]["tools_count"] == 5
+    assert servers["excel-db"]["tools_count"] == 9
     print("[PASS] Discovery test passed for all 9 servers.")
 
 
@@ -124,10 +124,63 @@ def test_updater():
     print("[PASS] Updater tests passed.")
 
 
+def test_project_setup_and_migration(tmp_path):
+    import json
+    from mcp_win_stdio.cli import setup_project_mcp, remove_project_mcp
+
+    # 1. Simulate legacy .vscode/mcp.json existing in project
+    legacy_vscode_dir = tmp_path / ".vscode"
+    legacy_vscode_dir.mkdir(parents=True, exist_ok=True)
+    legacy_file = legacy_vscode_dir / "mcp.json"
+    with open(legacy_file, "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": {"custom-legacy-tool": {"command": "node", "args": ["index.js"]}}}, f)
+
+    assert legacy_file.exists()
+
+    # 2. Run setup_project_mcp
+    res = setup_project_mcp(["excel", "db"], target_dir=tmp_path)
+    assert res["migrated_from_legacy_vscode"] is True
+
+    # 3. Verify root .mcp.json created and contains both migrated and newly configured servers
+    root_mcp = tmp_path / ".mcp.json"
+    assert root_mcp.exists()
+    with open(root_mcp, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    servers = data.get("mcpServers", {})
+    assert "custom-legacy-tool" in servers
+    assert "excel" in servers
+    assert "db" in servers
+
+    # 4. Verify deprecated .vscode/mcp.json was cleaned up
+    assert not legacy_file.exists()
+    assert not legacy_vscode_dir.exists()
+
+    # 5. Verify AGENTS.md was created
+    agents_md = tmp_path / "AGENTS.md"
+    assert agents_md.exists()
+    content = agents_md.read_text(encoding="utf-8")
+    assert "Excel" in content
+    assert "Database" in content
+
+    # 6. Test remove_project_mcp
+    remove_res = remove_project_mcp(["excel"], target_dir=tmp_path)
+    assert "excel" not in remove_res["servers"]
+    with open(root_mcp, "r", encoding="utf-8") as f:
+        data_after = json.load(f)
+    assert "excel" not in data_after.get("mcpServers", {})
+    assert "db" in data_after.get("mcpServers", {})
+    assert "custom-legacy-tool" in data_after.get("mcpServers", {})
+    print("[PASS] Project setup and migration test passed.")
+
+
 if __name__ == "__main__":
+    import tempfile
     test_discovery()
     test_guides()
     test_dashboard()
     test_all_servers_import()
     test_updater()
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        test_project_setup_and_migration(Path(tmp_dir))
     print("ALL TESTS PASSED!")
+

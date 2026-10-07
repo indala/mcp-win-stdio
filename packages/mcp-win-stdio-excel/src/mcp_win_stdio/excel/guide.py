@@ -7,12 +7,12 @@ EXCEL_GUIDE = """
 # EXCEL MCP (WINDOWS NATIVE + PANDAS) - USER & LLM GUIDE
 # ================================================================
 
-The Excel MCP server provides 34 specialized tools for programmatic
-reading, updating, bulk writing, styling, formatting, chart generation, data hygiene,
-grouping/aggregation, fuzzy reconciling, and automating Excel workbooks on Windows.
+The Excel MCP server provides 44 specialized tools for programmatic
+reading, updating, bulk writing, styling, formatting, native Excel Tables, row/col mutations,
+chart generation, data hygiene, grouping/aggregation, fuzzy reconciling, and automating Excel workbooks on Windows.
 
 ----------------------------------------------------------------
-1. TOOL SUMMARY (34 TOOLS)
+1. TOOL SUMMARY (44 TOOLS)
 ----------------------------------------------------------------
 * Read & Inspect:
   - get_workbook_info(file_path): Sheet names, dimensions, cell counts.
@@ -25,6 +25,16 @@ grouping/aggregation, fuzzy reconciling, and automating Excel workbooks on Windo
   - search_text(file_path, sheet_name, search_term): Keyword search.
   - profile_sheet(file_path, sheet_name): Data profiling and null audit.
   - query_excel_sql(file_path, query, sheet_name): In-memory SQLite queries.
+  - list_tables(file_path, sheet_name): List all native Excel ListObjects with boundaries.
+
+* Native Tables & Structural Mutations:
+  - create_table(file_path, sheet_name, range_address, table_name, style): Convert range to native styled Table.
+  - insert_column(file_path, sheet_name, col_idx, header, values, formula_template): Insert column with dynamic formulas.
+  - delete_column(file_path, sheet_name, col_identifier): Delete column by index, letter, or header name.
+  - insert_rows(file_path, sheet_name, row_idx, rows_data, num_rows): Insert blank or populated rows.
+  - delete_rows(file_path, sheet_name, row_idx, count): Delete rows shifting data up.
+  - merge_cells(file_path, sheet_name, range_address, value, alignment): Merge cell range with formatting.
+  - diff_workbooks(wb1_path, wb2_path, ...): Cell-by-cell or key-aligned diff between two workbooks.
 
 * Edit & Manage:
   - create_workbook(file_path, sheet_name, data): Create xlsx.
