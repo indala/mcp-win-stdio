@@ -6,6 +6,7 @@ for p in Path("packages").glob("*/src"):
     sys.path.insert(0, str(p.resolve()))
 sys.path.insert(0, os.path.abspath("src"))
 import json
+import tempfile
 import decimal
 import uuid
 from datetime import datetime, date, time
@@ -563,6 +564,7 @@ def test_ssh_tools():
 
 def test_db_server_database_confusion():
     """Test that DB MCP seamlessly resolves aliases when server, connection, database, or name are used."""
+    import mcp_win_stdio.db.server as db_server
     from mcp_win_stdio.db.server import (
         _RAW_CONFIG,
         _CONNECTION_REGISTRY,
@@ -570,6 +572,12 @@ def test_db_server_database_confusion():
         _resolve_conn,
         use_database,
     )
+    old_active = db_server._ACTIVE_CONNECTION
+    old_env = os.environ.get("CONFIG_FILE")
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+        temp_cfg = tf.name
+    os.environ["CONFIG_FILE"] = temp_cfg
+
     # Simulate user configuring showreel server with showreel database
     _RAW_CONFIG["showreel"] = "postgresql://postgres:pass@localhost:5432/showreel"
     _RAW_CONFIG["analytics_server"] = "postgresql://postgres:pass@remote:5432/metrics_db"
@@ -624,6 +632,35 @@ def test_db_server_database_confusion():
         _RAW_CONFIG.pop("analytics_server", None)
         _CONNECTION_REGISTRY.pop("showreel", None)
         _CONNECTION_REGISTRY.pop("analytics_server", None)
+        if old_env is None:
+            os.environ.pop("CONFIG_FILE", None)
+        else:
+            os.environ["CONFIG_FILE"] = old_env
+        db_server._ACTIVE_CONNECTION = old_active
+        if os.path.exists(temp_cfg):
+            try:
+                os.remove(temp_cfg)
+            except Exception:
+                pass
+
+
+def test_schema_overview_and_compact_with_all_schemas():
+    """Test that compact_schema_overview and schema_overview handle schema='all' without tuple index out of range."""
+    from mcp_win_stdio.db.server import compact_schema_overview, schema_overview, _get_connection, _resolve_conn
+    try:
+        _get_connection(_resolve_conn(None, None))
+    except Exception:
+        pytest.skip("No active database connection available for live test")
+
+    res_compact = compact_schema_overview(schema="all")
+    assert res_compact.get("error") is not True, f"compact_schema_overview failed: {res_compact}"
+    assert "compactSummary" in res_compact
+    assert isinstance(res_compact["compactSummary"], list)
+
+    res_overview = schema_overview(schema="all")
+    assert res_overview.get("error") is not True, f"schema_overview failed: {res_overview}"
+    assert "tables" in res_overview
+    assert isinstance(res_overview["tables"], list)
 
 
 def test_tsc_filter_improvements():

@@ -1071,7 +1071,10 @@ def schema_overview(
                         sql += " AND n.nspname = %s"
                         params.append(schema or "public")
                     sql += " ORDER BY n.nspname, c.relname;"
-                    cur.execute(sql, tuple(params))
+                    if params:
+                        cur.execute(sql, tuple(params))
+                    else:
+                        cur.execute(sql)
                     rows = cur.fetchall()
 
                     has_more = len(rows) > safe_max
@@ -1162,7 +1165,10 @@ def compact_schema_overview(
                         sql += " AND n.nspname = %s"
                         params.append(schema or "public")
                     sql += " ORDER BY n.nspname, c.relname;"
-                    cur.execute(sql, tuple(params))
+                    if params:
+                        cur.execute(sql, tuple(params))
+                    else:
+                        cur.execute(sql)
                     tables = cur.fetchall()
 
                     display_tables = tables[:safe_max]
@@ -2079,7 +2085,10 @@ def list_active_queries(database: Optional[str] = None, server: Optional[str] = 
                         sql += " AND datname = %s"
                         params.append(database)
                     sql += " ORDER BY query_start ASC;"
-                    cur.execute(sql, tuple(params))
+                    if params:
+                        cur.execute(sql, tuple(params))
+                    else:
+                        cur.execute(sql)
                     rows = cur.fetchall()
                     return {"activeQueryCount": len(rows), "queries": rows}
             finally:
