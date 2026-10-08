@@ -286,16 +286,21 @@ def index_remote_repo(
 def query_knowledge_base(
     query: str,
     target_url_or_collection: Optional[str] = None,
-    top_k: int = 5
+    top_k: int = 5,
+    max_chars_per_snippet: int = 500,
+    compact: bool = True
 ) -> str:
     """
     Perform hybrid vector + BM25 search returning section-level snippets with exact anchor deep-link citations.
     Supports querying a single collection or searching across ALL collections.
+    Includes built-in compact mode and snippet length capping to prevent LLM context window bloat.
 
     Args:
         query: Search query or question.
         target_url_or_collection: Target collection name or URL. If omitted or 'all', searches across ALL indexed collections.
         top_k: Number of relevant snippet results to return (default: 5).
+        max_chars_per_snippet: Maximum character length per snippet excerpt (default: 500, use 0 for full text).
+        compact: If True (default), formats results with token-optimized keys and truncates long text. Call get_chunk_context() to read full chunk content.
     """
     all_results = []
 
@@ -307,19 +312,24 @@ def query_knowledge_base(
             for col_name, store in _get_all_stores():
                 meta = store.get_metadata()
                 if meta.get("target_url") == target_url_or_collection or meta.get("collection_name") == target_url_or_collection or col_name == target_url_or_collection.lower():
-                    results = store.search(query, top_k=top_k)
+                    results = store.search(query, top_k=top_k, max_chars_per_snippet=max_chars_per_snippet)
                     for r in results:
                         r["collection"] = col_name
                     all_results.extend(results)
                     found = True
                     break
             if not found:
+                available = [c for c, _ in _get_all_stores()]
+                closest = [c for c in available if target_url_or_collection.lower() in c.lower() or c.lower() in target_url_or_collection.lower()]
                 return json.dumps({
-                    "error": f"No indexed collection found for '{target_url_or_collection}'. Use list_rag_collections() to see available indices."
+                    "error": f"No indexed collection found for '{target_url_or_collection}'.",
+                    "did_you_mean": closest if closest else None,
+                    "available_collections": available,
+                    "hint": "Use list_rag_collections() to see available indices or omit target_url_or_collection to search all."
                 }, indent=2)
         else:
             store = RAGVectorStore(db_path)
-            results = store.search(query, top_k=top_k)
+            results = store.search(query, top_k=top_k, max_chars_per_snippet=max_chars_per_snippet)
             for r in results:
                 r["collection"] = target_url_or_collection
             all_results.extend(results)
@@ -332,12 +342,55 @@ def query_knowledge_base(
             }, indent=2)
 
         for col_name, store in stores:
-            res = store.search(query, top_k=top_k)
+            res = store.search(query, top_k=top_k, max_chars_per_snippet=max_chars_per_snippet)
             for r in res:
                 r["collection"] = col_name
             all_results.extend(res)
 
     all_results = sorted(all_results, key=lambda x: x.get("similarity_score", 0), reverse=True)[:top_k]
+
+    if not all_results:
+        return json.dumps({
+            "query": query,
+            "target_collection": target_url_or_collection or "all",
+            "total_results": 0,
+            "results": [],
+            "suggestions": [
+                "No matching snippets found. Try broader keywords or simpler terms.",
+                "Verify indexed collections with list_rag_collections().",
+                "Omit target_url_or_collection to search across all indexed collections."
+            ]
+        }, indent=2)
+
+    if compact:
+        compact_results = []
+        for r in all_results:
+            ls = r.get("line_start", 0)
+            le = r.get("line_end", 0)
+            lines_str = f"L{ls}-L{le}" if (ls > 0 and le > 0) else None
+            item = {
+                "chunk_id": r.get("chunk_id"),
+                "collection": r.get("collection"),
+                "file_path": r.get("file_path"),
+                "section": r.get("section"),
+                "citation_url": r.get("citation_url"),
+                "similarity_score": r.get("similarity_score"),
+                "snippet": r.get("snippet")
+            }
+            if lines_str:
+                item["lines"] = lines_str
+            compact_results.append(item)
+
+        return json.dumps({
+            "query": query,
+            "total_results": len(compact_results),
+            "results": compact_results,
+            "token_control": {
+                "compact_mode": True,
+                "max_chars_per_snippet": max_chars_per_snippet,
+                "tip": "Snippets are compact to conserve context tokens. Call get_chunk_context(chunk_id=<id>, window=1) to retrieve the full code block or surrounding context."
+            }
+        }, indent=2)
 
     return json.dumps({
         "query": query,
@@ -347,23 +400,70 @@ def query_knowledge_base(
 
 
 @mcp.tool()
-def get_knowledge_tree(target_url_or_collection: str) -> str:
+def get_chunk_context(
+    chunk_id: int,
+    target_url_or_collection: Optional[str] = None,
+    window: int = 0
+) -> str:
+    """
+    Retrieve the complete, untruncated content for a chunk, optionally expanding surrounding context.
+    Call this when query_knowledge_base returns a compact snippet that matches your need, and you require
+    the full code block, paragraph, or adjacent lines without flooding your context window with all search hits.
+
+    Args:
+        chunk_id: The ID of the chunk to inspect (from query_knowledge_base results).
+        target_url_or_collection: Optional collection name to narrow down lookup. If omitted, searches across collections.
+        window: Number of adjacent chunks before and after to include (default 0 for just the target chunk; e.g. 1 returns previous, current, and next chunks).
+    """
+    if target_url_or_collection and target_url_or_collection.lower() not in ("all", "*", ""):
+        col_dir = _get_collection_dir(target_url_or_collection)
+        db_path = col_dir / "vector_store.db"
+        if db_path.exists():
+            store = RAGVectorStore(db_path)
+            res = store.get_chunk_context(chunk_id, window=window)
+            if res:
+                return json.dumps({"status": "success", "chunk": res}, indent=2)
+
+    for col_name, store in _get_all_stores():
+        res = store.get_chunk_context(chunk_id, window=window)
+        if res:
+            return json.dumps({"status": "success", "chunk": res}, indent=2)
+
+    return json.dumps({
+        "error": f"Chunk with id {chunk_id} not found. Ensure the ID matches a chunk_id from query_knowledge_base."
+    }, indent=2)
+
+
+@mcp.tool()
+def get_knowledge_tree(
+    target_url_or_collection: str,
+    filter_path: Optional[str] = None,
+    max_items: int = 50
+) -> str:
     """
     Retrieve the hierarchical section, document, and link graph tree for an indexed collection.
+    Includes path filtering and item capping to prevent LLM context window overflow.
     
     Args:
         target_url_or_collection: Collection name or target documentation URL.
+        filter_path: Optional directory or file substring filter (e.g. 'src/api' or 'auth').
+        max_items: Maximum items to return to keep context compact (default: 50).
     """
     col_dir = _get_collection_dir(target_url_or_collection)
     db_path = col_dir / "vector_store.db"
-    if not db_path.exists():
-        for col_name, store in _get_all_stores():
+    store = None
+    if db_path.exists():
+        store = RAGVectorStore(db_path)
+    else:
+        for col_name, s in _get_all_stores():
             if col_name == target_url_or_collection.lower():
-                return json.dumps(store.get_site_tree(), indent=2)
+                store = s
+                break
+
+    if not store:
         return json.dumps({"error": f"No knowledge tree found for '{target_url_or_collection}'."}, indent=2)
 
-    store = RAGVectorStore(db_path)
-    return json.dumps(store.get_site_tree(), indent=2)
+    return json.dumps(store.get_site_tree(filter_path=filter_path, max_items=max_items), indent=2)
 
 
 @mcp.tool()

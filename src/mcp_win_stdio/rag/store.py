@@ -5,6 +5,7 @@ Features Next.js-style Content-Addressable SHA-256 Caching, Graphify Topology In
 and Automatic Orphan / TTL Eviction.
 """
 
+import contextlib
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -105,12 +106,17 @@ class RAGVectorStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _get_connection(self):
         conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA busy_timeout=60000;")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         with self._get_connection() as conn:
@@ -583,7 +589,8 @@ class RAGVectorStore:
         self,
         query: str,
         top_k: int = 8,
-        collection: Optional[str] = None
+        collection: Optional[str] = None,
+        max_chars_per_snippet: Optional[int] = None
     ) -> List[Dict[str, Any]]:
         """
         Next-Gen Hybrid Search:
@@ -710,6 +717,7 @@ class RAGVectorStore:
         # Build candidate lookup
         cand_map = {
             c_ids[i]: {
+                "chunk_id": c_ids[i],
                 "section": section_titles[i],
                 "citation_url": anchor_urls[i] or urls[i] or file_paths[i],
                 "file_path": file_paths[i],
@@ -727,11 +735,109 @@ class RAGVectorStore:
         final_results = []
         for cid in sorted_candidates[:top_k]:
             if cid in cand_map:
-                item = cand_map[cid]
+                item = dict(cand_map[cid])
+                raw_text = item["snippet"]
+                total_chars = len(raw_text)
+
+                if max_chars_per_snippet and max_chars_per_snippet > 0 and total_chars > max_chars_per_snippet:
+                    # Intelligently center excerpt around query match if possible
+                    q_words = [w for w in query.lower().split() if len(w) > 2]
+                    raw_lower = raw_text.lower()
+                    best_pos = -1
+                    for word in q_words:
+                        idx = raw_lower.find(word)
+                        if idx != -1:
+                            best_pos = idx
+                            break
+
+                    if best_pos != -1:
+                        half_window = max_chars_per_snippet // 2
+                        start = max(0, best_pos - half_window)
+                        end = min(total_chars, start + max_chars_per_snippet)
+                        snippet_part = ("..." if start > 0 else "") + raw_text[start:end].strip()
+                    else:
+                        snippet_part = raw_text[:max_chars_per_snippet].strip()
+
+                    truncated_chars = total_chars - len(snippet_part)
+                    item["snippet"] = f"{snippet_part} ... [Truncated {truncated_chars} chars; call get_chunk_context(chunk_id={cid})]"
+                    item["is_truncated"] = True
+                else:
+                    item["is_truncated"] = False
+
                 item["similarity_score"] = round(rrf_scores[cid] * 100, 4)
                 final_results.append(item)
 
         return final_results
+
+    def get_chunk_context(
+        self,
+        chunk_id: int,
+        window: int = 0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Fetch full content for a chunk by ID, optionally expanding with adjacent chunks.
+        """
+        with self._get_connection() as conn:
+            cur = conn.execute("""
+                SELECT id, collection, file_path, url, anchor_url, section_title,
+                       line_start, line_end, chunk_index, text
+                FROM chunks WHERE id = ?
+            """, (chunk_id,))
+            target = cur.fetchone()
+            if not target:
+                return None
+
+            cid, col, fp, url, aurl, st, ls, le, cidx, txt = target
+
+            if window <= 0:
+                return {
+                    "chunk_id": cid,
+                    "collection": col,
+                    "file_path": fp,
+                    "citation_url": aurl or url or fp,
+                    "section_title": st,
+                    "line_start": ls,
+                    "line_end": le,
+                    "chunk_index": cidx,
+                    "text": txt,
+                    "window": 0
+                }
+
+            # Fetch surrounding chunks from same file/URL
+            cur_ctx = conn.execute("""
+                SELECT id, line_start, line_end, chunk_index, text
+                FROM chunks
+                WHERE collection = ? AND (file_path = ? OR url = ?)
+                  AND chunk_index BETWEEN ? AND ?
+                ORDER BY chunk_index ASC
+            """, (col, fp, url, max(0, cidx - window), cidx + window))
+
+            ctx_rows = cur_ctx.fetchall()
+            combined_texts = []
+            min_line = ls
+            max_line = le
+            for row in ctx_rows:
+                r_id, r_ls, r_le, r_cidx, r_txt = row
+                if r_ls > 0 and (min_line == 0 or r_ls < min_line):
+                    min_line = r_ls
+                if r_le > max_line:
+                    max_line = r_le
+                marker = " (Target Chunk)" if r_id == cid else ""
+                combined_texts.append(f"--- [Chunk #{r_cidx}{marker}] ---\n{r_txt}")
+
+            return {
+                "chunk_id": cid,
+                "collection": col,
+                "file_path": fp,
+                "citation_url": aurl or url or fp,
+                "section_title": st,
+                "line_start": min_line,
+                "line_end": max_line,
+                "chunk_index": cidx,
+                "window": window,
+                "total_chunks_in_window": len(ctx_rows),
+                "full_text": "\n\n".join(combined_texts)
+            }
 
     def get_metadata(self) -> Dict[str, Any]:
         """Retrieve stored metadata and stats for this store."""
@@ -769,20 +875,49 @@ class RAGVectorStore:
 
             return meta
 
-    def get_site_tree(self) -> Dict[str, Any]:
-        """Retrieve stored site or codebase hierarchy tree."""
+    def get_site_tree(self, filter_path: Optional[str] = None, max_items: int = 100) -> Dict[str, Any]:
+        """Retrieve stored site or codebase hierarchy tree, optionally filtered and capped."""
         with self._get_connection() as conn:
             cur = conn.execute("SELECT value FROM site_meta WHERE key = 'site_graph'")
             row = cur.fetchone()
             if row:
-                return json.loads(row[0])
+                graph = json.loads(row[0])
+                if filter_path:
+                    graph = {k: v for k, v in graph.items() if filter_path.lower() in k.lower()}
+                if len(graph) > max_items:
+                    items = list(graph.items())[:max_items]
+                    return {
+                        "tree": dict(items),
+                        "total_items": len(graph),
+                        "returned_items": max_items,
+                        "truncated": True,
+                        "note": f"Showing first {max_items} entries. Use filter_path to narrow search."
+                    }
+                return graph
 
             # Generate hierarchical tree from distinct files and sections
-            tree_cur = conn.execute("SELECT DISTINCT file_path, section_title, anchor_url FROM chunks")
+            if filter_path:
+                tree_cur = conn.execute(
+                    "SELECT DISTINCT file_path, section_title, anchor_url FROM chunks WHERE file_path LIKE ? OR section_title LIKE ?",
+                    (f"%{filter_path}%", f"%{filter_path}%")
+                )
+            else:
+                tree_cur = conn.execute("SELECT DISTINCT file_path, section_title, anchor_url FROM chunks")
+
             tree: Dict[str, List[Dict[str, str]]] = {}
             for fp, st, au in tree_cur.fetchall():
                 key = fp or "documentation"
                 if key not in tree:
                     tree[key] = []
                 tree[key].append({"section": st, "anchor_url": au})
+
+            if len(tree) > max_items:
+                items = list(tree.items())[:max_items]
+                return {
+                    "tree": dict(items),
+                    "total_items": len(tree),
+                    "returned_items": max_items,
+                    "truncated": True,
+                    "note": f"Showing first {max_items} files/docs. Use filter_path to narrow search."
+                }
             return tree

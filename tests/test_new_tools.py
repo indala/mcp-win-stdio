@@ -181,3 +181,90 @@ def test_excel_db_master_reconciliation():
         assert res_comp["summary"]["modified_records"] == 1
         assert res_comp["summary"]["new_records_in_b"] == 1
         assert os.path.exists(audit_out)
+
+
+def test_rag_compact_search_and_chunk_context():
+    import json
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "vector_store.db"
+        store = RAGVectorStore(db_path)
+
+        long_code = (
+            "def calculate_total_revenue(transactions: list) -> float:\n"
+            "    # This is a very long descriptive function created to test snippet truncation\n"
+            "    total = 0.0\n"
+            "    for tx in transactions:\n"
+            "        if tx.get('status') == 'completed':\n"
+            "            total += float(tx.get('amount', 0.0))\n"
+            "    return total\n" * 5
+        )
+
+        files_data = [
+            {
+                "file_path": "src/finance/calculator.py",
+                "content_hash": "hash_calc_001",
+                "size_bytes": len(long_code),
+                "chunks": [
+                    {
+                        "chunk_index": 0,
+                        "line_start": 1,
+                        "line_end": 20,
+                        "section_title": "revenue_header",
+                        "anchor_url": "",
+                        "text": "import os\nimport sys\n# Financial revenue calculator module header.",
+                        "content_hash": "chunk_h0"
+                    },
+                    {
+                        "chunk_index": 1,
+                        "line_start": 21,
+                        "line_end": 60,
+                        "section_title": "calculate_total_revenue",
+                        "anchor_url": "",
+                        "text": long_code,
+                        "content_hash": "chunk_h1"
+                    },
+                    {
+                        "chunk_index": 2,
+                        "line_start": 61,
+                        "line_end": 75,
+                        "section_title": "revenue_footer",
+                        "anchor_url": "",
+                        "text": "def format_currency(val: float) -> str:\n    return f'${val:,.2f}'",
+                        "content_hash": "chunk_h2"
+                    }
+                ]
+            }
+        ]
+
+        store.update_files_batch("test_col", files_data)
+
+        # 1. Test search with max_chars_per_snippet = 120
+        hits = store.search("calculate_total_revenue", top_k=3, max_chars_per_snippet=120)
+        assert len(hits) > 0
+        hit = hits[0]
+        assert "chunk_id" in hit
+        assert hit["chunk_id"] is not None
+        assert hit["is_truncated"] is True
+        assert "[Truncated" in hit["snippet"]
+        assert len(hit["snippet"]) < 300
+
+        # 2. Test get_chunk_context for single chunk (window=0)
+        target_cid = hit["chunk_id"]
+        ctx_single = store.get_chunk_context(target_cid, window=0)
+        assert ctx_single is not None
+        assert ctx_single["chunk_id"] == target_cid
+        assert ctx_single["text"] == long_code
+        assert ctx_single["window"] == 0
+
+        # 3. Test get_chunk_context with window=1 (expands to previous and next chunks)
+        ctx_window = store.get_chunk_context(target_cid, window=1)
+        assert ctx_window is not None
+        assert ctx_window["total_chunks_in_window"] == 3
+        assert "Financial revenue calculator" in ctx_window["full_text"]
+        assert "format_currency" in ctx_window["full_text"]
+
+        # 4. Test get_site_tree with filter_path and max_items
+        tree_res = store.get_site_tree(filter_path="calculator", max_items=10)
+        assert "src/finance/calculator.py" in tree_res
