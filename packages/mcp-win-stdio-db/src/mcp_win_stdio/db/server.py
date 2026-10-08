@@ -46,6 +46,64 @@ def _normalize_connection_param(conn: Any) -> Optional[str]:
     return s
 
 
+def _is_db_url(url: Any) -> bool:
+    """Check if value is a valid database URL string."""
+    if not isinstance(url, str):
+        return False
+    s = url.strip()
+    return any(s.startswith(p) for p in ("postgresql://", "postgres://", "mysql://"))
+
+
+def _parse_url(url: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Parse connection URL or connection dictionary into structured connection info."""
+    if isinstance(url, dict):
+        if "url" in url and isinstance(url["url"], str):
+            return _parse_url(url["url"])
+        engine = url.get("engine", url.get("type", "postgres")).lower()
+        return {
+            "engine": "postgres" if "postgres" in engine else "mysql",
+            "host": url.get("host", "localhost"),
+            "port": int(url.get("port") or (5432 if "postgres" in engine else 3306)),
+            "user": unquote(str(url.get("user", url.get("username", "postgres" if "postgres" in engine else "root")))),
+            "password": unquote(str(url.get("password", ""))),
+            "database": url.get("database", url.get("dbname", "")),
+        }
+
+    u = urlparse(url)
+    engine = "postgres" if u.scheme in ("postgres", "postgresql") else "mysql"
+    dbname = u.path.lstrip("/") if u.scheme else ""
+    return {
+        "engine": engine,
+        "host": u.hostname or "localhost",
+        "port": u.port or (5432 if engine == "postgres" else 3306),
+        "user": unquote(u.username or ("postgres" if engine == "postgres" else "root")),
+        "password": unquote(u.password or ""),
+        "database": dbname or ("postgres" if engine == "postgres" else ""),
+    }
+
+
+def _save_connection(name: str, url: str) -> None:
+    """Persist new or updated connection to connections.json."""
+    default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
+    config_file_env = os.environ.get("CONFIG_FILE")
+    cfg_path = Path(config_file_env) if config_file_env else default_config
+
+    try:
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        if "connections" not in data or not isinstance(data["connections"], dict):
+            flat_conns = {k: v for k, v in data.items() if k != "default" and (_is_db_url(v) or isinstance(v, dict))}
+            data = {"default": data.get("default", name), "connections": flat_conns}
+        data["connections"][name] = url
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
 def _save_active_connection(name: str) -> None:
     """Persist active connection choice to connections.json so state remains sticky across restarts."""
     default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
@@ -75,7 +133,8 @@ def _init_config() -> None:
             parsed = json.loads(servers_env)
             s_map = parsed.get("SERVERS", parsed) if isinstance(parsed, dict) else {}
             for k, v in s_map.items():
-                _RAW_CONFIG[k] = v
+                if _is_db_url(v) or isinstance(v, dict):
+                    _RAW_CONFIG[k] = v
         except Exception as e:
             sys.stderr.write(f"Warning: Failed to parse SERVERS env: {e}\n")
 
@@ -88,13 +147,27 @@ def _init_config() -> None:
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if "default" in data and not _ACTIVE_CONNECTION:
-                _ACTIVE_CONNECTION = data["default"]
-            conns = data.get("connections", data.get("SERVERS", data))
-            if isinstance(conns, dict):
-                for k, v in conns.items():
-                    if k not in _RAW_CONFIG:
-                        _RAW_CONFIG[k] = v
+
+            # Check if default specified
+            default_pointer = data.get("default")
+            if isinstance(default_pointer, str) and not _ACTIVE_CONNECTION:
+                _ACTIVE_CONNECTION = default_pointer
+
+            if "connections" in data and isinstance(data["connections"], dict):
+                conns = data["connections"]
+            elif "SERVERS" in data and isinstance(data["SERVERS"], dict):
+                conns = data["SERVERS"]
+            elif isinstance(data, dict):
+                conns = {
+                    k: v for k, v in data.items()
+                    if k != "default" and (_is_db_url(v) or isinstance(v, dict))
+                }
+            else:
+                conns = {}
+
+            for k, v in conns.items():
+                if k not in _RAW_CONFIG and (_is_db_url(v) or isinstance(v, dict)):
+                    _RAW_CONFIG[k] = v
         except Exception as e:
             sys.stderr.write(f"Warning: Failed to load config file: {e}\n")
 
@@ -103,11 +176,20 @@ def _init_config() -> None:
     if db_url and "default" not in _RAW_CONFIG:
         _RAW_CONFIG["default"] = db_url
 
-    if not _ACTIVE_CONNECTION and _RAW_CONFIG:
+    # Reconcile active connection
+    if _ACTIVE_CONNECTION:
+        matched = next((k for k in _RAW_CONFIG.keys() if k.lower() == _ACTIVE_CONNECTION.lower()), None)
+        if matched:
+            _ACTIVE_CONNECTION = matched
+        elif _RAW_CONFIG:
+            _ACTIVE_CONNECTION = next(iter(_RAW_CONFIG.keys()))
+        else:
+            _ACTIVE_CONNECTION = None
+    elif _RAW_CONFIG:
         _ACTIVE_CONNECTION = next(iter(_RAW_CONFIG.keys()))
 
     # Pre-register all raw configs in connection registry
-    for k, v in _RAW_CONFIG.items():
+    for k, v in list(_RAW_CONFIG.items()):
         try:
             url = v if isinstance(v, str) else v.get("url", "")
             if url:
@@ -329,33 +411,43 @@ def _format_db_error(
     return error_payload
 
 
-def _parse_url(url: str) -> Dict[str, Any]:
-    u = urlparse(url)
-    engine = "postgres" if u.scheme in ("postgres", "postgresql") else "mysql"
-    return {
-        "engine": engine,
-        "host": u.hostname or "localhost",
-        "port": u.port or (5432 if engine == "postgres" else 3306),
-        "user": unquote(u.username or ("postgres" if engine == "postgres" else "root")),
-        "password": unquote(u.password or ""),
-        "database": u.path.lstrip("/") or ("postgres" if engine == "postgres" else ""),
-    }
-
-
 def _resolve_conn(connection: Optional[str] = None, server: Optional[str] = None) -> Optional[str]:
     """Helper to resolve connection or server parameter interchangeably."""
     return _normalize_connection_param(connection) or _normalize_connection_param(server)
 
 
-def _get_connection(target_name: Optional[str] = None, fallback_server: Optional[str] = None) -> Dict[str, Any]:
+def _get_connection(
+    target_name: Optional[str] = None,
+    fallback_server: Optional[str] = None,
+    visited: Optional[set] = None
+) -> Dict[str, Any]:
     global _ACTIVE_CONNECTION
+    if visited is None:
+        visited = set()
+
+    # Exact key match in registry first (before normalization)
+    if target_name and target_name in _CONNECTION_REGISTRY:
+        return _CONNECTION_REGISTRY[target_name]
+    if target_name and target_name in _RAW_CONFIG:
+        entry = _RAW_CONFIG[target_name]
+        url = entry if isinstance(entry, str) else entry.get("url", "")
+        info = _parse_url(url)
+        info["name"] = target_name
+        info["url"] = url
+        _CONNECTION_REGISTRY[target_name] = info
+        return info
+
     norm_name = _normalize_connection_param(target_name) or _normalize_connection_param(fallback_server)
     name = norm_name or _ACTIVE_CONNECTION
     if not name:
         raise ValueError("No database connection specified and no active connection set.")
 
+    if name in visited:
+        raise ValueError(f"Circular connection reference detected for '{name}'. Available connections: {list(_RAW_CONFIG.keys())}")
+    visited.add(name)
+
     # 0. Raw database URL
-    if any(name.startswith(p) for p in ("postgresql://", "postgres://", "mysql://")):
+    if _is_db_url(name):
         info = _parse_url(name)
         info["name"] = info.get("database") or "custom"
         info["url"] = name
@@ -377,37 +469,41 @@ def _get_connection(target_name: Optional[str] = None, fallback_server: Optional
 
     # 3. Case-insensitive match in raw config
     for k in _RAW_CONFIG.keys():
-        if k.lower() == name.lower():
-            return _get_connection(k)
+        if k.lower() == name.lower() and k not in visited:
+            return _get_connection(k, visited=visited)
 
     # 4. Check if 'name' is the target database name inside any configured server
     for k, v in _RAW_CONFIG.items():
+        if k in visited:
+            continue
         try:
             url = v if isinstance(v, str) else v.get("url", "")
-            p_info = _parse_url(url)
-            if p_info.get("database", "").lower() == name.lower():
-                return _get_connection(k)
+            if _is_db_url(url):
+                p_info = _parse_url(url)
+                if p_info.get("database", "").lower() == name.lower():
+                    return _get_connection(k, visited=visited)
         except Exception:
             pass
 
     # 5. Try to derive sibling DB on active server or fallback server
     base_target = _normalize_connection_param(fallback_server) or _ACTIVE_CONNECTION
     if base_target and (base_target in _CONNECTION_REGISTRY or base_target in _RAW_CONFIG):
-        curr = _get_connection(base_target)
+        curr = _get_connection(base_target, visited=visited)
         u = urlparse(curr["url"])
         new_url = f"{u.scheme}://{u.netloc}/{name}"
         info = _parse_url(new_url)
         info["name"] = name
         info["url"] = new_url
 
-        # Test connect
+        # Test connect with strict 2-second timeout
         if info["engine"] == "postgres":
-            conn = psycopg2.connect(new_url)
+            conn = psycopg2.connect(new_url, connect_timeout=2)
             conn.close()
         else:
             conn = pymysql.connect(
                 host=info["host"], port=info["port"], user=info["user"],
-                password=info["password"], database=info["database"]
+                password=info["password"], database=info["database"],
+                connect_timeout=2
             )
             conn.close()
 
@@ -418,7 +514,7 @@ def _get_connection(target_name: Optional[str] = None, fallback_server: Optional
     # 6. Fallback: try connecting to local postgresql://postgres:postgres@localhost:5432/{name}
     try:
         candidate_url = f"postgresql://postgres:postgres@localhost:5432/{name}"
-        conn = psycopg2.connect(candidate_url)
+        conn = psycopg2.connect(candidate_url, connect_timeout=2)
         conn.close()
         info = _parse_url(candidate_url)
         info["name"] = name
@@ -544,15 +640,23 @@ def _truncate_row(row: Dict[str, Any], max_chars: int = 500, mask_sensitive: boo
 def list_connections() -> Dict[str, Any]:
     """List all configured database connections (PostgreSQL & MySQL) and indicate the active connection."""
     conns = []
-    for k in _RAW_CONFIG.keys():
+    for k, v in _RAW_CONFIG.items():
         try:
-            info = _get_connection(k)
+            if k in _CONNECTION_REGISTRY:
+                info = _CONNECTION_REGISTRY[k]
+            else:
+                url = v if isinstance(v, str) else v.get("url", "")
+                info = _parse_url(url)
+                info["name"] = k
+                info["url"] = url
+                _CONNECTION_REGISTRY[k] = info
+
             conns.append({
                 "name": k,
-                "engine": info["engine"],
-                "host": info["host"],
-                "port": info["port"],
-                "database": info["database"],
+                "engine": info.get("engine", "unknown"),
+                "host": info.get("host", ""),
+                "port": info.get("port", ""),
+                "database": info.get("database", ""),
                 "isActive": k == _ACTIVE_CONNECTION,
                 "status": "connected"
             })
@@ -567,6 +671,134 @@ def list_connections() -> Dict[str, Any]:
         "activeConnection": _ACTIVE_CONNECTION,
         "totalConnections": len(conns),
         "connections": conns
+    }
+
+
+@mcp.tool()
+def test_connection(
+    connection: Optional[str] = None,
+    server: Optional[str] = None,
+    timeout: int = 3
+) -> Dict[str, Any]:
+    """
+    Test live connectivity and latency to a configured database connection or server.
+    
+    Args:
+        connection: Optional database connection alias or URL to test. Defaults to active connection.
+        server: Optional server alias.
+        timeout: Socket connection timeout in seconds (default: 3).
+    """
+    import time
+    target = _resolve_conn(connection, server)
+    try:
+        info = _get_connection(target)
+    except Exception as e:
+        return {
+            "success": False,
+            "connected": False,
+            "error": str(e),
+            "message": f"Connection '{target}' could not be resolved."
+        }
+
+    t0 = time.time()
+    try:
+        if info["engine"] == "postgres":
+            conn = psycopg2.connect(info["url"], connect_timeout=timeout)
+            with conn.cursor() as cur:
+                cur.execute("SELECT version();")
+                ver = cur.fetchone()[0]
+            conn.close()
+        else:
+            conn = pymysql.connect(
+                host=info["host"],
+                port=info["port"],
+                user=info["user"],
+                password=info["password"],
+                database=info["database"] or None,
+                connect_timeout=timeout
+            )
+            with conn.cursor() as cur:
+                cur.execute("SELECT version();")
+                ver = cur.fetchone()[0]
+            conn.close()
+
+        latency_ms = round((time.time() - t0) * 1000, 2)
+        return {
+            "success": True,
+            "connected": True,
+            "name": info.get("name"),
+            "engine": info["engine"],
+            "host": info["host"],
+            "port": info["port"],
+            "database": info["database"],
+            "latencyMs": latency_ms,
+            "serverVersion": ver,
+            "message": f"Successfully connected to {info['engine']} database '{info['database']}' on {info['host']}:{info['port']} ({latency_ms}ms)."
+        }
+    except Exception as e:
+        latency_ms = round((time.time() - t0) * 1000, 2)
+        return {
+            "success": False,
+            "connected": False,
+            "name": info.get("name"),
+            "engine": info["engine"],
+            "host": info["host"],
+            "port": info["port"],
+            "latencyMs": latency_ms,
+            "error": str(e),
+            "message": f"Failed to connect to {info['engine']} on {info['host']}:{info['port']} after {latency_ms}ms: {e}"
+        }
+
+
+@mcp.tool()
+def remove_connection(name: str) -> Dict[str, Any]:
+    """Remove a configured database connection alias."""
+    global _ACTIVE_CONNECTION
+    norm_name = _normalize_connection_param(name)
+    if not norm_name:
+        return {"error": True, "message": "Please specify a connection name to remove."}
+
+    matched_key = None
+    for k in list(_RAW_CONFIG.keys()):
+        if k.lower() == norm_name.lower():
+            matched_key = k
+            break
+
+    if not matched_key:
+        return {"error": True, "message": f"Connection '{name}' not found. Configured: {list(_RAW_CONFIG.keys())}"}
+
+    _RAW_CONFIG.pop(matched_key, None)
+    _CONNECTION_REGISTRY.pop(matched_key, None)
+
+    # Clean up from connections.json if present
+    default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
+    config_file_env = os.environ.get("CONFIG_FILE")
+    cfg_path = Path(config_file_env) if config_file_env else default_config
+    try:
+        if cfg_path.exists():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "connections" in data and isinstance(data["connections"], dict):
+                data["connections"].pop(matched_key, None)
+            else:
+                data.pop(matched_key, None)
+            if data.get("default") == matched_key:
+                data["default"] = next(iter(_RAW_CONFIG.keys()), None)
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+    if _ACTIVE_CONNECTION == matched_key:
+        _ACTIVE_CONNECTION = next(iter(_RAW_CONFIG.keys()), None)
+        if _ACTIVE_CONNECTION:
+            _save_active_connection(_ACTIVE_CONNECTION)
+
+    return {
+        "success": True,
+        "message": f"Connection '{matched_key}' removed successfully.",
+        "activeConnection": _ACTIVE_CONNECTION,
+        "remainingConnections": list(_RAW_CONFIG.keys())
     }
 
 
@@ -663,12 +895,13 @@ def use_database(
     # Verify connectivity before registering
     try:
         if info["engine"] == "postgres":
-            conn = psycopg2.connect(new_url)
+            conn = psycopg2.connect(new_url, connect_timeout=3)
             conn.close()
         else:
             conn = pymysql.connect(
                 host=info["host"], port=info["port"], user=info["user"],
-                password=info["password"], database=info["database"]
+                password=info["password"], database=info["database"],
+                connect_timeout=3
             )
             conn.close()
     except Exception as e:
@@ -1854,17 +2087,19 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
 
         # Test connect
         if info["engine"] == "postgres":
-            conn = psycopg2.connect(url)
+            conn = psycopg2.connect(url, connect_timeout=3)
             conn.close()
         else:
             conn = pymysql.connect(
                 host=info["host"], port=info["port"], user=info["user"],
-                password=info["password"], database=info["database"]
+                password=info["password"], database=info["database"],
+                connect_timeout=3
             )
             conn.close()
 
         _CONNECTION_REGISTRY[name] = info
         _RAW_CONFIG[name] = url
+        _save_connection(name, url)
         if setActive:
             _ACTIVE_CONNECTION = name
             _save_active_connection(_ACTIVE_CONNECTION)

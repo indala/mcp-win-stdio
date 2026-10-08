@@ -13,6 +13,7 @@ from datetime import datetime, date, time
 import pandas as pd
 import numpy as np
 import pathspec
+import pytest
 
 def test_excel_clean_records():
     from mcp_win_stdio.excel.server import _df_to_clean_records
