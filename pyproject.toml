@@ -87,5 +87,11 @@ exclude = [
     "src/mcp_win_stdio/db",
     "src/mcp_win_stdio/git",
     "src/mcp_win_stdio/ssh",
+    "src/mcp_win_stdio/rag",
+    "src/mcp_win_stdio/excel_db",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 

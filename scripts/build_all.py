@@ -46,7 +46,7 @@ def clean():
 
 def build_all():
     clean()
-    print("🚀 Building all 8 packages...")
+    print("🚀 Building all 10 packages (root + 9 subpackages)...")
 
     for pkg in PACKAGES:
         rel_name = pkg.name if pkg != ROOT_DIR else "mcp-win-stdio (root)"
