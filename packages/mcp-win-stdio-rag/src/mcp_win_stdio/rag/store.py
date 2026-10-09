@@ -77,6 +77,47 @@ def build_fts5_query(query_str: str) -> str:
     return " OR ".join(fts_terms)
 
 
+COMMON_STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "what", "how", "why",
+    "can", "are", "into", "when", "where", "does", "have", "using", "uses",
+    "type", "types", "typed", "typescript", "code", "file", "files", "example", "examples"
+}
+
+
+def _stem_token(word: str) -> str:
+    """Lightweight English suffix stemmer for robust keyword coverage matching."""
+    w = word.lower()
+    for suffix in ("ing", "tions", "tion", "ies", "es", "s", "ed"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            return w[:-len(suffix)]
+    return w
+
+
+def analyze_query_coverage(query: str, text: str, section_title: str) -> Dict[str, Any]:
+    """Analyze how many significant query keywords are actually found in the chunk using stemmed matching."""
+    raw_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9_]+", query)]
+    sig_terms = [w for w in raw_words if len(w) > 2 and w not in COMMON_STOPWORDS]
+    if not sig_terms:
+        return {"matched": [], "missing": [], "coverage_ratio": 1.0}
+
+    target_content = f"{section_title} {text}".lower()
+    matched = []
+    missing = []
+    for t in sig_terms:
+        st = _stem_token(t)
+        if (t in target_content) or (st in target_content):
+            matched.append(t)
+        else:
+            missing.append(t)
+
+    ratio = len(matched) / len(sig_terms)
+    return {
+        "matched": matched,
+        "missing": missing,
+        "coverage_ratio": round(ratio, 2)
+    }
+
+
 def chunk_section_text(section_title: str, text: str, max_words: int = 250, overlap: int = 30) -> List[str]:
     """Split section text into overlapping chunks, prepending the section header."""
     words = text.split()
@@ -590,13 +631,15 @@ class RAGVectorStore:
         query: str,
         top_k: int = 8,
         collection: Optional[str] = None,
-        max_chars_per_snippet: Optional[int] = None
+        max_chars_per_snippet: Optional[int] = None,
+        filter_path: Optional[str] = None,
+        exclude_paths: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Next-Gen Hybrid Search:
         1. SQLite FTS5 BM25 with column-weighted subword matching (< 1ms)
         2. High-capacity subword & char n-gram TF-IDF vector ranking (25,000 features)
-        3. Reciprocal Rank Fusion (RRF) combining lexical precision & conceptual semantic similarity.
+        3. Reciprocal Rank Fusion (RRF) with canonical path boosts and code-fence preserving snippets.
         """
         fts_query = build_fts5_query(query)
         bm25_results: List[Dict[str, Any]] = []
@@ -605,31 +648,38 @@ class RAGVectorStore:
             # 1. High-Speed SQLite FTS5 BM25 Lookup
             if fts_query:
                 try:
-                    # Column weights: (w_collection=0, w_file_path=12, w_section_title=8, w_text=3, w_tokens=6)
+                    where_clauses = ["chunks_fts MATCH ?"]
+                    params: List[Any] = [fts_query]
+
                     if collection:
-                        cur = conn.execute("""
-                            SELECT
-                                c.id, c.url, c.anchor_url, c.file_path, c.section_title,
-                                c.line_start, c.line_end, c.chunk_index, c.text,
-                                bm25(chunks_fts, 0.0, 15.0, 10.0, 2.0, 8.0) as bm25_rank
-                            FROM chunks_fts f
-                            JOIN chunks c ON c.id = f.chunk_id
-                            WHERE chunks_fts MATCH ? AND (c.collection = ?)
-                            ORDER BY bm25_rank ASC
-                            LIMIT ?
-                        """, (fts_query, collection, max(top_k * 4, 40)))
-                    else:
-                        cur = conn.execute("""
-                            SELECT
-                                c.id, c.url, c.anchor_url, c.file_path, c.section_title,
-                                c.line_start, c.line_end, c.chunk_index, c.text,
-                                bm25(chunks_fts, 0.0, 15.0, 10.0, 2.0, 8.0) as bm25_rank
-                            FROM chunks_fts f
-                            JOIN chunks c ON c.id = f.chunk_id
-                            WHERE chunks_fts MATCH ?
-                            ORDER BY bm25_rank ASC
-                            LIMIT ?
-                        """, (fts_query, max(top_k * 4, 40)))
+                        where_clauses.append("c.collection = ?")
+                        params.append(collection)
+
+                    if filter_path:
+                        where_clauses.append("(c.file_path LIKE ? OR c.url LIKE ?)")
+                        params.append(f"%{filter_path}%")
+                        params.append(f"%{filter_path}%")
+
+                    if exclude_paths:
+                        for ep in exclude_paths:
+                            where_clauses.append("(c.file_path NOT LIKE ? AND c.url NOT LIKE ?)")
+                            params.append(f"%{ep}%")
+                            params.append(f"%{ep}%")
+
+                    where_sql = " AND ".join(where_clauses)
+                    sql = f"""
+                        SELECT
+                            c.id, c.url, c.anchor_url, c.file_path, c.section_title,
+                            c.line_start, c.line_end, c.chunk_index, c.text,
+                            bm25(chunks_fts, 0.0, 15.0, 10.0, 2.0, 8.0) as bm25_rank
+                        FROM chunks_fts f
+                        JOIN chunks c ON c.id = f.chunk_id
+                        WHERE {where_sql}
+                        ORDER BY bm25_rank ASC
+                        LIMIT ?
+                    """
+                    params.append(max(top_k * 4, 40))
+                    cur = conn.execute(sql, params)
 
                     for row in cur.fetchall():
                         cid, url, anchor_url, fp, st, ls, le, cidx, txt, bm_score = row
@@ -650,16 +700,25 @@ class RAGVectorStore:
 
             # 2. Fetch candidate set for vector/subword re-ranking
             if not bm25_results:
+                cand_where = []
+                cand_params = []
                 if collection:
-                    cur = conn.execute("""
-                        SELECT id, url, anchor_url, file_path, section_title, line_start, line_end, chunk_index, text
-                        FROM chunks WHERE collection = ? LIMIT 500
-                    """, (collection,))
-                else:
-                    cur = conn.execute("""
-                        SELECT id, url, anchor_url, file_path, section_title, line_start, line_end, chunk_index, text
-                        FROM chunks LIMIT 500
-                    """)
+                    cand_where.append("collection = ?")
+                    cand_params.append(collection)
+                if filter_path:
+                    cand_where.append("(file_path LIKE ? OR url LIKE ?)")
+                    cand_params.append(f"%{filter_path}%")
+                    cand_params.append(f"%{filter_path}%")
+                if exclude_paths:
+                    for ep in exclude_paths:
+                        cand_where.append("(file_path NOT LIKE ? AND url NOT LIKE ?)")
+                        cand_params.append(f"%{ep}%")
+                        cand_params.append(f"%{ep}%")
+                cand_where_sql = ("WHERE " + " AND ".join(cand_where)) if cand_where else ""
+                cur = conn.execute(f"""
+                    SELECT id, url, anchor_url, file_path, section_title, line_start, line_end, chunk_index, text
+                    FROM chunks {cand_where_sql} LIMIT 500
+                """, cand_params)
                 candidate_rows = cur.fetchall()
             else:
                 candidate_rows = [
@@ -729,6 +788,16 @@ class RAGVectorStore:
             for i in range(len(c_ids))
         }
 
+        # Apply canonical path boost / demotion
+        for cid, item in cand_map.items():
+            fp = (item.get("file_path") or item.get("citation_url") or "").lower()
+            if any(term in fp for term in ("release-notes", "handbook-v1", "deprecated")):
+                rrf_scores[cid] *= 0.65
+            elif any(term in fp for term in ("tutorials", "tutorial")):
+                rrf_scores[cid] *= 0.75
+            elif any(term in fp for term in ("handbook-v2", "handbook/2", "reference")):
+                rrf_scores[cid] *= 1.35
+
         # Sort by RRF score descending
         sorted_candidates = sorted(rrf_scores.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
 
@@ -758,6 +827,10 @@ class RAGVectorStore:
                     else:
                         snippet_part = raw_text[:max_chars_per_snippet].strip()
 
+                    # Preserve code block fence closure if broken
+                    if snippet_part.count("```") % 2 != 0:
+                        snippet_part += "\n```"
+
                     truncated_chars = total_chars - len(snippet_part)
                     item["snippet"] = f"{snippet_part} ... [Truncated {truncated_chars} chars; call get_chunk_context(chunk_id={cid})]"
                     item["is_truncated"] = True
@@ -765,9 +838,27 @@ class RAGVectorStore:
                     item["is_truncated"] = False
 
                 item["similarity_score"] = round(rrf_scores[cid] * 100, 4)
+                item["query_coverage"] = analyze_query_coverage(query, raw_text, item.get("section", ""))
                 final_results.append(item)
 
         return final_results
+
+    def find_related(
+        self,
+        chunk_id: int,
+        top_k: int = 5,
+        collection: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Find chunks semantically and topical related to a given chunk ID."""
+        with self._get_connection() as conn:
+            cur = conn.execute("SELECT section_title, text FROM chunks WHERE id = ?", (chunk_id,))
+            row = cur.fetchone()
+            if not row:
+                return []
+            st, txt = row
+            query = f"{st} {txt[:200]}"
+            results = self.search(query=query, top_k=top_k + 1, collection=collection)
+            return [r for r in results if r.get("chunk_id") != chunk_id][:top_k]
 
     def get_chunk_context(
         self,
@@ -844,6 +935,16 @@ class RAGVectorStore:
         with self._get_connection() as conn:
             cur = conn.execute("SELECT key, value FROM site_meta")
             meta = dict(cur.fetchall())
+
+            try:
+                col_row = conn.execute("SELECT source_uri, collection_name, collection_type, commit_sha FROM collections_meta ORDER BY updated_at DESC LIMIT 1").fetchone()
+                if col_row:
+                    meta["source_uri"] = col_row[0]
+                    meta["collection_name"] = col_row[1]
+                    meta["collection_type"] = col_row[2]
+                    meta["commit_sha"] = col_row[3]
+            except Exception:
+                pass
 
             cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
             if not cols:

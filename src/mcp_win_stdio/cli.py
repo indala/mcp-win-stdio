@@ -378,6 +378,18 @@ def cmd_setup(args: argparse.Namespace) -> None:
                     print("\n[INFO] GitHub CLI is installed but not authenticated.")
                     print("👉 Run 'gh auth login' in your terminal to connect your GitHub account.")
 
+        # Special setup for RAG (Playwright Chromium browser binaries)
+        if srv_name == "rag":
+            print("\nChecking Playwright Chromium browser binaries...")
+            try:
+                res = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
+                if res.returncode == 0:
+                    print("[OK] Playwright Chromium browser is installed and ready.")
+                else:
+                    print("[WARN] Could not install Playwright Chromium automatically. Run 'playwright install chromium' manually.")
+            except Exception as e:
+                print(f"[WARN] Failed to run playwright install: {e}")
+
         # 2. Transparent Configuration Guidance
         snippet_dict = generate_claude_desktop_snippet(srv_name, env_vars if env_vars else None)
         snippet_json = json.dumps({srv_name: snippet_dict}, indent=2)
@@ -642,6 +654,11 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         ("pymysql", "MySQL Pure-Python Driver (Database MCP)"),
         ("paramiko", "Paramiko SSH & SFTP Engine (SSH MCP)"),
         ("cryptography", "Cryptography & Key Parsing (SSH MCP)"),
+        ("playwright", "Playwright Web Crawler (RAG MCP)"),
+        ("networkx", "NetworkX Graph Trees (RAG MCP)"),
+        ("numpy", "NumPy Matrix Arrays (RAG & Excel MCP)"),
+        ("sklearn", "Scikit-Learn TF-IDF Vectors (RAG MCP)"),
+        ("sqlalchemy", "SQLAlchemy Engine (Excel-DB MCP)"),
     ]
     print("\n--- Python Dependencies ---")
     for mod, desc in deps:
@@ -749,7 +766,23 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     except Exception:
         pass
 
-    # 8. Claude Config Files
+    # 8. Web Documentation Crawler (Playwright Browser Binaries)
+    print("\n--- Documentation Crawler & Browser Engine ---")
+    try:
+        import playwright
+        ms_playwright_dir = Path.home() / "AppData" / "Local" / "ms-playwright"
+        chrome_shells = list(ms_playwright_dir.glob("**/chrome-headless-shell.exe")) if ms_playwright_dir.exists() else []
+        chrome_bins = list(ms_playwright_dir.glob("**/chrome.exe")) if ms_playwright_dir.exists() else []
+        if chrome_shells or chrome_bins:
+            chosen = chrome_shells[0] if chrome_shells else chrome_bins[0]
+            print(f"[OK] Playwright Chromium Browser: Ready ({chosen})")
+        else:
+            print("[WARN] Playwright Chromium Browser: Not downloaded")
+            print("       👉 Run: playwright install chromium (or mws install rag)")
+    except ImportError:
+        print("[INFO] Playwright Browser Engine: Playwright not installed")
+
+    # 9. Claude Config Files
 
     print("\n--- Claude Configuration Targets ---")
     desktop_cfg = get_claude_desktop_config_path()
@@ -889,13 +922,32 @@ def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, ove
         if s_norm:
             existing_servers[s_norm] = _build_server_entry(s_norm, is_vscode=True, cwd=cwd)
 
+    # 1. Root .mcp.json
     with open(root_file, "w", encoding="utf-8") as f:
         json.dump({"mcpServers": existing_servers}, f, indent=2)
 
-    agents_md = cwd / "AGENTS.md"
+    # 2. Antigravity workspace agent (.agents/mcp_config.json)
+    try:
+        agents_dir = cwd / ".agents"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        agents_mcp_file = agents_dir / "mcp_config.json"
+        with open(agents_mcp_file, "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": existing_servers}, f, indent=2)
+    except Exception:
+        pass
+
+    # 3. Agent guidelines (AGENTS.md and GEMINI.md)
     content = get_server_agents_guide(list(existing_servers.keys()))
+    agents_md = cwd / "AGENTS.md"
     with open(agents_md, "w", encoding="utf-8") as f:
         f.write(content)
+
+    gemini_md = cwd / "GEMINI.md"
+    try:
+        with open(gemini_md, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception:
+        pass
 
     return {
         "cwd": cwd,
@@ -906,7 +958,7 @@ def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, ove
 
 
 def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Remove server(s) from .mcp.json, clean up any legacy .vscode/mcp.json, and refresh AGENTS.md."""
+    """Remove server(s) from .mcp.json, clean up any legacy .vscode/mcp.json, and refresh AGENTS.md / GEMINI.md."""
     cwd = target_dir or Path.cwd()
     root_file = cwd / ".mcp.json"
     vscode_file = cwd / ".vscode" / "mcp.json"
@@ -929,6 +981,14 @@ def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) ->
     with open(root_file, "w", encoding="utf-8") as f:
         json.dump(mcp_config, f, indent=2)
 
+    try:
+        agents_mcp_file = cwd / ".agents" / "mcp_config.json"
+        if agents_mcp_file.exists():
+            with open(agents_mcp_file, "w", encoding="utf-8") as f:
+                json.dump(mcp_config, f, indent=2)
+    except Exception:
+        pass
+
     if vscode_file.exists():
         try:
             vscode_file.unlink()
@@ -942,28 +1002,359 @@ def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) ->
     with open(agents_md, "w", encoding="utf-8") as f:
         f.write(content)
 
+    gemini_md = cwd / "GEMINI.md"
+    try:
+        with open(gemini_md, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception:
+        pass
+
     return {"cwd": cwd, "servers": list(existing_servers.keys()), "config_file": str(root_file)}
 
 
+CLIENT_ALIASES = {
+    "antigravity": "antigravity",
+    "gemini": "antigravity",
+    "agy": "antigravity",
+    "claude": "claude",
+    "claude-desktop": "claude",
+    "claude-code": "claude",
+    "copilot": "copilot",
+    "vscode": "copilot",
+    "code": "copilot",
+    "github-copilot": "copilot",
+    "cursor": "cursor",
+    "windsurf": "windsurf",
+    "all": "all",
+}
+
+
+def _get_active_python_server_entries(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Build Python executable server entries for desktop GUI apps."""
+    py_exe = sys.executable.replace("\\", "/")
+    res = {}
+    for s in servers:
+        s_norm = s.lower().strip()
+        mod_name = s_norm.replace("-", "_")
+        entry: Dict[str, Any] = {
+            "command": py_exe,
+            "args": ["-m", f"mcp_win_stdio.{mod_name}"]
+        }
+        env: Dict[str, str] = {}
+        if s_norm == "tsc":
+            env["TSC_WATCH_DIR"] = str(cwd)
+        elif s_norm == "explorer":
+            env["EXPLORER_ROOT"] = str(cwd)
+        elif s_norm in ("db", "excel-db"):
+            servers_env = os.environ.get("SERVERS")
+            if servers_env:
+                env["SERVERS"] = servers_env
+            else:
+                env["SERVERS"] = '{"showreel_dev": "postgresql://postgres:postgres@localhost:5432/showreel_dev"}'
+        if env:
+            entry["env"] = env
+        res[s_norm] = entry
+    return res
+
+
+def init_antigravity(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Initialize Antigravity MCP configurations (global ~/.gemini/config and workspace .agents)."""
+    updated_files = []
+    gemini_dir = Path.home() / ".gemini"
+    gemini_cfg_dir = gemini_dir / "config"
+    gemini_cfg_dir.mkdir(parents=True, exist_ok=True)
+    gemini_cfg_file = gemini_cfg_dir / "mcp_config.json"
+
+    existing: Dict[str, Any] = {}
+    if gemini_cfg_file.exists():
+        try:
+            with open(gemini_cfg_file, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    py_servers = _get_active_python_server_entries(servers, cwd)
+    for s_name, s_entry in py_servers.items():
+        if s_name in mcp_servers:
+            if "env" in mcp_servers[s_name] and "env" in s_entry:
+                s_entry["env"].update(mcp_servers[s_name]["env"])
+        mcp_servers[s_name] = s_entry
+
+    mcp_servers.pop("excel_db", None)
+
+    with open(gemini_cfg_file, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+    updated_files.append(str(gemini_cfg_file))
+
+    # Workspace project configuration
+    proj_res = setup_project_mcp(servers, target_dir=cwd, overwrite=False)
+    updated_files.append(proj_res["config_file"])
+    agents_cfg = cwd / ".agents" / "mcp_config.json"
+    if agents_cfg.exists():
+        updated_files.append(str(agents_cfg))
+    updated_files.append(str(cwd / "AGENTS.md"))
+    updated_files.append(str(cwd / "GEMINI.md"))
+
+    local_app_ide = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Antigravity IDE"
+    detected = gemini_dir.exists() or local_app_ide.exists()
+
+    return {
+        "client": "Antigravity",
+        "detected": detected,
+        "status": "Configured",
+        "primary_config": str(gemini_cfg_file),
+        "files_updated": updated_files,
+        "servers_count": len(servers)
+    }
+
+
+def init_claude(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Initialize Claude Desktop (%APPDATA%\\Claude) and Claude Code (~/.claude.json)."""
+    updated_files = []
+    appdata = Path(os.environ.get("APPDATA", ""))
+    claude_dir = appdata / "Claude"
+    claude_code_file = Path.home() / ".claude.json"
+    detected = claude_dir.exists() or claude_code_file.exists() or bool(shutil.which("claude"))
+
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    claude_cfg = claude_dir / "claude_desktop_config.json"
+    existing: Dict[str, Any] = {}
+    if claude_cfg.exists():
+        try:
+            with open(claude_cfg, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+
+    mcp_servers = existing.setdefault("mcpServers", {})
+    py_servers = _get_active_python_server_entries(servers, cwd)
+    for s_name, s_entry in py_servers.items():
+        if s_name in mcp_servers:
+            if "env" in mcp_servers[s_name] and "env" in s_entry:
+                s_entry["env"].update(mcp_servers[s_name]["env"])
+        mcp_servers[s_name] = s_entry
+
+    mcp_servers.pop("excel_db", None)
+
+    with open(claude_cfg, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+    updated_files.append(str(claude_cfg))
+
+    if claude_code_file.exists() or (Path.home() / ".claude").exists() or shutil.which("claude"):
+        code_data: Dict[str, Any] = {}
+        if claude_code_file.exists():
+            try:
+                with open(claude_code_file, "r", encoding="utf-8") as f:
+                    code_data = json.load(f)
+            except Exception:
+                code_data = {}
+        c_servers = code_data.setdefault("mcpServers", {})
+        for s_name, s_entry in py_servers.items():
+            c_servers[s_name] = s_entry
+        c_servers.pop("excel_db", None)
+        with open(claude_code_file, "w", encoding="utf-8") as f:
+            json.dump(code_data, f, indent=2)
+        updated_files.append(str(claude_code_file))
+
+    setup_project_mcp(servers, target_dir=cwd, overwrite=False)
+
+    return {
+        "client": "Claude (Desktop & CLI)",
+        "detected": detected,
+        "status": "Configured",
+        "primary_config": str(claude_cfg),
+        "files_updated": updated_files,
+        "servers_count": len(servers)
+    }
+
+
+def init_copilot(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Initialize GitHub Copilot (VS Code ~/.copilot, %APPDATA%\\Code\\User, and workspace .mcp.json)."""
+    updated_files = []
+    code_dir = Path(os.environ.get("APPDATA", "")) / "Code"
+    copilot_home = Path.home() / ".copilot"
+    detected = code_dir.exists() or copilot_home.exists() or bool(shutil.which("code")) or bool(shutil.which("code.cmd")) or bool(shutil.which("gh"))
+
+    copilot_home.mkdir(parents=True, exist_ok=True)
+    copilot_cfg = copilot_home / "mcp-config.json"
+    existing: Dict[str, Any] = {}
+    if copilot_cfg.exists():
+        try:
+            with open(copilot_cfg, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except Exception:
+            existing = {}
+    mcp_servers = existing.setdefault("mcpServers", {})
+    py_servers = _get_active_python_server_entries(servers, cwd)
+    for s_name, s_entry in py_servers.items():
+        mcp_servers[s_name] = s_entry
+    mcp_servers.pop("excel_db", None)
+    with open(copilot_cfg, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+    updated_files.append(str(copilot_cfg))
+
+    code_user = code_dir / "User"
+    if code_user.exists():
+        code_mcp_cfg = code_user / "mcp.json"
+        with open(code_mcp_cfg, "w", encoding="utf-8") as f:
+            json.dump({"mcpServers": mcp_servers}, f, indent=2)
+        updated_files.append(str(code_mcp_cfg))
+
+    proj_res = setup_project_mcp(servers, target_dir=cwd, overwrite=False)
+    updated_files.append(proj_res["config_file"])
+
+    return {
+        "client": "GitHub Copilot (VS Code)",
+        "detected": detected,
+        "status": "Configured",
+        "primary_config": str(copilot_cfg),
+        "files_updated": updated_files,
+        "servers_count": len(servers)
+    }
+
+
+def init_cursor(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Initialize Cursor AI editor MCP configuration."""
+    updated_files = []
+    cursor_dir = Path(os.environ.get("APPDATA", "")) / "Cursor"
+    cursor_home = Path.home() / ".cursor"
+    detected = cursor_dir.exists() or cursor_home.exists() or bool(shutil.which("cursor"))
+
+    if cursor_dir.exists():
+        target_cfg = cursor_dir / "User" / "mcp.json"
+        target_cfg.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        cursor_home.mkdir(parents=True, exist_ok=True)
+        target_cfg = cursor_home / "mcp.json"
+
+    py_servers = _get_active_python_server_entries(servers, cwd)
+    with open(target_cfg, "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": py_servers}, f, indent=2)
+    updated_files.append(str(target_cfg))
+
+    setup_project_mcp(servers, target_dir=cwd, overwrite=False)
+    return {
+        "client": "Cursor",
+        "detected": detected,
+        "status": "Configured",
+        "primary_config": str(target_cfg),
+        "files_updated": updated_files,
+        "servers_count": len(servers)
+    }
+
+
+def init_windsurf(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Initialize Codeium Windsurf MCP configuration."""
+    updated_files = []
+    windsurf_home = Path.home() / ".codeium" / "windsurf"
+    appdata_windsurf = Path(os.environ.get("APPDATA", "")) / "Windsurf"
+    detected = windsurf_home.exists() or appdata_windsurf.exists() or bool(shutil.which("windsurf"))
+
+    windsurf_home.mkdir(parents=True, exist_ok=True)
+    target_cfg = windsurf_home / "mcp_config.json"
+    py_servers = _get_active_python_server_entries(servers, cwd)
+    with open(target_cfg, "w", encoding="utf-8") as f:
+        json.dump({"mcpServers": py_servers}, f, indent=2)
+    updated_files.append(str(target_cfg))
+
+    setup_project_mcp(servers, target_dir=cwd, overwrite=False)
+    return {
+        "client": "Windsurf",
+        "detected": detected,
+        "status": "Configured",
+        "primary_config": str(target_cfg),
+        "files_updated": updated_files,
+        "servers_count": len(servers)
+    }
+
+
+def init_all_clients(servers: List[str], cwd: Path) -> List[Dict[str, Any]]:
+    """Auto-detect all AI clients installed on the system and configure them all."""
+    results = []
+    client_handlers = [
+        ("antigravity", init_antigravity),
+        ("claude", init_claude),
+        ("copilot", init_copilot),
+        ("cursor", init_cursor),
+        ("windsurf", init_windsurf),
+    ]
+
+    for _, handler in client_handlers:
+        res = handler(servers, cwd)
+        results.append(res)
+
+    return results
+
+
 def cmd_init_project(args: argparse.Namespace) -> None:
-    """Initialize zero-config MCP configuration in current project/repository."""
-    targets = getattr(args, "servers", [])
-    if not targets or targets == ["all"]:
-        # Auto-discover installed servers
-        avail = list_available_servers()
-        installed_servers = [name for name, info in avail.items() if info.get("is_installed", False)]
-        targets = installed_servers if installed_servers else ALL_BUILTIN_SERVERS
+    """Initialize MCP configuration for specific AI client (antigravity, claude, copilot, all) or project repository."""
+    raw_targets = getattr(args, "targets", []) or getattr(args, "servers", [])
+    cwd = Path.cwd()
+    avail = list_available_servers()
+    installed_servers = [name for name, info in avail.items() if info.get("is_installed", False)]
+    active_servers = installed_servers if installed_servers else list(BUILTIN_SERVERS.keys())
 
-    result = setup_project_mcp(targets, overwrite=True)
-    cwd = result["cwd"]
-    configured = ", ".join(result["servers"])
+    # Check if any target is a recognized client
+    client_tokens = [CLIENT_ALIASES[t.lower()] for t in raw_targets if t.lower() in CLIENT_ALIASES]
+    server_tokens = [t.lower() for t in raw_targets if t.lower() not in CLIENT_ALIASES]
 
-    print(f"\n✅ Successfully initialized mws auto-configuration in: {cwd}")
-    print(f"   • Active Servers ({len(result['servers'])}): {configured}")
-    print("   • Created: .mcp.json (Unified standard for VS Code 1.106+, Antigravity, Claude Code, Cursor, Windsurf)")
-    if result.get("migrated_from_legacy_vscode"):
-        print("   • Migrated & cleaned: Deprecated .vscode/mcp.json (VS Code 1.106+ deprecation)")
-    print("   • Created: AGENTS.md (Tailored AI Agent tool guidelines)\n")
+    selected_servers = server_tokens if server_tokens else active_servers
+
+    if "all" in client_tokens or raw_targets == ["all"]:
+        # User requested 'mws init all' -> scan system, init all detected clients!
+        print(f"\n🚀 Initializing mws MCP suite across all system clients & project: {cwd}\n")
+        results = init_all_clients(selected_servers, cwd)
+        print("=" * 86)
+        print(f" {'CLIENT':<26} {'DETECTED':<12} {'STATUS':<14} {'PRIMARY CONFIG'}")
+        print("-" * 86)
+        for r in results:
+            det = "[Yes]" if r["detected"] else "[No]"
+            stat = f"[{r['status']}]" if r["detected"] else "[Skipped]"
+            cfg = r["primary_config"] if r["detected"] else "Not detected on system"
+            print(f" {r['client']:<26} {det:<12} {stat:<14} {cfg}")
+        print("=" * 86)
+        print(f"\n✅ Workspace Project Initialized ({len(selected_servers)} servers):")
+        print("   • .mcp.json (Unified standard for VS Code 1.106+, Copilot, Antigravity, Cursor)")
+        print("   • .agents/mcp_config.json (Antigravity workspace agent)")
+        print("   • AGENTS.md & GEMINI.md (Agent pair-programming guidelines)\n")
+        return
+
+    elif client_tokens:
+        # User specified specific client(s), e.g. 'mws init antigravity', 'mws init copilot'
+        client_dispatch = {
+            "antigravity": init_antigravity,
+            "claude": init_claude,
+            "copilot": init_copilot,
+            "cursor": init_cursor,
+            "windsurf": init_windsurf,
+        }
+        for c in client_tokens:
+            handler = client_dispatch.get(c)
+            if handler:
+                res = handler(selected_servers, cwd)
+                status_icon = "✅" if res["detected"] else "ℹ️"
+                print(f"\n{status_icon} Initialized MCP configuration for {res['client']}:")
+                print(f"   • Primary Config: {res['primary_config']}")
+                print(f"   • Active Servers ({res['servers_count']}): {', '.join(selected_servers)}")
+                print(f"   • Workspace: {cwd}")
+                print(f"   • Detected on system: {'Yes' if res['detected'] else 'No (configuration created)'}")
+                for f_path in res["files_updated"]:
+                    print(f"     -> {f_path}")
+        print()
+        return
+
+    else:
+        # Default project initialization: .mcp.json, .agents/mcp_config.json, AGENTS.md, GEMINI.md
+        result = setup_project_mcp(selected_servers, overwrite=True)
+        configured = ", ".join(result["servers"])
+        print(f"\n✅ Successfully initialized mws auto-configuration in: {cwd}")
+        print(f"   • Active Servers ({len(result['servers'])}): {configured}")
+        print("   • Created: .mcp.json (Unified standard for VS Code 1.106+, Copilot, Antigravity, Cursor)")
+        print("   • Created: .agents/mcp_config.json (Antigravity workspace agent)")
+        if result.get("migrated_from_legacy_vscode"):
+            print("   • Migrated & cleaned: Deprecated .vscode/mcp.json (VS Code 1.106+ deprecation)")
+        print("   • Created: AGENTS.md & GEMINI.md (Tailored AI Agent tool guidelines)\n")
 
 
 def cmd_setup_project(args: argparse.Namespace) -> None:
@@ -1068,8 +1459,8 @@ def main() -> None:
     sub_doctor.set_defaults(func=cmd_doctor)
 
     # init-project / init
-    sub_init = subparsers.add_parser("init-project", aliases=["init"], help="Initialize zero-config MCP setup (.mcp.json, AGENTS.md) in current repository")
-    sub_init.add_argument("servers", nargs="*", default=[], help="Optional list of servers to configure (e.g. 'excel db tsc'). If omitted, all servers are configured.")
+    sub_init = subparsers.add_parser("init-project", aliases=["init"], help="Initialize MCP configuration for specific AI client (antigravity, claude, copilot, all) or project (.mcp.json, AGENTS.md)")
+    sub_init.add_argument("targets", nargs="*", default=[], help="Target AI client ('antigravity', 'claude', 'copilot', 'cursor', 'windsurf', 'all') or server names ('excel', 'db'). If omitted or 'all', auto-detects all installed clients.")
     sub_init.set_defaults(func=cmd_init_project)
 
     # fix-path / path
@@ -1078,7 +1469,7 @@ def main() -> None:
     sub_path.set_defaults(func=cmd_fix_path)
 
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
-    known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc", "rag", "excel-db"}
+    known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc", "rag", "excel-db", "antigravity", "claude", "copilot", "cursor", "windsurf", "all"}
     known_cmds = {"guide", "run", "setup", "setup-project", "add", "add-project", "remove-project", "doctor", "remove", "install", "update", "uninstall", "fix-path", "path", "init", "init-project"}
     if len(sys.argv) >= 3 and sys.argv[1].lower() in known_srvs and sys.argv[2].lower() in known_cmds:
         srv_token = sys.argv[1].lower()

@@ -39,10 +39,11 @@ def test_list_connections_with_claude_desktop_env():
     elapsed_ms = (time.time() - t0) * 1000
 
     assert elapsed_ms < 50, f"list_connections took too long: {elapsed_ms}ms"
-    assert res["totalConnections"] >= 2
+    parsed_expected = json.loads(servers_val)
+    assert res["totalConnections"] >= len(parsed_expected)
     conn_names = [c["name"] for c in res["connections"]]
-    assert "live_mysql_server" in conn_names
-    assert "postgres_local_server" in conn_names
+    for expected_key in parsed_expected.keys():
+        assert expected_key in conn_names
     assert "default" not in conn_names  # Ensure metadata 'default' is not exposed as a connection
 
 

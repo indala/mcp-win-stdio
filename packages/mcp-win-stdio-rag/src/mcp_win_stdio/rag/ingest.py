@@ -44,28 +44,54 @@ def compute_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def is_stub_chunk(title: str, text: str) -> bool:
+    """Detect if chunk is pure frontmatter or redirect stub with no meaningful content."""
+    t_lower = title.strip().lower()
+    if t_lower in ("prettier-ignore", "frontmatter", "metadata"):
+        return True
+    words = text.split()
+    if len(words) < 25:
+        txt_lower = text.lower()
+        if "deprecation_redirects:" in txt_lower or "permalink:" in txt_lower or "layout:" in txt_lower:
+            return True
+        if "redirect" in t_lower and ("redirect" in txt_lower or "moved to" in txt_lower):
+            return True
+    return False
+
+
+def strip_frontmatter(content: str) -> Tuple[str, int]:
+    """Strip YAML frontmatter at the beginning of markdown, returning content and line offset."""
+    lines = content.splitlines()
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                return "\n".join(lines[i + 1:]).lstrip("\n"), i + 1
+    return content, 0
+
+
 def chunk_markdown_by_headings(content: str, rel_path: str, base_url_prefix: str = "") -> List[Dict[str, Any]]:
     """
     Split markdown document into section-aware chunks respecting #, ##, ### headers.
-    Generates anchor links for each section.
+    Generates anchor links for each section and filters out frontmatter stubs.
     """
-    lines = content.splitlines()
+    cleaned_content, offset = strip_frontmatter(content)
+    lines = cleaned_content.splitlines()
     chunks: List[Dict[str, Any]] = []
     
     current_title = Path(rel_path).stem.replace("-", " ").replace("_", " ").title()
     current_anchor = ""
     current_lines: List[str] = []
-    start_line = 1
+    start_line = offset + 1
 
     header_regex = re.compile(r"^(#{1,4})\s+(.+)$")
 
-    for idx, line in enumerate(lines, start=1):
+    for idx, line in enumerate(lines, start=offset + 1):
         match = header_regex.match(line)
         if match:
             # Flush previous section
             if current_lines:
                 sec_text = "\n".join(current_lines).strip()
-                if sec_text:
+                if sec_text and not is_stub_chunk(current_title, sec_text):
                     anchor_url = f"{base_url_prefix}#{current_anchor}" if (base_url_prefix and current_anchor) else (f"{base_url_prefix}#L{start_line}-L{idx-1}" if base_url_prefix else f"{rel_path}#L{start_line}-L{idx-1}")
                     chunks.append({
                         "section_title": current_title,
@@ -90,15 +116,15 @@ def chunk_markdown_by_headings(content: str, rel_path: str, base_url_prefix: str
     # Flush final section
     if current_lines:
         sec_text = "\n".join(current_lines).strip()
-        if sec_text:
-            anchor_url = f"{base_url_prefix}#{current_anchor}" if (base_url_prefix and current_anchor) else (f"{base_url_prefix}#L{start_line}-L{len(lines)}" if base_url_prefix else f"{rel_path}#L{start_line}-L{len(lines)}")
+        if sec_text and not is_stub_chunk(current_title, sec_text):
+            anchor_url = f"{base_url_prefix}#{current_anchor}" if (base_url_prefix and current_anchor) else (f"{base_url_prefix}#L{start_line}-L{len(lines) + offset}" if base_url_prefix else f"{rel_path}#L{start_line}-L{len(lines) + offset}")
             chunks.append({
                 "section_title": current_title,
                 "anchor_id": current_anchor,
                 "anchor_url": anchor_url,
                 "file_path": rel_path,
                 "line_start": start_line,
-                "line_end": len(lines),
+                "line_end": len(lines) + offset,
                 "text": f"## {current_title}\n{sec_text}" if not sec_text.startswith("#") else sec_text,
                 "word_count": len(sec_text.split())
             })
@@ -185,7 +211,7 @@ def parse_github_url(url: str) -> Dict[str, str]:
 
     owner = match.group(1)
     repo = match.group(2).removesuffix(".git")
-    branch = match.group(3) or "main"
+    branch = match.group(3) or ""
     subpath = match.group(4) or ""
 
     return {
@@ -199,6 +225,7 @@ def parse_github_url(url: str) -> Dict[str, str]:
 
 def stream_github_repo_in_memory(
     repo_url: str,
+    subpath: Optional[str] = None,
     allowed_extensions: Optional[Set[str]] = None,
     auth_token: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -210,13 +237,17 @@ def stream_github_repo_in_memory(
     owner = meta["owner"]
     repo = meta["repo"]
     branch = meta["branch"]
-    subpath = meta["subpath"]
+    effective_subpath = (subpath or meta["subpath"] or "").strip("/")
 
     if allowed_extensions is None:
         allowed_extensions = DEFAULT_DOC_EXTENSIONS | DEFAULT_CODE_EXTENSIONS | DEFAULT_CONFIG_EXTENSIONS
 
     # 1. Fetch latest commit SHA for content caching
-    commit_api_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{branch}"
+    commit_api_url = (
+        f"https://api.github.com/repos/{owner}/{repo}/commits/{branch}"
+        if branch
+        else f"https://api.github.com/repos/{owner}/{repo}/commits/HEAD"
+    )
     req_commit = urllib.request.Request(commit_api_url, headers={"User-Agent": "mws-rag-crawler/1.0"})
     if auth_token:
         req_commit.add_header("Authorization", f"token {auth_token}")
@@ -230,13 +261,40 @@ def stream_github_repo_in_memory(
         pass
 
     # 2. Stream zipball archive into memory
-    zip_url = f"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}"
+    zip_url = (
+        f"https://api.github.com/repos/{owner}/{repo}/zipball/{branch}"
+        if branch
+        else f"https://api.github.com/repos/{owner}/{repo}/zipball"
+    )
     req_zip = urllib.request.Request(zip_url, headers={"User-Agent": "mws-rag-crawler/1.0"})
     if auth_token:
         req_zip.add_header("Authorization", f"token {auth_token}")
 
-    with urllib.request.urlopen(req_zip, timeout=30) as resp:
-        zip_bytes = resp.read()
+    try:
+        with urllib.request.urlopen(req_zip, timeout=60) as resp:
+            final_url = resp.geturl()
+            # If branch was not explicitly provided in URL, extract resolved branch from redirect URL
+            if not branch:
+                m = re.search(r"/refs/heads/(.+)$", final_url)
+                if m:
+                    branch = m.group(1)
+                else:
+                    branch = "main"
+                meta["branch"] = branch
+            zip_bytes = resp.read()
+    except urllib.error.HTTPError as he:
+        if he.code == 404:
+            raise RuntimeError(
+                f"GitHub repository or archive not found at '{zip_url}'. Verify the repository is public (or auth_token is supplied) and that the branch exists."
+            ) from he
+        elif he.code in (401, 403):
+            raise RuntimeError(
+                f"GitHub access denied ({he.code}) for '{zip_url}'. API rate limits may have been reached, or a private repo requires an auth_token."
+            ) from he
+        else:
+            raise RuntimeError(f"HTTP error {he.code} while streaming repository from '{zip_url}': {he.reason}") from he
+    except Exception as e:
+        raise RuntimeError(f"Failed to stream GitHub repository from '{zip_url}': {e}") from e
 
     files_data: List[Dict[str, Any]] = []
 
@@ -252,7 +310,7 @@ def stream_github_repo_in_memory(
             rel_file_path = parts[1]
 
             # Filter by subpath if requested
-            if subpath and not rel_file_path.startswith(subpath):
+            if effective_subpath and not rel_file_path.startswith(effective_subpath):
                 continue
 
             ext = Path(rel_file_path).suffix.lower()

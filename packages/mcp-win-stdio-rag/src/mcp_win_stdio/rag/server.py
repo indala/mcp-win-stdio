@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import time
@@ -27,7 +28,12 @@ from mcp_win_stdio.rag.ingest import (
     parse_github_url,
     compute_sha256
 )
-from mcp_win_stdio.rag.store import RAGVectorStore
+from mcp_win_stdio.rag.store import (
+    RAGVectorStore,
+    COMMON_STOPWORDS,
+    _stem_token,
+    analyze_query_coverage
+)
 
 mcp = FastMCP("rag-mcp")
 
@@ -88,34 +94,42 @@ def crawl_and_index_url(
         max_depth: Maximum link depth to crawl (default: 2).
         max_pages: Maximum total pages to crawl (default: 40).
     """
-    crawler = AsyncPlaywrightCrawler(target_url=target_url, max_depth=max_depth, max_pages=max_pages)
-    
     try:
-        loop = asyncio.get_running_loop()
-        crawl_result = asyncio.run_coroutine_threadsafe(crawler.crawl(), loop).result()
-    except RuntimeError:
-        crawl_result = asyncio.run(crawler.crawl())
+        crawler = AsyncPlaywrightCrawler(target_url=target_url, max_depth=max_depth, max_pages=max_pages)
+        
+        try:
+            loop = asyncio.get_running_loop()
+            crawl_result = asyncio.run_coroutine_threadsafe(crawler.crawl(), loop).result()
+        except RuntimeError:
+            crawl_result = asyncio.run(crawler.crawl())
 
-    col_id = collection_name if collection_name else target_url
-    col_dir = _get_collection_dir(col_id)
-    db_path = col_dir / "vector_store.db"
-    store = RAGVectorStore(db_path)
-    
-    store.index_crawled_data(crawl_result, collection_name=col_id)
-    meta = store.get_metadata()
+        col_id = collection_name if collection_name else target_url
+        col_dir = _get_collection_dir(col_id)
+        db_path = col_dir / "vector_store.db"
+        store = RAGVectorStore(db_path)
+        
+        store.index_crawled_data(crawl_result, collection_name=col_id)
+        meta = store.get_metadata()
 
-    return json.dumps({
-        "status": "success",
-        "target_url": target_url,
-        "collection_name": col_id,
-        "is_single_page_doc": crawl_result.get("is_single_page_doc", False),
-        "pages_crawled": crawl_result["total_pages_crawled"],
-        "sections_extracted": meta.get("total_sections", 0),
-        "chunks_indexed": meta.get("total_chunks", 0),
-        "size_mb": meta.get("size_mb", 0.0),
-        "store_location": str(db_path),
-        "message": f"Successfully indexed {meta.get('total_sections', 0)} sections across {crawl_result['total_pages_crawled']} pages with anchor deep-links."
-    }, indent=2)
+        return json.dumps({
+            "status": "success",
+            "target_url": target_url,
+            "collection_name": col_id,
+            "is_single_page_doc": crawl_result.get("is_single_page_doc", False),
+            "pages_crawled": crawl_result["total_pages_crawled"],
+            "sections_extracted": meta.get("total_sections", 0),
+            "chunks_indexed": meta.get("total_chunks", 0),
+            "size_mb": meta.get("size_mb", 0.0),
+            "store_location": str(db_path),
+            "message": f"Successfully indexed {meta.get('total_sections', 0)} sections across {crawl_result['total_pages_crawled']} pages with anchor deep-links."
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "error": f"Failed to crawl and index '{target_url}': {str(e)}",
+            "target_url": target_url,
+            "collection_name": collection_name
+        }, indent=2)
 
 
 @mcp.tool()
@@ -137,74 +151,81 @@ def index_local_codebase(
         extensions: Optional list of file extensions to include (e.g. ['.md', '.ts', '.py']).
         force_reindex: If True, ignores cached hashes and re-indexes all files.
     """
-    root_p = Path(project_path).resolve()
-    if not root_p.exists() or not root_p.is_dir():
-        return json.dumps({"error": f"Invalid project directory: '{project_path}'"}, indent=2)
+    try:
+        root_p = Path(project_path).resolve()
+        if not root_p.exists() or not root_p.is_dir():
+            return json.dumps({"error": f"Invalid project directory: '{project_path}'"}, indent=2)
 
-    col_id = collection_name or root_p.name.lower()
-    col_dir = _get_collection_dir(col_id)
-    db_path = col_dir / "vector_store.db"
-    store = RAGVectorStore(db_path)
+        col_id = collection_name or root_p.name.lower()
+        col_dir = _get_collection_dir(col_id)
+        db_path = col_dir / "vector_store.db"
+        store = RAGVectorStore(db_path)
 
-    allowed_exts = set(extensions) if extensions else None
-    cached_hashes = {} if force_reindex else store.get_manifest_hashes(collection=col_id)
+        allowed_exts = set(extensions) if extensions else None
+        cached_hashes = {} if force_reindex else store.get_manifest_hashes(collection=col_id)
 
-    def _progress(phase: str, phase_num: int, total_phases: int, cur: int, tot: int, msg: str):
-        pct = (cur / tot * 100.0) if tot > 0 else 0.0
-        sys.stderr.write(f"[{phase_num}/{total_phases}] {phase} ({pct:.1f}%): {msg}\n")
-        sys.stderr.flush()
+        def _progress(phase: str, phase_num: int, total_phases: int, cur: int, tot: int, msg: str):
+            pct = (cur / tot * 100.0) if tot > 0 else 0.0
+            sys.stderr.write(f"[{phase_num}/{total_phases}] {phase} ({pct:.1f}%): {msg}\n")
+            sys.stderr.flush()
 
-    files_to_update, skipped_count, live_paths = scan_local_codebase(
-        str(root_p),
-        allowed_extensions=allowed_exts,
-        cached_hashes=cached_hashes,
-        progress_cb=_progress
-    )
+        files_to_update, skipped_count, live_paths = scan_local_codebase(
+            str(root_p),
+            allowed_extensions=allowed_exts,
+            cached_hashes=cached_hashes,
+            progress_cb=_progress
+        )
 
-    _progress("SQLITE_WAL_COMMIT", 4, 5, 0, len(files_to_update), f"Committing {len(files_to_update)} updated files to SQLite...")
-    total_new_chunks = store.update_files_batch(collection=col_id, files_data=files_to_update)
-    updated_count = len(files_to_update)
-    _progress("SQLITE_WAL_COMMIT", 4, 5, len(files_to_update), len(files_to_update), f"Committed {total_new_chunks} chunks.")
+        _progress("SQLITE_WAL_COMMIT", 4, 5, 0, len(files_to_update), f"Committing {len(files_to_update)} updated files to SQLite...")
+        total_new_chunks = store.update_files_batch(collection=col_id, files_data=files_to_update)
+        updated_count = len(files_to_update)
+        _progress("SQLITE_WAL_COMMIT", 4, 5, len(files_to_update), len(files_to_update), f"Committed {total_new_chunks} chunks.")
 
-    _progress("GRAPH_LINK_AND_PRUNE", 5, 5, 0, 1, "Pruning deleted files & checking Graphify graph...")
-    pruned_count = store.prune_orphaned_files(collection=col_id, live_file_paths=live_paths)
+        _progress("GRAPH_LINK_AND_PRUNE", 5, 5, 0, 1, "Pruning deleted files & checking Graphify graph...")
+        pruned_count = store.prune_orphaned_files(collection=col_id, live_file_paths=live_paths)
 
-    # Check for Graphify output in the project
-    graphify_json = root_p / "graphify-out" / "graph.json"
-    has_graph = False
-    if graphify_json.exists():
-        try:
-            with open(graphify_json, "r", encoding="utf-8") as f:
-                g_data = json.load(f)
-                store.index_graphify_graph(g_data)
-                has_graph = True
-        except Exception:
-            pass
+        # Check for Graphify output in the project
+        graphify_json = root_p / "graphify-out" / "graph.json"
+        has_graph = False
+        if graphify_json.exists():
+            try:
+                with open(graphify_json, "r", encoding="utf-8") as f:
+                    g_data = json.load(f)
+                    store.index_graphify_graph(g_data)
+                    has_graph = True
+            except Exception:
+                pass
 
-    store.set_collection_meta(
-        name=col_id,
-        coll_type="local_codebase",
-        source_uri=str(root_p)
-    )
+        store.set_collection_meta(
+            name=col_id,
+            coll_type="local_codebase",
+            source_uri=str(root_p)
+        )
 
-    _progress("COMPLETE", 5, 5, 1, 1, "Done!")
+        _progress("COMPLETE", 5, 5, 1, 1, "Done!")
 
-    meta = store.get_metadata()
+        meta = store.get_metadata()
 
-    return json.dumps({
-        "status": "success",
-        "collection_name": col_id,
-        "project_path": str(root_p),
-        "total_scanned_files": len(files_to_update) + skipped_count,
-        "unchanged_files_skipped": skipped_count,
-        "files_reindexed": updated_count,
-        "deleted_orphans_pruned": pruned_count,
-        "total_active_chunks": meta.get("total_chunks", 0),
-        "graphify_graph_linked": has_graph,
-        "size_mb": meta.get("size_mb", 0.0),
-        "store_location": str(db_path),
-        "message": f"Indexed '{col_id}': {updated_count} files re-indexed ({total_new_chunks} chunks), {skipped_count} unchanged files skipped in 0ms."
-    }, indent=2)
+        return json.dumps({
+            "status": "success",
+            "collection_name": col_id,
+            "project_path": str(root_p),
+            "total_scanned_files": len(files_to_update) + skipped_count,
+            "unchanged_files_skipped": skipped_count,
+            "files_reindexed": updated_count,
+            "deleted_orphans_pruned": pruned_count,
+            "total_active_chunks": meta.get("total_chunks", 0),
+            "graphify_graph_linked": has_graph,
+            "size_mb": meta.get("size_mb", 0.0),
+            "store_location": str(db_path),
+            "message": f"Indexed '{col_id}': {updated_count} files re-indexed ({total_new_chunks} chunks), {skipped_count} unchanged files skipped in 0ms."
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "error": f"Failed to index local codebase at '{project_path}': {str(e)}",
+            "project_path": project_path
+        }, indent=2)
 
 
 @mcp.tool()
@@ -227,59 +248,69 @@ def index_remote_repo(
         is_temp: If True, marks this collection as ephemeral with 24h auto-expiry (default False).
         auth_token: Optional GitHub Personal Access Token for private repositories.
     """
-    parsed = parse_github_url(repo_url)
-    effective_subpath = subpath or parsed.get("subpath") or ""
-    col_id = collection_name or parsed["repo"].lower()
+    try:
+        parsed = parse_github_url(repo_url)
+        effective_subpath = subpath or parsed.get("subpath") or ""
+        col_id = collection_name or parsed["repo"].lower()
 
-    col_dir = _get_collection_dir(col_id)
-    db_path = col_dir / "vector_store.db"
-    store = RAGVectorStore(db_path)
+        col_dir = _get_collection_dir(col_id)
+        db_path = col_dir / "vector_store.db"
+        store = RAGVectorStore(db_path)
 
-    # 1. Stream repo in memory
-    stream_res = stream_github_repo_in_memory(
-        repo_url=repo_url,
-        auth_token=auth_token
-    )
+        # 1. Stream repo in memory
+        stream_res = stream_github_repo_in_memory(
+            repo_url=repo_url,
+            subpath=effective_subpath,
+            auth_token=auth_token
+        )
 
-    remote_sha = stream_res.get("commit_sha", "")
-    files_data = stream_res.get("files", [])
+        remote_sha = stream_res.get("commit_sha", "")
+        files_data = stream_res.get("files", [])
 
-    cached_hashes = store.get_manifest_hashes(collection=col_id)
-    live_paths = {fd["file_path"] for fd in files_data}
-    files_to_update = [fd for fd in files_data if cached_hashes.get(fd["file_path"]) != fd["content_hash"]]
-    skipped_count = len(files_data) - len(files_to_update)
+        cached_hashes = store.get_manifest_hashes(collection=col_id)
+        live_paths = {fd["file_path"] for fd in files_data}
+        files_to_update = [fd for fd in files_data if cached_hashes.get(fd["file_path"]) != fd["content_hash"]]
+        skipped_count = len(files_data) - len(files_to_update)
 
-    total_new_chunks = store.update_files_batch(collection=col_id, files_data=files_to_update)
-    updated_count = len(files_to_update)
+        total_new_chunks = store.update_files_batch(collection=col_id, files_data=files_to_update)
+        updated_count = len(files_to_update)
 
-    pruned_count = store.prune_orphaned_files(collection=col_id, live_file_paths=live_paths)
+        pruned_count = store.prune_orphaned_files(collection=col_id, live_file_paths=live_paths)
 
-    store.set_collection_meta(
-        name=col_id,
-        coll_type="remote_git",
-        source_uri=repo_url,
-        commit_sha=remote_sha,
-        is_temp=is_temp,
-        ttl_hours=24 if is_temp else None
-    )
+        resolved_branch = stream_res.get("repo_meta", {}).get("branch") or parsed.get("branch") or "main"
+        store.set_collection_meta(
+            name=col_id,
+            coll_type="remote_git",
+            source_uri=repo_url,
+            commit_sha=remote_sha,
+            is_temp=is_temp,
+            ttl_hours=24 if is_temp else None
+        )
 
-    meta = store.get_metadata()
+        meta = store.get_metadata()
 
-    return json.dumps({
-        "status": "success",
-        "collection_name": col_id,
-        "repo_url": repo_url,
-        "branch": parsed["branch"],
-        "commit_sha": remote_sha[:8] if remote_sha else "latest",
-        "is_temp": is_temp,
-        "total_streamed_files": len(files_data),
-        "unchanged_files_skipped": skipped_count,
-        "files_indexed": updated_count,
-        "total_active_chunks": meta.get("total_chunks", 0),
-        "size_mb": meta.get("size_mb", 0.0),
-        "store_location": str(db_path),
-        "message": f"Zero-clone indexed '{parsed['full_name']}': {updated_count} files indexed ({total_new_chunks} chunks), {skipped_count} skipped in 0ms."
-    }, indent=2)
+        return json.dumps({
+            "status": "success",
+            "collection_name": col_id,
+            "repo_url": repo_url,
+            "branch": resolved_branch,
+            "commit_sha": remote_sha[:8] if remote_sha else "latest",
+            "is_temp": is_temp,
+            "total_streamed_files": len(files_data),
+            "unchanged_files_skipped": skipped_count,
+            "files_indexed": updated_count,
+            "total_active_chunks": meta.get("total_chunks", 0),
+            "size_mb": meta.get("size_mb", 0.0),
+            "store_location": str(db_path),
+            "message": f"Zero-clone indexed '{parsed['full_name']}': {updated_count} files indexed ({total_new_chunks} chunks), {skipped_count} skipped in 0ms."
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "error": f"Failed to index remote repository '{repo_url}': {str(e)}",
+            "repo_url": repo_url,
+            "collection_name": collection_name
+        }, indent=2)
 
 
 @mcp.tool()
@@ -287,20 +318,24 @@ def query_knowledge_base(
     query: str,
     target_url_or_collection: Optional[str] = None,
     top_k: int = 5,
-    max_chars_per_snippet: int = 500,
-    compact: bool = True
+    max_chars_per_snippet: int = 1000,
+    compact: bool = True,
+    filter_path: Optional[str] = None,
+    exclude_paths: Optional[List[str]] = None
 ) -> str:
     """
     Perform hybrid vector + BM25 search returning section-level snippets with exact anchor deep-link citations.
     Supports querying a single collection or searching across ALL collections.
-    Includes built-in compact mode and snippet length capping to prevent LLM context window bloat.
+    Includes built-in path filtering, canonical documentation boosts, and snippet boundary controls.
 
     Args:
         query: Search query or question.
         target_url_or_collection: Target collection name or URL. If omitted or 'all', searches across ALL indexed collections.
         top_k: Number of relevant snippet results to return (default: 5).
-        max_chars_per_snippet: Maximum character length per snippet excerpt (default: 500, use 0 for full text).
+        max_chars_per_snippet: Maximum character length per snippet excerpt (default: 1000, use 0 for full text).
         compact: If True (default), formats results with token-optimized keys and truncates long text. Call get_chunk_context() to read full chunk content.
+        filter_path: Optional substring filter for file paths (e.g. 'handbook/2', 'reference', 'src/api').
+        exclude_paths: Optional list of path substrings to exclude (e.g. ['release-notes', 'deprecated', 'v1']).
     """
     all_results = []
 
@@ -312,7 +347,13 @@ def query_knowledge_base(
             for col_name, store in _get_all_stores():
                 meta = store.get_metadata()
                 if meta.get("target_url") == target_url_or_collection or meta.get("collection_name") == target_url_or_collection or col_name == target_url_or_collection.lower():
-                    results = store.search(query, top_k=top_k, max_chars_per_snippet=max_chars_per_snippet)
+                    results = store.search(
+                        query,
+                        top_k=top_k,
+                        max_chars_per_snippet=max_chars_per_snippet,
+                        filter_path=filter_path,
+                        exclude_paths=exclude_paths
+                    )
                     for r in results:
                         r["collection"] = col_name
                     all_results.extend(results)
@@ -329,7 +370,13 @@ def query_knowledge_base(
                 }, indent=2)
         else:
             store = RAGVectorStore(db_path)
-            results = store.search(query, top_k=top_k, max_chars_per_snippet=max_chars_per_snippet)
+            results = store.search(
+                query,
+                top_k=top_k,
+                max_chars_per_snippet=max_chars_per_snippet,
+                filter_path=filter_path,
+                exclude_paths=exclude_paths
+            )
             for r in results:
                 r["collection"] = target_url_or_collection
             all_results.extend(results)
@@ -342,7 +389,13 @@ def query_knowledge_base(
             }, indent=2)
 
         for col_name, store in stores:
-            res = store.search(query, top_k=top_k, max_chars_per_snippet=max_chars_per_snippet)
+            res = store.search(
+                query,
+                top_k=top_k,
+                max_chars_per_snippet=max_chars_per_snippet,
+                filter_path=filter_path,
+                exclude_paths=exclude_paths
+            )
             for r in res:
                 r["collection"] = col_name
             all_results.extend(res)
@@ -354,13 +407,71 @@ def query_knowledge_base(
             "query": query,
             "target_collection": target_url_or_collection or "all",
             "total_results": 0,
+            "confidence": "none",
             "results": [],
             "suggestions": [
                 "No matching snippets found. Try broader keywords or simpler terms.",
-                "Verify indexed collections with list_rag_collections().",
-                "Omit target_url_or_collection to search across all indexed collections."
+                "If using filter_path or exclude_paths, try relaxing the path filter.",
+                "Verify indexed collections with list_rag_collections()."
             ]
         }, indent=2)
+
+    raw_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9_]+", query)]
+    sig_terms = [w for w in raw_words if len(w) > 2 and w not in COMMON_STOPWORDS]
+
+    top3_candidates = all_results[:min(3, len(all_results))]
+    top3_content = " ".join(f"{r.get('section', '')} {r.get('snippet', '')}" for r in top3_candidates).lower()
+
+    if sig_terms:
+        global_matched = []
+        global_missing = []
+        for t in sig_terms:
+            st = _stem_token(t)
+            if (t in top3_content) or (st in top3_content):
+                global_matched.append(t)
+            else:
+                global_missing.append(t)
+        global_coverage = len(global_matched) / len(sig_terms)
+    else:
+        global_matched = []
+        global_missing = []
+        global_coverage = 1.0
+
+    top_hit = all_results[0]
+    top_score = top_hit.get("similarity_score", 0.0)
+    top_cov = top_hit.get("query_coverage", {})
+    rank1_coverage = top_cov.get("coverage_ratio", 1.0)
+
+    # Calibrate confidence using multi-chunk global coverage, rank-1 match, and score
+    coverage_factor = (rank1_coverage * 0.35) + (global_coverage * 0.65)
+    score_factor = min(0.3, max(0.0, top_score / 15.0))
+
+    if global_missing:
+        # A significant term is completely absent across all top-3 hits
+        penalty = min(0.4, len(global_missing) * 0.2)
+        confidence_score = max(0.1, round((coverage_factor * 0.7) - penalty + score_factor, 2))
+        if confidence_score >= 0.50:
+            confidence = "medium"
+            confidence_note = f"Moderate match: terms {global_missing} were not found in primary documentation, but related patterns were retrieved."
+        else:
+            confidence = "low"
+            confidence_note = f"Low confidence: key term(s) {global_missing} were not found in the indexed documentation. Results provide related background, but no dedicated pattern was found."
+    else:
+        confidence_score = min(1.0, round((coverage_factor * 0.7) + score_factor, 2))
+        if confidence_score >= 0.75 and top_score >= 2.0:
+            confidence = "high"
+            confidence_note = "High confidence: primary documentation directly covers all query concepts."
+        elif confidence_score >= 0.45:
+            confidence = "medium"
+            confidence_note = "Moderate confidence match across relevant sections."
+        else:
+            confidence = "low"
+            confidence_note = "Low semantic match score: documentation may not directly address this concept."
+
+    # On low-confidence queries, filter out trailing filler results that score far below the top candidate (< 60% of top_score)
+    if confidence == "low" and len(all_results) > 2:
+        threshold = top_score * 0.60
+        all_results = [r for r in all_results if r.get("similarity_score", 0) >= threshold][:3]
 
     if compact:
         compact_results = []
@@ -381,8 +492,12 @@ def query_knowledge_base(
                 item["lines"] = lines_str
             compact_results.append(item)
 
-        return json.dumps({
+        resp_obj = {
             "query": query,
+            "confidence": confidence,
+            "confidence_score": confidence_score,
+            "confidence_note": confidence_note,
+            "missing_query_terms": global_missing,
             "total_results": len(compact_results),
             "results": compact_results,
             "token_control": {
@@ -390,13 +505,50 @@ def query_knowledge_base(
                 "max_chars_per_snippet": max_chars_per_snippet,
                 "tip": "Snippets are compact to conserve context tokens. Call get_chunk_context(chunk_id=<id>, window=1) to retrieve the full code block or surrounding context."
             }
-        }, indent=2)
+        }
+        return json.dumps(resp_obj, indent=2)
 
     return json.dumps({
         "query": query,
+        "confidence": confidence,
+        "confidence_score": confidence_score,
+        "confidence_note": confidence_note,
+        "missing_query_terms": global_missing,
         "total_results": len(all_results),
         "results": all_results
     }, indent=2)
+
+
+@mcp.tool()
+def find_related_chunks(
+    chunk_id: int,
+    target_url_or_collection: Optional[str] = None,
+    top_k: int = 5
+) -> str:
+    """
+    Find semantically and topically related chunks given a known chunk ID from previous search results.
+    Enables instant pivot from one documentation section to related concepts without manual keyword guessing.
+
+    Args:
+        chunk_id: The chunk ID to find relations for (from query_knowledge_base results).
+        target_url_or_collection: Optional collection alias to narrow lookup.
+        top_k: Maximum number of related chunks to return (default: 5).
+    """
+    stores = _get_all_stores()
+    if target_url_or_collection and target_url_or_collection.lower() not in ("all", "*", ""):
+        col_dir = _get_collection_dir(target_url_or_collection)
+        db_path = col_dir / "vector_store.db"
+        if db_path.exists():
+            store = RAGVectorStore(db_path)
+            related = store.find_related(chunk_id, top_k=top_k, collection=target_url_or_collection)
+            return json.dumps({"source_chunk_id": chunk_id, "related_chunks": related}, indent=2)
+
+    for col_name, store in stores:
+        related = store.find_related(chunk_id, top_k=top_k)
+        if related:
+            return json.dumps({"source_chunk_id": chunk_id, "collection": col_name, "related_chunks": related}, indent=2)
+
+    return json.dumps({"error": f"Chunk ID {chunk_id} not found to compute related items."}, indent=2)
 
 
 @mcp.tool()

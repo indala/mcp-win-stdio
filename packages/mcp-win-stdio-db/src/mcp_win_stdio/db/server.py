@@ -23,10 +23,23 @@ except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP
 
 # Database drivers
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import pymysql
-from pymysql.cursors import DictCursor
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    PG_ERROR = psycopg2.Error
+except (ImportError, Exception):
+    psycopg2 = None
+    RealDictCursor = None
+    PG_ERROR = Exception
+
+try:
+    import pymysql
+    from pymysql.cursors import DictCursor
+    MY_ERROR = pymysql.MySQLError
+except (ImportError, Exception):
+    pymysql = None
+    DictCursor = None
+    MY_ERROR = Exception
 
 mcp = FastMCP("database-mcp")
 
@@ -343,7 +356,7 @@ def _format_db_error(
         error_payload["failed_statement_index"] = statement_idx
 
     # 1. PostgreSQL error diagnostics
-    if isinstance(e, psycopg2.Error):
+    if psycopg2 and isinstance(e, PG_ERROR):
         code = getattr(e, "pgcode", None)
         diag = getattr(e, "diag", None)
         error_payload["code"] = code
@@ -497,9 +510,13 @@ def _get_connection(
 
         # Test connect with strict 2-second timeout
         if info["engine"] == "postgres":
+            if not psycopg2:
+                raise RuntimeError("PostgreSQL driver (psycopg2) is not available or blocked by system policy.")
             conn = psycopg2.connect(new_url, connect_timeout=2)
             conn.close()
         else:
+            if not pymysql:
+                raise RuntimeError("MySQL driver (pymysql) is not available.")
             conn = pymysql.connect(
                 host=info["host"], port=info["port"], user=info["user"],
                 password=info["password"], database=info["database"],
@@ -512,22 +529,25 @@ def _get_connection(
         return info
 
     # 6. Fallback: try connecting to local postgresql://postgres:postgres@localhost:5432/{name}
-    try:
-        candidate_url = f"postgresql://postgres:postgres@localhost:5432/{name}"
-        conn = psycopg2.connect(candidate_url, connect_timeout=2)
-        conn.close()
-        info = _parse_url(candidate_url)
-        info["name"] = name
-        info["url"] = candidate_url
-        _CONNECTION_REGISTRY[name] = info
-        return info
-    except Exception:
-        pass
+    if psycopg2:
+        try:
+            candidate_url = f"postgresql://postgres:postgres@localhost:5432/{name}"
+            conn = psycopg2.connect(candidate_url, connect_timeout=2)
+            conn.close()
+            info = _parse_url(candidate_url)
+            info["name"] = name
+            info["url"] = candidate_url
+            _CONNECTION_REGISTRY[name] = info
+            return info
+        except Exception:
+            pass
 
     raise ValueError(f"Connection or database '{name}' not found. Available connections: {list(_RAW_CONFIG.keys())}")
 
 
 def _get_pg_client(info: Dict[str, Any], dbname: Optional[str] = None):
+    if not psycopg2:
+        raise RuntimeError("PostgreSQL driver (psycopg2) is not available or blocked by system policy.")
     url = info["url"]
     if dbname:
         u = urlparse(url)

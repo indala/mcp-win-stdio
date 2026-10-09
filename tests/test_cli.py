@@ -170,7 +170,67 @@ def test_project_setup_and_migration(tmp_path):
     assert "excel" not in data_after.get("mcpServers", {})
     assert "db" in data_after.get("mcpServers", {})
     assert "custom-legacy-tool" in data_after.get("mcpServers", {})
+    # 7. Verify .agents/mcp_config.json and GEMINI.md were created
+    assert (tmp_path / ".agents" / "mcp_config.json").exists()
+    assert (tmp_path / "GEMINI.md").exists()
     print("[PASS] Project setup and migration test passed.")
+
+
+def test_init_clients(tmp_path):
+    from mcp_win_stdio.cli import (
+        init_antigravity,
+        init_claude,
+        init_copilot,
+        init_all_clients,
+    )
+
+    # 1. Antigravity
+    res_ag = init_antigravity(["excel", "db"], tmp_path)
+    assert res_ag["client"] == "Antigravity"
+    assert res_ag["status"] == "Configured"
+    assert (tmp_path / ".mcp.json").exists()
+    assert (tmp_path / ".agents" / "mcp_config.json").exists()
+    assert (tmp_path / "AGENTS.md").exists()
+    assert (tmp_path / "GEMINI.md").exists()
+
+    # 2. Claude
+    res_cl = init_claude(["excel", "word"], tmp_path)
+    assert "Claude" in res_cl["client"]
+    assert res_cl["status"] == "Configured"
+
+    # 3. Copilot
+    res_cp = init_copilot(["excel", "explorer"], tmp_path)
+    assert "Copilot" in res_cp["client"]
+    assert res_cp["status"] == "Configured"
+
+    # 4. All Clients
+    all_res = init_all_clients(["excel", "db", "tsc"], tmp_path)
+    assert len(all_res) >= 3
+    client_names = [r["client"] for r in all_res]
+    assert any("Antigravity" in name for name in client_names)
+    assert any("Claude" in name for name in client_names)
+    assert any("Copilot" in name for name in client_names)
+    print("[PASS] Multi-client init unit tests passed.")
+
+
+def test_cmd_init_dispatch(tmp_path, monkeypatch):
+    from mcp_win_stdio.cli import cmd_init_project
+    import argparse
+
+    monkeypatch.chdir(tmp_path)
+
+    # Test mws init antigravity
+    args_ag = argparse.Namespace(targets=["antigravity"])
+    cmd_init_project(args_ag)
+    assert (tmp_path / ".mcp.json").exists()
+    assert (tmp_path / ".agents" / "mcp_config.json").exists()
+
+    # Test mws init all
+    args_all = argparse.Namespace(targets=["all"])
+    cmd_init_project(args_all)
+    assert (tmp_path / "AGENTS.md").exists()
+    assert (tmp_path / "GEMINI.md").exists()
+    print("[PASS] cmd_init dispatch tests passed.")
 
 
 if __name__ == "__main__":
@@ -182,5 +242,6 @@ if __name__ == "__main__":
     test_updater()
     with tempfile.TemporaryDirectory() as tmp_dir:
         test_project_setup_and_migration(Path(tmp_dir))
+        test_init_clients(Path(tmp_dir))
     print("ALL TESTS PASSED!")
 

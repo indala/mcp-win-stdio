@@ -57,7 +57,18 @@ class AsyncPlaywrightCrawler:
         total_sections_count = 0
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            try:
+                browser = await p.chromium.launch(headless=True)
+            except Exception as e:
+                err_text = str(e)
+                if "Executable doesn't exist" in err_text or "playwright install" in err_text:
+                    import subprocess, sys
+                    sys.stderr.write("Playwright Chromium browser missing. Installing automatically...\n")
+                    sys.stderr.flush()
+                    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                    browser = await p.chromium.launch(headless=True)
+                else:
+                    raise
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Antigravity-RAG-Crawler/1.0"
             )
