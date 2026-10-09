@@ -9,8 +9,10 @@ from pathlib import Path
 
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stdout, "reconfigure"):
+            getattr(sys.stdout, "reconfigure")(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            getattr(sys.stderr, "reconfigure")(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -25,7 +27,7 @@ def bump_all():
     for p in ROOT_DIR.rglob("pyproject.toml"):
         text = p.read_text(encoding="utf-8")
         new_text = re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+"', f'version = "{NEW_VERSION}"', text)
-        new_text = re.sub(r'("mcp-win-stdio(?:-[a-z0-9-]+)?>=)[0-9]+\.[0-9]+\.[0-9]+', rf'\g<1>{NEW_VERSION}', new_text)
+        new_text = re.sub(r'("mcp-win-stdio(?:-[a-z0-9-]+)?>=)[0-9]+\.[0-9]+\.[0-9]+', rf"\g<1>{NEW_VERSION}", new_text)
         p.write_text(new_text, encoding="utf-8")
         print(f"  • Updated {p.relative_to(ROOT_DIR)}")
 

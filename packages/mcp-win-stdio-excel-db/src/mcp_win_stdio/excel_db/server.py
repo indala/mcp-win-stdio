@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 from mcp_win_stdio.excel_db.auditor import compare_master_datasets as audit_compare_masters
 from mcp_win_stdio.excel_db.auditor import reconcile_db_vs_excel as audit_reconcile
@@ -229,31 +229,44 @@ def compare_master_datasets(
         output_audit_path: Alias for output_report_path.
     """
     raw_a = source_a_path if source_a_path is not None else (source_a if source_a is not None else source_a_json)
+    if raw_a is None:
+        raise ValueError("source_a must be provided (as a file path, dict spec, or JSON string).")
     if isinstance(raw_a, str):
         try:
-            src_a = json.loads(raw_a)
+            parsed_a = json.loads(raw_a)
+            src_a: Union[str, Dict[str, Any]] = parsed_a if isinstance(parsed_a, dict) else raw_a
         except Exception:
             src_a = raw_a
-    else:
+    elif isinstance(raw_a, dict):
         src_a = raw_a
+    else:
+        src_a = str(raw_a)
 
     raw_b = source_b_path if source_b_path is not None else (source_b if source_b is not None else source_b_json)
+    if raw_b is None:
+        raise ValueError("source_b must be provided (as a file path, dict spec, or JSON string).")
     if isinstance(raw_b, str):
         try:
-            src_b = json.loads(raw_b)
+            parsed_b = json.loads(raw_b)
+            src_b: Union[str, Dict[str, Any]] = parsed_b if isinstance(parsed_b, dict) else raw_b
         except Exception:
             src_b = raw_b
-    else:
+    elif isinstance(raw_b, dict):
         src_b = raw_b
+    else:
+        src_b = str(raw_b)
 
     raw_map = column_mapping if column_mapping is not None else column_mapping_json
+    mapping: Optional[Dict[str, str]] = None
     if isinstance(raw_map, str):
         try:
-            mapping = json.loads(raw_map)
+            parsed_map = json.loads(raw_map)
+            if isinstance(parsed_map, dict):
+                mapping = {str(k): str(v) for k, v in parsed_map.items()}
         except Exception:
-            mapping = raw_map
-    else:
-        mapping = raw_map
+            mapping = None
+    elif isinstance(raw_map, dict):
+        mapping = dict(raw_map)
 
     effective_keys = key_columns or []
     effective_tol = tolerance if tolerance is not None else numeric_tolerance

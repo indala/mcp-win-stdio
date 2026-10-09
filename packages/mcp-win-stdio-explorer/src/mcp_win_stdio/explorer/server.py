@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 import pathspec
 from rapidfuzz import fuzz, process
 
@@ -816,7 +816,7 @@ def fuzzy_find(
 
     # Perform RapidFuzz extraction
     candidates = list(file_map.keys())
-    results = process.extract(
+    results = process.extract(  # type: ignore[call-overload,arg-type]
         query,
         candidates,
         scorer=fuzz.WRatio,
@@ -1329,7 +1329,7 @@ def get_file_info(
             "extension": p.suffix.lower() if not is_dir else "",
             "size_bytes": st.st_size if not is_dir else None,
             "size_formatted": _format_size(st.st_size) if not is_dir else None,
-            "created_at": datetime.fromtimestamp(st.st_ctime, tz=timezone.utc).isoformat(),
+            "created_at": datetime.fromtimestamp(getattr(st, "st_birthtime", st.st_ctime), tz=timezone.utc).isoformat(),
             "modified_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
             "line_count": line_count,
             "line_ending": line_ending,

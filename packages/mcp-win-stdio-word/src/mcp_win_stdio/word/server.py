@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 import docx
 from docx.enum.section import WD_ORIENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -57,7 +57,7 @@ def identify_paper_size(width_in: float, height_in: float) -> str:
     return f"Custom ({width_in:.2f} x {height_in:.2f} in)"
 
 
-def load_document(file_path: str) -> docx.Document:
+def load_document(file_path: str) -> Any:
     clean_path = os.path.abspath(file_path.strip("\"'"))
     if not os.path.exists(clean_path):
         raise FileNotFoundError(f"File not found: {clean_path}")

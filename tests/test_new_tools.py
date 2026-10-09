@@ -24,6 +24,9 @@ from mcp_win_stdio.excel.server import (
     list_tables,
     merge_cells,
 )
+from mcp_win_stdio.excel_db.server import (
+    compare_master_datasets,
+)
 from mcp_win_stdio.word.server import (
     add_heading,
     add_paragraph,
@@ -31,10 +34,6 @@ from mcp_win_stdio.word.server import (
     export_to_pdf,
     fill_template,
     replace_text,
-)
-
-from mcp_win_stdio.excel_db.server import (
-    compare_master_datasets,
 )
 
 

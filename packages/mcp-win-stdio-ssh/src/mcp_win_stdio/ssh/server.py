@@ -15,7 +15,7 @@ from typing import Any, Dict, Literal, Optional, Union
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 import paramiko
 from mcp_win_stdio.ssh.connection import (

@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Union
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 mcp = FastMCP("tsc-mcp")
 
@@ -346,37 +346,38 @@ def _watcher_loop(tsconfig_path: str, root_dir: str, cmd_base: Optional[List[str
 
         pending_errors: List[Dict[str, Any]] = []
 
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip()
-            if not line:
-                continue
+        if proc.stdout:
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip()
+                if not line:
+                    continue
 
-            # Check completion markers
-            if "Found 0 errors." in line or ("Found " in line and "Watching for file changes." in line):
-                with CACHE_LOCK:
-                    if tsconfig_path in WATCHED_PROJECTS:
-                        st = WATCHED_PROJECTS[tsconfig_path].get("start_time", time.time())
-                        WATCHED_PROJECTS[tsconfig_path]["errors"] = list(pending_errors)
-                        WATCHED_PROJECTS[tsconfig_path]["status"] = "ready"
-                        WATCHED_PROJECTS[tsconfig_path]["compile_duration_s"] = round(time.time() - st, 2)
-                        WATCHED_PROJECTS[tsconfig_path]["last_updated"] = datetime.now(timezone.utc).isoformat()
-                        ready_ev = WATCHED_PROJECTS[tsconfig_path].get("ready_event")
-                        if ready_ev:
-                            ready_ev.set()
-                pending_errors = []
-            elif "Starting compilation in watch mode..." in line or "File change detected." in line:
-                with CACHE_LOCK:
-                    if tsconfig_path in WATCHED_PROJECTS:
-                        WATCHED_PROJECTS[tsconfig_path]["status"] = "compiling"
-                        WATCHED_PROJECTS[tsconfig_path]["start_time"] = time.time()
-                pending_errors = []
-            else:
-                err = parse_tsc_line(line, project_dir, root_dir)
-                if err:
-                    pending_errors.append(err)
-                elif pending_errors and (line.startswith(" ") or line.startswith("\t")):
-                    # Multi-line diagnostic message continuation
-                    pending_errors[-1]["message"] += "\n" + line.strip()
+                # Check completion markers
+                if "Found 0 errors." in line or ("Found " in line and "Watching for file changes." in line):
+                    with CACHE_LOCK:
+                        if tsconfig_path in WATCHED_PROJECTS:
+                            st = WATCHED_PROJECTS[tsconfig_path].get("start_time", time.time())
+                            WATCHED_PROJECTS[tsconfig_path]["errors"] = list(pending_errors)
+                            WATCHED_PROJECTS[tsconfig_path]["status"] = "ready"
+                            WATCHED_PROJECTS[tsconfig_path]["compile_duration_s"] = round(time.time() - st, 2)
+                            WATCHED_PROJECTS[tsconfig_path]["last_updated"] = datetime.now(timezone.utc).isoformat()
+                            ready_ev = WATCHED_PROJECTS[tsconfig_path].get("ready_event")
+                            if ready_ev:
+                                ready_ev.set()
+                    pending_errors = []
+                elif "Starting compilation in watch mode..." in line or "File change detected." in line:
+                    with CACHE_LOCK:
+                        if tsconfig_path in WATCHED_PROJECTS:
+                            WATCHED_PROJECTS[tsconfig_path]["status"] = "compiling"
+                            WATCHED_PROJECTS[tsconfig_path]["start_time"] = time.time()
+                    pending_errors = []
+                else:
+                    err = parse_tsc_line(line, project_dir, root_dir)
+                    if err:
+                        pending_errors.append(err)
+                    elif pending_errors and (line.startswith(" ") or line.startswith("\t")):
+                        # Multi-line diagnostic message continuation
+                        pending_errors[-1]["message"] += "\n" + line.strip()
 
     except Exception as e:
         with CACHE_LOCK:

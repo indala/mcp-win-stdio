@@ -14,13 +14,13 @@ import sys
 import uuid
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, cast
 from urllib.parse import unquote, urlparse
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 # Database drivers
 try:
@@ -67,6 +67,18 @@ def _is_db_url(url: Any) -> bool:
         return False
     s = url.strip()
     return any(s.startswith(p) for p in ("postgresql://", "postgres://", "mysql://"))
+
+
+def _fetch_all(cur: Any) -> List[Any]:
+    """Safely fetch all rows from cursor as a list of dictionaries/records."""
+    rows = _fetch_all(cur)
+    return list(rows) if rows else []
+
+
+def _fetch_one(cur: Any) -> Dict[str, Any]:
+    """Safely fetch single row from cursor as a dictionary."""
+    row = _fetch_one(cur)
+    return dict(row) if row else {}
 
 
 def _parse_url(url: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -400,7 +412,7 @@ def _format_db_error(
             error_payload["suggestion"] = suggestions[code]
 
     # 2. MySQL error diagnostics
-    elif isinstance(e, pymysql.Error):
+    elif pymysql is not None and isinstance(e, getattr(pymysql, "Error", Exception)):
         code = e.args[0] if len(e.args) > 0 else None
         msg = e.args[1] if len(e.args) > 1 else str(e).strip()
         error_payload["code"] = code
@@ -557,13 +569,15 @@ def _get_pg_client(info: Dict[str, Any], dbname: Optional[str] = None):
 
 
 def _get_mysql_client(info: Dict[str, Any], dbname: Optional[str] = None):
+    if not pymysql or DictCursor is None:
+        raise RuntimeError("MySQL driver (pymysql) is not available.")
     return pymysql.connect(
         host=info["host"],
         port=info["port"],
         user=info["user"],
         password=info["password"],
         database=dbname or info["database"],
-        cursorclass=DictCursor,
+        cursorclass=DictCursor,  # type: ignore[arg-type]
         autocommit=True,
     )
 
@@ -582,7 +596,7 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
             "SELECT table_schema, table_name FROM information_schema.tables WHERE (table_schema = %s OR table_schema ILIKE %s) AND (table_name = %s OR table_name ILIKE %s) LIMIT 1",
             (s, s, t, t),
         )
-        row = cur.fetchone()
+        row = _fetch_one(cur)
         if row:
             return {"schema": row["table_schema"], "table": row["table_name"]}
         return {"schema": s, "table": t, "notFound": True}
@@ -592,7 +606,7 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
         "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = 'public' AND (table_name = %s OR table_name ILIKE %s) LIMIT 1",
         (t, t),
     )
-    row = cur.fetchone()
+    row = _fetch_one(cur)
     if row:
         return {"schema": "public", "table": row["table_name"]}
 
@@ -601,7 +615,7 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
         "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast') AND (table_name = %s OR table_name ILIKE %s) ORDER BY (table_name = %s) DESC",
         (t, t, t),
     )
-    rows = cur.fetchall()
+    rows = _fetch_all(cur)
     if rows:
         return {
             "schema": rows[0]["table_schema"],
@@ -643,12 +657,17 @@ def _truncate_cell(val: Any, max_chars: int = 500, is_sensitive: bool = False) -
     return val
 
 
-def _truncate_row(row: Dict[str, Any], max_chars: int = 500, mask_sensitive: bool = False) -> Dict[str, Any]:
+def _truncate_row(row: Any, max_chars: int = 500, mask_sensitive: bool = False) -> Dict[str, Any]:
     """Truncate all values in a single row dictionary, optionally masking PII / sensitive credentials."""
     res = {}
-    for k, v in row.items():
-        is_sens = mask_sensitive and bool(PII_COLUMN_PATTERN.match(k))
-        res[k] = _truncate_cell(v, max_chars, is_sensitive=is_sens)
+    if isinstance(row, dict):
+        for k, v in row.items():
+            is_sens = mask_sensitive and bool(PII_COLUMN_PATTERN.match(k))
+            res[k] = _truncate_cell(v, max_chars, is_sensitive=is_sens)
+    elif hasattr(row, "_asdict"):
+        for k, v in row._asdict().items():
+            is_sens = mask_sensitive and bool(PII_COLUMN_PATTERN.match(k))
+            res[k] = _truncate_cell(v, max_chars, is_sensitive=is_sens)
     return res
 
 
@@ -664,7 +683,7 @@ def list_connections() -> Dict[str, Any]:
     for k, v in _RAW_CONFIG.items():
         try:
             if k in _CONNECTION_REGISTRY:
-                info = _CONNECTION_REGISTRY[k]
+                info: Dict[str, Any] = _CONNECTION_REGISTRY[k]
             else:
                 url = v if isinstance(v, str) else v.get("url", "")
                 info = _parse_url(url)
@@ -698,6 +717,7 @@ def test_connection(connection: Optional[str] = None, server: Optional[str] = No
         server: Optional server alias.
         timeout: Socket connection timeout in seconds (default: 3).
     """
+    info: Optional[Dict[str, Any]] = None
     import time
 
     target = _resolve_conn(connection, server)
@@ -714,12 +734,17 @@ def test_connection(connection: Optional[str] = None, server: Optional[str] = No
     t0 = time.time()
     try:
         if info["engine"] == "postgres":
+            if not psycopg2:
+                raise RuntimeError("PostgreSQL driver (psycopg2) is not available.")
             conn = psycopg2.connect(info["url"], connect_timeout=timeout)
             with conn.cursor() as cur:
                 cur.execute("SELECT version();")
-                ver = cur.fetchone()[0]
+                res = cur.fetchone()
+                ver = res[0] if res else "unknown"
             conn.close()
         else:
+            if not pymysql:
+                raise RuntimeError("MySQL driver (pymysql) is not available.")
             conn = pymysql.connect(
                 host=info["host"],
                 port=info["port"],
@@ -730,7 +755,8 @@ def test_connection(connection: Optional[str] = None, server: Optional[str] = No
             )
             with conn.cursor() as cur:
                 cur.execute("SELECT version();")
-                ver = cur.fetchone()[0]
+                res = cur.fetchone()
+                ver = res[0] if res else "unknown"
             conn.close()
 
         latency_ms = round((time.time() - t0) * 1000, 2)
@@ -764,6 +790,7 @@ def test_connection(connection: Optional[str] = None, server: Optional[str] = No
 @mcp.tool()
 def remove_connection(name: str) -> Dict[str, Any]:
     """Remove a configured database connection alias."""
+    info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
     norm_name = _normalize_connection_param(name)
     if not norm_name:
@@ -831,6 +858,7 @@ def use_database(
         connection: Optional alias for server/connection name.
         name: Optional alias for database or connection name.
     """
+    info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
     target = (
         _normalize_connection_param(database)
@@ -851,11 +879,12 @@ def use_database(
 
     # 1. Check if target directly matches a registered connection name (case-insensitive)
     for k in list(_RAW_CONFIG.keys()):
-        if k.lower() == target.lower():
+        if target and k.lower() == target.lower():
             try:
                 info = _get_connection(k)
                 _ACTIVE_CONNECTION = info["name"]
-                _save_active_connection(_ACTIVE_CONNECTION)
+                if _ACTIVE_CONNECTION:
+                    _save_active_connection(_ACTIVE_CONNECTION)
                 return {
                     "success": True,
                     "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}). Connection alias: '{_ACTIVE_CONNECTION}', Database: '{info['database']}'.",
@@ -873,10 +902,11 @@ def use_database(
         try:
             url = v if isinstance(v, str) else v.get("url", "")
             p_info = _parse_url(url)
-            if p_info.get("database", "").lower() == target.lower():
+            if target and (p_info.get("database") or "").lower() == target.lower():
                 info = _get_connection(k)
                 _ACTIVE_CONNECTION = info["name"]
-                _save_active_connection(_ACTIVE_CONNECTION)
+                if _ACTIVE_CONNECTION:
+                    _save_active_connection(_ACTIVE_CONNECTION)
                 return {
                     "success": True,
                     "message": f"Active connection switched to '{_ACTIVE_CONNECTION}' ({info['engine']} on {info['host']}:{info['port']}/{info['database']}). Connection alias: '{_ACTIVE_CONNECTION}', Database: '{info['database']}'.",
@@ -911,9 +941,13 @@ def use_database(
     # Verify connectivity before registering
     try:
         if info["engine"] == "postgres":
+            if not psycopg2:
+                raise RuntimeError("PostgreSQL driver (psycopg2) is not available.")
             conn = psycopg2.connect(new_url, connect_timeout=3)
             conn.close()
         else:
+            if not pymysql:
+                raise RuntimeError("MySQL driver (pymysql) is not available.")
             conn = pymysql.connect(
                 host=info["host"],
                 port=info["port"],
@@ -926,10 +960,11 @@ def use_database(
     except Exception as e:
         return _format_db_error(e, info["engine"])
 
-    _CONNECTION_REGISTRY[target] = info
-    _RAW_CONFIG[target] = new_url
-    _ACTIVE_CONNECTION = target
-    _save_active_connection(_ACTIVE_CONNECTION)
+    if target:
+        _CONNECTION_REGISTRY[target] = info
+        _RAW_CONFIG[target] = new_url
+        _ACTIVE_CONNECTION = target
+        _save_active_connection(target)
 
     return {
         "success": True,
@@ -945,6 +980,7 @@ def use_database(
 @mcp.tool()
 def list_databases(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """List all databases available on the active (or specified) server instance."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -954,7 +990,7 @@ def list_databases(connection: Optional[str] = None, server: Optional[str] = Non
                     cur.execute(
                         "SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size FROM pg_database WHERE datistemplate = false AND datname NOT IN ('cloudsqladmin') ORDER BY datname;"
                     )
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     return {
                         "server": f"{info['host']}:{info['port']}",
                         "engine": "postgres",
@@ -969,7 +1005,7 @@ def list_databases(connection: Optional[str] = None, server: Optional[str] = Non
             try:
                 with conn.cursor() as cur:
                     cur.execute("SHOW DATABASES;")
-                    rows = [r.get("Database", next(iter(r.values()))) for r in cur.fetchall()]
+                    rows = [r.get("Database", next(iter(r.values()))) for r in _fetch_all(cur)]
                     return {
                         "server": f"{info['host']}:{info['port']}",
                         "engine": "mysql",
@@ -980,13 +1016,14 @@ def list_databases(connection: Optional[str] = None, server: Optional[str] = Non
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
 @mcp.tool()
 def list_schemas(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """List all user schemas with table count and disk size (PostgreSQL) or current database table summary (MySQL)."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -1007,7 +1044,7 @@ def list_schemas(connection: Optional[str] = None, server: Optional[str] = None)
                     ORDER BY n.nspname;
                     """
                     cur.execute(sql)
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     return {
                         "connection": info["name"],
                         "database": info["database"],
@@ -1023,12 +1060,12 @@ def list_schemas(connection: Optional[str] = None, server: Optional[str] = None)
                     cur.execute(
                         "SELECT table_schema AS schema_name, count(*) AS table_count, ROUND(SUM(data_length + index_length)/1024/1024, 2) AS total_size_mb FROM information_schema.tables WHERE table_schema = DATABASE() GROUP BY table_schema;"
                     )
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     return {"connection": info["name"], "database": info["database"], "schemas": rows}
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -1037,6 +1074,7 @@ def describe_table(
     tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
 ) -> Dict[str, Any]:
     """Deep inspection of a table: column types, defaults, nullability, PKs, FKs, indexes, and sizes."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -1059,13 +1097,13 @@ def describe_table(
                         "SELECT column_name, data_type, character_maximum_length, is_nullable, column_default FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position",
                         (s, t),
                     )
-                    cols = cur.fetchall()
+                    cols = _fetch_all(cur)
 
                     cur.execute(
                         "SELECT kcu.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s AND tc.table_name = %s",
                         (s, t),
                     )
-                    pks = [r["column_name"] for r in cur.fetchall()]
+                    pks = [r["column_name"] for r in _fetch_all(cur)]
 
                     cur.execute(
                         """
@@ -1078,7 +1116,7 @@ def describe_table(
                     """,
                         (s, t),
                     )
-                    out_fks = cur.fetchall()
+                    out_fks = _fetch_all(cur)
 
                     cur.execute(
                         """
@@ -1090,13 +1128,13 @@ def describe_table(
                     """,
                         (s, t),
                     )
-                    indexes = cur.fetchall()
+                    indexes = _fetch_all(cur)
 
                     cur.execute(
                         "SELECT c.reltuples::bigint AS estimated_rows, pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s",
                         (s, t),
                     )
-                    stats = cur.fetchone() or {}
+                    stats = _fetch_one(cur) or {}
 
                     return {
                         "connection": info["name"],
@@ -1118,14 +1156,14 @@ def describe_table(
             try:
                 with conn.cursor() as cur:
                     cur.execute(f"SHOW FULL COLUMNS FROM `{tableName}`;")
-                    cols = cur.fetchall()
+                    cols = _fetch_all(cur)
                     cur.execute(f"SHOW INDEX FROM `{tableName}`;")
-                    indexes = cur.fetchall()
+                    indexes = _fetch_all(cur)
                     cur.execute(
                         "SELECT table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
                         (tableName,),
                     )
-                    t_info = cur.fetchone() or {}
+                    t_info = _fetch_one(cur) or {}
                     return {
                         "connection": info["name"],
                         "database": info["database"],
@@ -1138,8 +1176,8 @@ def describe_table(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
-        return _format_db_error(e, engine)
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
+        return _format_db_error(e, engine, tableName)
 
 
 @mcp.tool()
@@ -1157,6 +1195,7 @@ def get_table_ddl(
         connection: Optional connection or server name (defaults to active connection).
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -1191,7 +1230,7 @@ def get_table_ddl(
                     """,
                         (s, t),
                     )
-                    cols = cur.fetchall()
+                    cols = _fetch_all(cur)
                     if not cols:
                         return {"error": True, "message": f"Table '{s}.{t}' has no columns."}
 
@@ -1246,7 +1285,7 @@ def get_table_ddl(
                     """,
                         (s, t),
                     )
-                    constraints = cur.fetchall()
+                    constraints = _fetch_all(cur)
 
                     for con in constraints:
                         con_name = con["constraint_name"]
@@ -1272,7 +1311,7 @@ def get_table_ddl(
                     """,
                         (s, t, s, t),
                     )
-                    idx_rows = cur.fetchall()
+                    idx_rows = _fetch_all(cur)
                     indexes = [r["indexdef"] + ";" for r in idx_rows]
                     if indexes:
                         full_ddl = ddl + "\n\n-- Indexes\n" + "\n".join(indexes)
@@ -1296,7 +1335,7 @@ def get_table_ddl(
             try:
                 with conn.cursor() as cur:
                     cur.execute(f"SHOW CREATE TABLE `{tableName}`;")
-                    row = cur.fetchone()
+                    row = _fetch_one(cur)
                     ddl = row.get("Create Table") or row.get("CREATE TABLE") or str(row)
                     return {
                         "connection": info["name"],
@@ -1308,8 +1347,8 @@ def get_table_ddl(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
-        return _format_db_error(e, engine)
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
+        return _format_db_error(e, engine, tableName)
 
 
 @mcp.tool()
@@ -1329,6 +1368,7 @@ def schema_overview(
         server: Optional server or connection alias.
         max_tables: Maximum number of tables to detail (default 60, max 150).
     """
+    info: Optional[Dict[str, Any]] = None
     safe_max = min(max(1, max_tables), 150)
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -1353,7 +1393,7 @@ def schema_overview(
                         cur.execute(sql, tuple(params))
                     else:
                         cur.execute(sql)
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
 
                     has_more = len(rows) > safe_max
                     display_rows = rows[:safe_max]
@@ -1381,7 +1421,7 @@ def schema_overview(
                     cur.execute(
                         "SELECT table_name, table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;"
                     )
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
 
                     has_more = len(rows) > safe_max
                     display_rows = rows[:safe_max]
@@ -1403,7 +1443,7 @@ def schema_overview(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -1425,6 +1465,7 @@ def compact_schema_overview(
         server: Optional server or connection alias.
         max_tables: Maximum number of tables to include (default: 80, max 150).
     """
+    info: Optional[Dict[str, Any]] = None
     safe_max = min(max(1, max_tables), 150)
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -1449,7 +1490,7 @@ def compact_schema_overview(
                         cur.execute(sql, tuple(params))
                     else:
                         cur.execute(sql)
-                    tables = cur.fetchall()
+                    tables = _fetch_all(cur)
 
                     display_tables = tables[:safe_max]
                     compact_lines = []
@@ -1483,7 +1524,7 @@ def compact_schema_overview(
                         """,
                             (s_name, t_name, s_name, t_name, s_name, t_name),
                         )
-                        cols = cur.fetchall()
+                        cols = _fetch_all(cur)
 
                         parts = []
                         for col in cols:
@@ -1522,14 +1563,14 @@ def compact_schema_overview(
                     cur.execute(
                         "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;"
                     )
-                    tables = [r.get("table_name") or r.get("TABLE_NAME") for r in cur.fetchall()]
+                    tables = [r.get("table_name") or r.get("TABLE_NAME") for r in _fetch_all(cur)]
 
                     display_tables = tables[:safe_max]
                     compact_lines = []
 
                     for t_name in display_tables:
                         cur.execute(f"DESCRIBE `{t_name}`;")
-                        cols = cur.fetchall()
+                        cols = _fetch_all(cur)
                         parts = []
                         for col in cols:
                             f = col.get("Field") or col.get("field")
@@ -1556,7 +1597,7 @@ def compact_schema_overview(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -1581,6 +1622,7 @@ def get_table_sample(
         connection: Optional target database connection or server alias.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     lim = min(max(limit, 1), 100)
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -1592,7 +1634,7 @@ def get_table_sample(
                     s = resolved["schema"]
                     t = resolved["table"]
                     cur.execute(f'SELECT * FROM "{s}"."{t}" LIMIT %s;', (lim,))
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     cleaned_rows = [_truncate_row(r, mask_sensitive=mask_sensitive) for r in rows]
                     return {
                         "connection": info["name"],
@@ -1610,7 +1652,7 @@ def get_table_sample(
             try:
                 with conn.cursor() as cur:
                     cur.execute(f"SELECT * FROM `{tableName}` LIMIT %s;", (lim,))
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     cleaned_rows = [_truncate_row(r, mask_sensitive=mask_sensitive) for r in rows]
                     return {
                         "connection": info["name"],
@@ -1623,8 +1665,8 @@ def get_table_sample(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
-        return _format_db_error(e, engine)
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
+        return _format_db_error(e, engine, tableName)
 
 
 @mcp.tool()
@@ -1636,6 +1678,7 @@ def search_schema(
     server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search across tables and column names for a keyword with safety limits to protect context window."""
+    info: Optional[Dict[str, Any]] = None
     safe_max = min(max(1, max_results), 100)
     pat = f"%{searchTerm}%"
     try:
@@ -1661,7 +1704,7 @@ def search_schema(
                     """
                     params = [pat, pat, pat] if is_all else [schema, pat, pat, schema, pat]
                     cur.execute(sql, tuple(params))
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     has_more = len(rows) > safe_max
                     display_rows = rows[:safe_max]
                     res: Dict[str, Any] = {
@@ -1692,7 +1735,7 @@ def search_schema(
                     LIMIT {safe_max + 1};
                     """
                     cur.execute(sql, (pat, pat, pat))
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     has_more = len(rows) > safe_max
                     display_rows = rows[:safe_max]
                     res: Dict[str, Any] = {
@@ -1710,7 +1753,7 @@ def search_schema(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -1735,6 +1778,7 @@ def read_query(
         connection: Optional target database connection or server alias.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -1775,7 +1819,7 @@ def read_query(
                         f"context window. Use SQL LIMIT / OFFSET or WHERE clauses to query specific subsets] ..."
                     )
                 return result
-        except (psycopg2.Error, Exception) as e:
+        except Exception as e:
             return _format_db_error(e, "postgres", sql)
         finally:
             try:
@@ -1814,7 +1858,7 @@ def read_query(
                         f"context window. Use SQL LIMIT / OFFSET or WHERE clauses to query specific subsets] ..."
                     )
                 return result
-        except (pymysql.Error, Exception) as e:
+        except Exception as e:
             return _format_db_error(e, "mysql", sql)
         finally:
             conn.close()
@@ -1881,7 +1925,7 @@ def execute_query(
                     else:
                         conn.commit()
                         return {"connection": info["name"], "status": status, "rowCount": rowcount}
-            except (psycopg2.Error, Exception) as e:
+            except Exception as e:
                 try:
                     conn.rollback()
                 except Exception:
@@ -1915,7 +1959,7 @@ def execute_query(
                     else:
                         cur.execute("COMMIT;")
                         return {"connection": info["name"], "status": "SUCCESS", "rowCount": rowcount}
-            except (pymysql.Error, Exception) as e:
+            except Exception as e:
                 try:
                     conn.rollback()
                 except Exception:
@@ -1950,7 +1994,7 @@ def execute_query(
                                 "rows_affected": rc,
                             }
                         )
-                    except (psycopg2.Error, Exception) as stmt_err:
+                    except Exception as stmt_err:
                         conn.rollback()
                         err_res = _format_db_error(stmt_err, "postgres", stmt, statement_idx=idx + 1)
                         err_res["batch_execution_failed"] = True
@@ -2006,7 +2050,7 @@ def execute_query(
                                 "rows_affected": rc,
                             }
                         )
-                    except (pymysql.Error, Exception) as stmt_err:
+                    except Exception as stmt_err:
                         cur.execute("ROLLBACK;")
                         err_res = _format_db_error(stmt_err, "mysql", stmt, statement_idx=idx + 1)
                         err_res["batch_execution_failed"] = True
@@ -2045,6 +2089,7 @@ def explain_query(
     sql: str, analyze: bool = True, connection: Optional[str] = None, server: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run EXPLAIN on a SQL statement to inspect execution plan and costs."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -2064,9 +2109,9 @@ def explain_query(
                     else f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {sql}"
                 )
                 cur.execute(exp)
-                res = cur.fetchone()
+                res = _fetch_one(cur)
                 return {"connection": info["name"], "plan": res[list(res.keys())[0]]}
-        except (psycopg2.Error, Exception) as e:
+        except Exception as e:
             return _format_db_error(e, "postgres", sql)
         finally:
             conn.close()
@@ -2079,9 +2124,9 @@ def explain_query(
         try:
             with conn.cursor() as cur:
                 cur.execute(f"EXPLAIN FORMAT=JSON {sql}")
-                res = cur.fetchone()
+                res = _fetch_one(cur)
                 return {"connection": info["name"], "plan": res}
-        except (pymysql.Error, Exception) as e:
+        except Exception as e:
             return _format_db_error(e, "mysql", sql)
         finally:
             conn.close()
@@ -2090,6 +2135,7 @@ def explain_query(
 @mcp.tool()
 def get_database_stats(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """Get database metrics: database size, active connections, cache hit ratio, engine version."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -2105,7 +2151,7 @@ def get_database_stats(connection: Optional[str] = None, server: Optional[str] =
                         version() AS postgres_version;
                     """
                     cur.execute(sql)
-                    stats = cur.fetchone()
+                    stats = _fetch_one(cur)
                     return {"connection": info["name"], "stats": stats}
             finally:
                 conn.close()
@@ -2116,9 +2162,9 @@ def get_database_stats(connection: Optional[str] = None, server: Optional[str] =
                     cur.execute(
                         "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS db_size_mb FROM information_schema.tables WHERE table_schema = DATABASE();"
                     )
-                    size_res = cur.fetchone() or {}
+                    size_res = _fetch_one(cur) or {}
                     cur.execute("SELECT VERSION() as version;")
-                    ver_res = cur.fetchone() or {}
+                    ver_res = _fetch_one(cur) or {}
                     return {
                         "connection": info["name"],
                         "stats": {
@@ -2130,13 +2176,14 @@ def get_database_stats(connection: Optional[str] = None, server: Optional[str] =
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
 @mcp.tool()
 def add_connection(name: str, url: str, type: Optional[str] = None, setActive: bool = True) -> Dict[str, Any]:
     """Dynamically add a new PostgreSQL or MySQL connection at runtime."""
+    info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
     try:
         info = _parse_url(url)
@@ -2147,9 +2194,13 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
 
         # Test connect
         if info["engine"] == "postgres":
+            if not psycopg2:
+                raise RuntimeError("PostgreSQL driver (psycopg2) is not available.")
             conn = psycopg2.connect(url, connect_timeout=3)
             conn.close()
         else:
+            if not pymysql:
+                raise RuntimeError("MySQL driver (pymysql) is not available.")
             conn = pymysql.connect(
                 host=info["host"],
                 port=info["port"],
@@ -2190,6 +2241,7 @@ def create_database(
     template: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create a new database on the active (or specified) PostgreSQL or MySQL server instance."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -2239,7 +2291,7 @@ def create_database(
                 "engine": "mysql",
             }
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2248,6 +2300,7 @@ def drop_database(
     database: str, confirmName: str, force: bool = False, server: Optional[str] = None, connection: Optional[str] = None
 ) -> Dict[str, Any]:
     """Safely drop a database. Requires exact 'confirmName' matching the database name. Supports 'force' to kill active connections."""
+    info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
     protected = {
         "postgres",
@@ -2315,7 +2368,7 @@ def drop_database(
                 "activeConnectionNow": _ACTIVE_CONNECTION,
             }
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2324,6 +2377,7 @@ def clone_database(
     sourceDatabase: str, targetDatabase: str, server: Optional[str] = None, connection: Optional[str] = None
 ) -> Dict[str, Any]:
     """Instantly clone an entire database (schema, tables, indexes, data). Uses native template cloning in PostgreSQL."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -2369,7 +2423,7 @@ def clone_database(
                     cur.execute(
                         "SELECT table_name FROM information_schema.tables WHERE table_schema = %s;", (sourceDatabase,)
                     )
-                    tables = [r.get("table_name", next(iter(r.values()))) for r in cur.fetchall()]
+                    tables = [r.get("table_name", next(iter(r.values()))) for r in _fetch_all(cur)]
                     for t in tables:
                         t_esc = str(t).replace("`", "``")
                         cur.execute(f"CREATE TABLE `{tgt_esc}`.`{t_esc}` LIKE `{src_esc}`.`{t_esc}`;")
@@ -2387,7 +2441,7 @@ def clone_database(
                 "target": targetDatabase,
             }
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2396,6 +2450,7 @@ def terminate_connections(
     database: str, server: Optional[str] = None, connection: Optional[str] = None
 ) -> Dict[str, Any]:
     """Kill active client connections or hanging locks on a specific database."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -2407,7 +2462,7 @@ def terminate_connections(
                         "SELECT pid, usename, client_addr, application_name, pg_terminate_backend(pid) as terminated FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();",
                         (database,),
                     )
-                    res = cur.fetchall()
+                    res = _fetch_all(cur)
                     return {"database": database, "terminatedCount": len(res), "sessions": res}
             finally:
                 admin_conn.close()
@@ -2419,7 +2474,7 @@ def terminate_connections(
                         "SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE FROM information_schema.processlist WHERE DB = %s;",
                         (database,),
                     )
-                    processes = cur.fetchall()
+                    processes = _fetch_all(cur)
                     killed = 0
                     for p in processes:
                         try:
@@ -2431,7 +2486,7 @@ def terminate_connections(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2440,6 +2495,7 @@ def list_active_queries(
     database: Optional[str] = None, server: Optional[str] = None, connection: Optional[str] = None
 ) -> Dict[str, Any]:
     """Inspect currently executing queries, lock waits, and execution durations."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -2456,7 +2512,7 @@ def list_active_queries(
                         cur.execute(sql, tuple(params))
                     else:
                         cur.execute(sql)
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     return {"activeQueryCount": len(rows), "queries": rows}
             finally:
                 conn.close()
@@ -2467,12 +2523,12 @@ def list_active_queries(
                     cur.execute(
                         "SELECT ID as pid, USER as usename, HOST as client_addr, DB as datname, COMMAND as state, TIME as duration_seconds, INFO as query FROM information_schema.processlist WHERE COMMAND <> 'Sleep' ORDER BY TIME DESC;"
                     )
-                    rows = cur.fetchall()
+                    rows = _fetch_all(cur)
                     return {"activeQueryCount": len(rows), "queries": rows}
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2485,6 +2541,7 @@ def dump_database(
     connection: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Export an SQL dump snapshot of the database using native pg_dump or mysqldump."""
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         target_db = database or info["database"]
@@ -2560,7 +2617,7 @@ def dump_database(
                 "schemaOnly": schemaOnly,
             }
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2569,6 +2626,7 @@ def restore_database(
     database: str, dumpFilePath: str, server: Optional[str] = None, connection: Optional[str] = None
 ) -> Dict[str, Any]:
     """Restore a database from a .sql dump file using native psql or mysql."""
+    info: Optional[Dict[str, Any]] = None
     fpath = Path(dumpFilePath)
     if not fpath.exists():
         return {"error": True, "message": f"Dump file not found: {dumpFilePath}"}
@@ -2627,7 +2685,7 @@ def restore_database(
                 "dumpFilePath": str(fpath),
             }
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2652,6 +2710,7 @@ def analyze_table_indexes(
         connection: Connection name to query.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -2673,7 +2732,7 @@ def analyze_table_indexes(
                     """,
                         (s, t),
                     )
-                    fks = cur.fetchall()
+                    fks = _fetch_all(cur)
 
                     # 2. Fetch Indexes with sizes and scan counts
                     cur.execute(
@@ -2695,7 +2754,7 @@ def analyze_table_indexes(
                     """,
                         (s, t),
                     )
-                    indexes = cur.fetchall()
+                    indexes = _fetch_all(cur)
 
                     # Extract indexed leading columns
                     indexed_cols = set()
@@ -2742,7 +2801,7 @@ def analyze_table_indexes(
             try:
                 with conn.cursor() as cur:
                     cur.execute(f"SHOW INDEX FROM `{tableName}`;")
-                    raw_indexes = cur.fetchall()
+                    raw_indexes = _fetch_all(cur)
 
                     cur.execute(
                         """
@@ -2752,7 +2811,7 @@ def analyze_table_indexes(
                     """,
                         (tableName,),
                     )
-                    fks = cur.fetchall()
+                    fks = _fetch_all(cur)
 
                     indexed_leading_cols = {
                         idx["Column_name"]
@@ -2786,7 +2845,7 @@ def analyze_table_indexes(
             finally:
                 conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -2809,6 +2868,7 @@ def compare_schemas(
         source_server: Optional alias for source_connection.
         target_server: Optional alias for target_connection.
     """
+    info: Optional[Dict[str, Any]] = None
     src_name = _resolve_conn(source_connection, source_server)
     tgt_name = _resolve_conn(target_connection, target_server)
     if not src_name or not tgt_name:
@@ -2835,7 +2895,7 @@ def compare_schemas(
                         """,
                             (schema or "public",),
                         )
-                        for r in cur.fetchall():
+                        for r in _fetch_all(cur):
                             tbl = r["table_name"]
                             tbl_map.setdefault(tbl, {})[r["column_name"]] = (
                                 f"{r['data_type']} ({'NULL' if r['is_nullable'] == 'YES' else 'NOT NULL'})"
@@ -2852,7 +2912,7 @@ def compare_schemas(
                         WHERE table_schema = DATABASE()
                         ORDER BY table_name, ordinal_position
                         """)
-                        for r in cur.fetchall():
+                        for r in _fetch_all(cur):
                             t_name = r.get("TABLE_NAME") or r.get("table_name")
                             c_name = r.get("COLUMN_NAME") or r.get("column_name")
                             c_type = r.get("COLUMN_TYPE") or r.get("column_type")
@@ -2959,6 +3019,7 @@ def audit_database_health(
         connection: Named connection or server alias to use; defaults to active connection.
         server:     Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] != "postgres":
@@ -3004,7 +3065,7 @@ def audit_database_health(
                         "references": f"{r['references_table']}.{r['references_column']}",
                         "fix": f"CREATE INDEX ON {r['table_schema']}.{r['table_name']}({r['column_name']});",
                     }
-                    for r in cur.fetchall()
+                    for r in _fetch_all(cur)
                 ]
 
                 # ── 2. Unused Indexes ────────────────────────────────────────────────
@@ -3030,7 +3091,7 @@ def audit_database_health(
                         "size": r["index_size"],
                         "fix": f"DROP INDEX CONCURRENTLY {r['schemaname']}.{r['index_name']};",
                     }
-                    for r in cur.fetchall()
+                    for r in _fetch_all(cur)
                 ]
 
                 # ── 3. Bloated Tables ────────────────────────────────────────────────
@@ -3065,7 +3126,7 @@ def audit_database_health(
                         "last_vacuum": str(r["last_vacuum"]) if r["last_vacuum"] else None,
                         "fix": f"VACUUM ANALYZE {r['schemaname']}.{r['table_name']};",
                     }
-                    for r in cur.fetchall()
+                    for r in _fetch_all(cur)
                 ]
 
                 overall = "healthy"
@@ -3094,7 +3155,7 @@ def audit_database_health(
         finally:
             conn.close()
     except Exception as e:
-        engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
+        engine = info.get("engine", "unknown") if (info is not None) else "unknown"
         return _format_db_error(e, engine)
 
 
@@ -3152,6 +3213,7 @@ def generate_erd(
         connection: Optional connection name or URL (defaults to active connection).
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -3182,7 +3244,7 @@ def generate_erd(
                     """,
                         (target_schema,),
                     )
-                    fks = cur.fetchall()
+                    fks = _fetch_all(cur)
 
                     cur.execute(
                         """
@@ -3200,7 +3262,7 @@ def generate_erd(
                     """,
                         (target_schema, target_schema),
                     )
-                    all_cols = cur.fetchall()
+                    all_cols = _fetch_all(cur)
             finally:
                 conn.close()
         else:
@@ -3223,7 +3285,7 @@ def generate_erd(
                     """,
                         (target_schema,),
                     )
-                    fks = cur.fetchall()
+                    fks = _fetch_all(cur)
 
                     cur.execute(
                         """
@@ -3235,7 +3297,7 @@ def generate_erd(
                     """,
                         (target_schema,),
                     )
-                    all_cols = cur.fetchall()
+                    all_cols = _fetch_all(cur)
             finally:
                 conn.close()
 
@@ -3324,6 +3386,7 @@ def diff_data(
         connection2: Target connection name/alias (defaults to connection1).
         max_differences: Maximum number of differing rows to return in details (default: 100).
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info1 = _get_connection(_resolve_conn(connection1, None))
         info2 = _get_connection(_resolve_conn(connection2 or connection1, None))
@@ -3331,9 +3394,11 @@ def diff_data(
         return _format_db_error(e, "unknown")
 
     t1_name = table1.strip()
-    t2_name = (table2 or table1).strip()
-    s1_name = schema1.strip() if schema1 else None
-    s2_name = (schema2 or schema1).strip() if (schema2 or schema1) else None
+    raw_t2 = table2 or table1
+    t2_name = raw_t2.strip() if raw_t2 is not None else ""
+    s1_name = schema1.strip() if schema1 is not None else None
+    raw_s2 = schema2 or schema1
+    s2_name = raw_s2.strip() if raw_s2 is not None else None
 
     # Fetch data from source table
     rows1 = []
@@ -3356,9 +3421,9 @@ def diff_data(
                         """,
                             (s1, t1),
                         )
-                        pks1 = [r["column_name"] for r in cur1.fetchall()]
+                        pks1 = [r["column_name"] for r in cast(List[Dict[str, Any]], cur1.fetchall())]
                     cur1.execute(f'SELECT * FROM "{s1}"."{t1}" LIMIT 50000;')
-                    rows1 = cur1.fetchall()
+                    rows1 = cast(List[Dict[str, Any]], cur1.fetchall())
             finally:
                 conn1.close()
         else:
@@ -3369,9 +3434,9 @@ def diff_data(
                     t1 = t1_name
                     if not key_columns:
                         cur1.execute("SHOW KEYS FROM `{}` WHERE Key_name = 'PRIMARY'".format(t1))
-                        pks1 = [r["Column_name"] for r in cur1.fetchall()]
+                        pks1 = [r["Column_name"] for r in cast(List[Dict[str, Any]], _fetch_all(cur1))]
                     cur1.execute(f"SELECT * FROM `{t1}` LIMIT 50000;")
-                    rows1 = cur1.fetchall()
+                    rows1 = cast(List[Dict[str, Any]], _fetch_all(cur1))
             finally:
                 conn1.close()
     except Exception as e:
@@ -3388,7 +3453,7 @@ def diff_data(
                     s2 = res2["schema"]
                     t2 = res2["table"]
                     cur2.execute(f'SELECT * FROM "{s2}"."{t2}" LIMIT 50000;')
-                    rows2 = cur2.fetchall()
+                    rows2 = cast(List[Dict[str, Any]], cur2.fetchall())
             finally:
                 conn2.close()
         else:
@@ -3398,7 +3463,7 @@ def diff_data(
                     s2 = s2_name or info2["database"]
                     t2 = t2_name
                     cur2.execute(f"SELECT * FROM `{t2}` LIMIT 50000;")
-                    rows2 = cur2.fetchall()
+                    rows2 = cast(List[Dict[str, Any]], cur2.fetchall())
             finally:
                 conn2.close()
     except Exception as e:
@@ -3478,6 +3543,7 @@ def list_slow_queries(
         connection: Optional connection name or URL.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -3491,7 +3557,7 @@ def list_slow_queries(
                     has_pg_stat = False
                     try:
                         cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'pg_stat_statements';")
-                        has_pg_stat = bool(cur.fetchone())
+                        has_pg_stat = bool(_fetch_one(cur))
                     except Exception:
                         pass
 
@@ -3512,7 +3578,7 @@ def list_slow_queries(
                         """,
                             (min_duration_ms, limit),
                         )
-                        queries = cur.fetchall()
+                        queries = _fetch_all(cur)
                         return {
                             "connection": info["name"],
                             "engine": "postgres",
@@ -3550,7 +3616,7 @@ def list_slow_queries(
                         """,
                             (limit,),
                         )
-                        queries = cur.fetchall()
+                        queries = _fetch_all(cur)
                         return {
                             "connection": info["name"],
                             "engine": "postgres",
@@ -3593,7 +3659,7 @@ def list_slow_queries(
                         """,
                             (min_duration_ms, limit),
                         )
-                        queries = cur.fetchall()
+                        queries = _fetch_all(cur)
                         return {
                             "connection": info["name"],
                             "engine": "mysql",
@@ -3603,7 +3669,7 @@ def list_slow_queries(
                         }
                     except Exception:
                         cur.execute("SHOW FULL PROCESSLIST;")
-                        procs = cur.fetchall()
+                        procs = _fetch_all(cur)
                         return {
                             "connection": info["name"],
                             "engine": "mysql",
@@ -3627,6 +3693,7 @@ def get_locks(connection: Optional[str] = None, server: Optional[str] = None) ->
         connection: Optional connection name or URL.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -3656,7 +3723,7 @@ def get_locks(connection: Optional[str] = None, server: Optional[str] = None) ->
                         JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
                         WHERE NOT blocked_locks.granted;
                     """)
-                    blockings = cur.fetchall()
+                    blockings = _fetch_all(cur)
 
                     cur.execute("""
                         SELECT mode, locktype, count(*) as count
@@ -3664,7 +3731,7 @@ def get_locks(connection: Optional[str] = None, server: Optional[str] = None) ->
                         GROUP BY mode, locktype
                         ORDER BY count DESC;
                     """)
-                    lock_counts = cur.fetchall()
+                    lock_counts = _fetch_all(cur)
 
                     return {
                         "connection": info["name"],
@@ -3711,7 +3778,7 @@ def get_locks(connection: Optional[str] = None, server: Optional[str] = None) ->
                             JOIN performance_schema.data_locks b ON b.ENGINE_LOCK_ID = w.BLOCKING_ENGINE_LOCK_ID
                             JOIN performance_schema.data_locks r ON r.ENGINE_LOCK_ID = w.REQUESTING_ENGINE_LOCK_ID;
                         """)
-                        blocks = cur.fetchall()
+                        blocks = _fetch_all(cur)
                         return {
                             "connection": info["name"],
                             "engine": "mysql",
@@ -3754,6 +3821,7 @@ def export_table(
         connection: Optional connection name or URL.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -3859,7 +3927,7 @@ def export_table(
             "file_size_bytes": target_file.stat().st_size,
         }
     except Exception as e:
-        return _format_db_error(e, info.get("engine", "unknown"), table_or_query)
+        return _format_db_error(e, info.get("engine", "unknown") if (info is not None) else "unknown", table_or_query)
 
 
 @mcp.tool()
@@ -3891,6 +3959,7 @@ def import_csv(
         connection: Optional connection name or URL.
         server: Optional server or connection alias.
     """
+    info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -3929,7 +3998,8 @@ def import_csv(
                     insert_sql = f"INSERT INTO {full_tbl} ({quoted_cols}) VALUES ({placeholders}){conflict_clause}"
 
                     cleaned_rows = [
-                        [None if (val is None or str(val).strip() == "") else val for val in row] for row in rows
+                        [None if (val is None or (isinstance(val, str) and val.strip() == "")) else val for val in row]
+                        for row in rows
                     ]
 
                     from psycopg2.extras import execute_batch
@@ -3964,7 +4034,7 @@ def import_csv(
         else:
             conn = _get_mysql_client(info)
             try:
-                conn.autocommit = False
+                conn.autocommit(False)
                 with conn.cursor() as cur:
                     t = table_name.strip()
                     if if_exists.lower() == "truncate" and not dry_run:
@@ -3976,7 +4046,8 @@ def import_csv(
                     insert_sql = f"{verb} `{t}` ({mysql_cols}) VALUES ({placeholders})"
 
                     cleaned_rows = [
-                        [None if (val is None or str(val).strip() == "") else val for val in row] for row in rows
+                        [None if (val is None or (isinstance(val, str) and val.strip() == "")) else val for val in row]
+                        for row in rows
                     ]
 
                     cur.executemany(insert_sql, cleaned_rows)

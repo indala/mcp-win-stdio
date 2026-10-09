@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import openpyxl
+import openpyxl.utils
 import pandas as pd
 from openpyxl.chart import AreaChart, BarChart, LineChart, PieChart, Reference
 from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule, Rule
@@ -25,7 +26,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 # Try importing pywin32 for native Windows Excel COM automation
 HAS_WIN32 = False
@@ -62,21 +63,22 @@ def _clean_val(v: Any) -> Any:
 
 def _df_to_clean_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
     """Convert DataFrame to JSON-safe records, cleanly handling NaT, NaN, Timestamps, and dates."""
-    clean = df.astype(object).where(pd.notnull(df), None)
+    clean = df.astype(object).where(pd.notnull(df), None)  # type: ignore[arg-type]
     records = clean.to_dict(orient="records")
-    for row in records:
-        for k, v in row.items():
-            row[k] = _clean_val(v)
-    return records
+    result: List[Dict[str, Any]] = []
+    for row in records:  # type: ignore[union-attr]
+        cleaned_row = {str(k): _clean_val(v) for k, v in row.items()}
+        result.append(cleaned_row)
+    return result
 
 
 def _format_dataframe_output(df: pd.DataFrame, format_type: str = "records") -> Any:
     """Format DataFrame into token-safe output (records, compact list of lists, or tsv)."""
     if format_type == "compact":
-        clean = df.astype(object).where(pd.notnull(df), None)
+        clean = df.astype(object).where(pd.notnull(df), None)  # type: ignore[arg-type]
         return [[_clean_val(val) for val in row] for row in clean.itertuples(index=False, name=None)]
     elif format_type == "tsv":
-        clean = df.astype(object).where(pd.notnull(df), "")
+        clean = df.astype(object).where(pd.notnull(df), "")  # type: ignore[arg-type]
         return clean.to_csv(sep="\t", index=False)
     else:
         return _df_to_clean_records(df)
@@ -149,7 +151,7 @@ NAMED_HEX_COLORS = {
 def _normalize_hex_color(color: Optional[str]) -> Optional[str]:
     if not color:
         return None
-    c = str(color).strip().lstrip("#")
+    c = color.strip().lstrip("#")
     if c.lower() in NAMED_HEX_COLORS:
         return NAMED_HEX_COLORS[c.lower()].upper()
     return c.upper()
@@ -287,6 +289,20 @@ def _apply_style_to_cell(
         cell.number_format = _resolve_number_format(number_format)
 
 
+def _get_sheet(wb: Any, sheet_name: Optional[Union[str, int]] = None) -> Any:
+    """Resolve worksheet safely from workbook."""
+    if isinstance(sheet_name, str) and sheet_name in wb.sheetnames:
+        return wb[sheet_name]
+    elif isinstance(sheet_name, int) and 0 <= sheet_name < len(wb.worksheets):
+        return wb.worksheets[sheet_name]
+    sheet = wb.active
+    if sheet is None:
+        if wb.sheetnames:
+            return wb[wb.sheetnames[0]]
+        return wb.create_sheet("Sheet1")
+    return sheet
+
+
 def _handle_excel_lock(file_path: str, err: Exception) -> PermissionError:
     filename = os.path.basename(file_path)
     msg = (
@@ -382,7 +398,7 @@ def preview_sheet(
     return {
         "sheet_name": sheet_name or "First Sheet",
         "preview_row_count": len(df),
-        "columns": [str(c) for c in df.columns],
+        "columns": [c for c in df.columns],
         "column_types": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
         "format": format,
         "rows": data if format != "tsv" else None,
@@ -448,7 +464,7 @@ def query_rows(
         "offset": offset,
         "limit": limit,
         "returned_rows": len(paginated_df),
-        "columns": [str(c) for c in df.columns],
+        "columns": [c for c in df.columns],
         "format": format,
         "rows": data if format != "tsv" else None,
         "data": data,
@@ -509,7 +525,7 @@ def read_range(
             sheet_name=sheet_name or 0,
             skiprows=range(h_idx + 1, start_row),
             nrows=nrows,
-            names=header_df.columns,
+            names=list(header_df.columns),
             usecols=columns,
         )
 
@@ -518,7 +534,7 @@ def read_range(
         "start_row": start_row,
         "end_row": start_row + len(df) - 1,
         "row_count": len(df),
-        "columns": [str(c) for c in df.columns],
+        "columns": [c for c in df.columns],
         "format": format,
         "rows": data if format != "tsv" else None,
         "data": data,
@@ -684,8 +700,8 @@ def summarize_column(
     series = df[column]
 
     total_count = len(series)
-    null_count = int(series.isnull().sum())
-    unique_count = int(series.nunique())
+    null_count = series.isnull().sum()
+    unique_count = series.nunique()
 
     summary: Dict[str, Any] = {
         "column": column,
@@ -708,7 +724,7 @@ def summarize_column(
             }
     else:
         val_counts = series.value_counts(dropna=True).head(10).to_dict()
-        summary["top_values"] = {str(k): int(v) for k, v in val_counts.items()}
+        summary["top_values"] = {str(k): v for k, v in val_counts.items()}
 
     return summary
 
@@ -737,7 +753,7 @@ def search_text(
     for idx in matched_indices:
         cleaned_row_list = _df_to_clean_records(df.iloc[[idx]])
         row_data = cleaned_row_list[0] if cleaned_row_list else {}
-        matching_cols = [col for col in df.columns if str(search_term).lower() in str(df.at[idx, col]).lower()]
+        matching_cols = [col for col in df.columns if search_term.lower() in str(df.at[idx, col]).lower()]
         results.append(
             {
                 "excel_row_number": idx + 2,
@@ -810,7 +826,7 @@ def append_rows(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     headers = [cell.value for cell in sheet[1]]
     if not headers or all(h is None for h in headers):
@@ -967,7 +983,7 @@ def update_cells(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     updated_count = 0
     for item in updates:
@@ -1039,7 +1055,7 @@ def write_range(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     start_row, start_col = coordinate_to_tuple(start_cell)
 
@@ -1121,7 +1137,7 @@ def format_cells(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     operations = []
     if batch_formats:
@@ -1211,7 +1227,7 @@ def get_cell_formatting(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path, data_only=False)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     target_cells: List[str] = []
     if cells:
@@ -1367,7 +1383,7 @@ def apply_conditional_formatting(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     norm_fill = _normalize_hex_color(fill_color)
     norm_font = _normalize_hex_color(font_color)
@@ -1469,7 +1485,7 @@ def set_sheet_layout_and_freeze(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     results = {}
 
@@ -1501,18 +1517,18 @@ def set_sheet_layout_and_freeze(
         results["row_heights"] = row_heights
 
     if freeze_panes is not None:
-        if str(freeze_panes).lower() in ("none", "", "false", "null"):
+        if freeze_panes.lower() in ("none", "", "false", "null"):
             sheet.freeze_panes = None
             results["freeze_panes"] = None
         else:
-            sheet.freeze_panes = str(freeze_panes).strip().upper()
+            sheet.freeze_panes = freeze_panes.strip().upper()
             results["freeze_panes"] = sheet.freeze_panes
 
     if show_grid_lines is not None:
         if hasattr(sheet, "views") and sheet.views.sheetView:
-            sheet.views.sheetView[0].showGridLines = bool(show_grid_lines)
+            sheet.views.sheetView[0].showGridLines = show_grid_lines
         else:
-            sheet.sheet_view.showGridLines = bool(show_grid_lines)
+            sheet.sheet_view.showGridLines = show_grid_lines
         results["show_grid_lines"] = show_grid_lines
 
     save_target = output_path or file_path
@@ -1566,7 +1582,7 @@ def create_chart(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    sheet = _get_sheet(wb, sheet_name)
 
     ct = chart_type.lower().strip()
     if ct in ("col", "column"):
@@ -1589,8 +1605,8 @@ def create_chart(
 
     if title:
         chart.title = title
-    chart.width = width
-    chart.height = height
+    chart.width = int(width)
+    chart.height = int(height)
 
     if x_axis_title and hasattr(chart, "x_axis") and chart.x_axis:
         chart.x_axis.title = x_axis_title
@@ -1598,12 +1614,20 @@ def create_chart(
         chart.y_axis.title = y_axis_title
 
     min_col, min_row, max_col, max_row = range_boundaries(data_range)
-    data_ref = Reference(sheet, min_col=min_col, min_row=min_row, max_col=max_col, max_row=max_row)
+    min_c = min_col or 1
+    min_r = min_row or 1
+    max_c = max_col or min_c
+    max_r = max_row or min_r
+    data_ref = Reference(sheet, min_col=min_c, min_row=min_r, max_col=max_c, max_row=max_r)
     chart.add_data(data_ref, titles_from_data=True)
 
     if categories_range:
         c_min_col, c_min_row, c_max_col, c_max_row = range_boundaries(categories_range)
-        cats_ref = Reference(sheet, min_col=c_min_col, min_row=c_min_row, max_col=c_max_col, max_row=c_max_row)
+        c_min_c = c_min_col or 1
+        c_min_r = c_min_row or 1
+        c_max_c = c_max_col or c_min_c
+        c_max_r = c_max_row or c_min_r
+        cats_ref = Reference(sheet, min_col=c_min_c, min_row=c_min_r, max_col=c_max_c, max_row=c_max_r)
         chart.set_categories(cats_ref)
 
     sheet.add_chart(chart, target_cell)
@@ -1857,7 +1881,7 @@ def export_to_csv(
         "input_excel": file_path,
         "output_csv": output_csv_path,
         "rows_exported": len(df),
-        "columns_exported": [str(c) for c in df.columns],
+        "columns_exported": [c for c in df.columns],
         "message": f"Successfully exported {len(df)} rows directly to disk at '{output_csv_path}'.",
     }
 
@@ -1908,7 +1932,7 @@ def export_to_json(
         "input_excel": file_path,
         "output_json": output_json_path,
         "rows_exported": len(df),
-        "columns_exported": [str(c) for c in df.columns],
+        "columns_exported": [c for c in df.columns],
         "file_size_kb": file_size_kb,
         "orient": orient,
         "message": f"Successfully exported {len(df)} rows directly to '{output_json_path}' ({file_size_kb} KB) with zero token bloat.",
@@ -1942,10 +1966,10 @@ def profile_sheet(
     col_profiles = {}
     for col in df.columns:
         series = df[col]
-        null_count = int(series.isnull().sum())
+        null_count = series.isnull().sum()
         non_null_count = total_rows - null_count
         null_pct = round((null_count / max(total_rows, 1)) * 100, 2)
-        unique_count = int(series.nunique())
+        unique_count = series.nunique()
 
         profile: Dict[str, Any] = {
             "dtype": str(series.dtype),
@@ -1966,16 +1990,16 @@ def profile_sheet(
                 }
         else:
             top_vals = series.dropna().value_counts().head(5).to_dict()
-            profile["top_frequent"] = {str(k)[:40]: int(v) for k, v in top_vals.items()}
+            profile["top_frequent"] = {str(k)[:40]: v for k, v in top_vals.items()}
 
-        col_profiles[str(col)] = profile
+        col_profiles[col] = profile
 
     return {
         "file_path": file_path,
         "sheet_name": sheet_name or "First Sheet",
         "total_rows": total_rows,
         "total_columns": total_cols,
-        "columns": [str(c) for c in df.columns],
+        "columns": [c for c in df.columns],
         "column_profiles": col_profiles,
     }
 
@@ -2012,7 +2036,7 @@ def query_excel_sql(
     # Sanitize column names for SQLite
     sanitized_map = {}
     for col in df.columns:
-        s = re.sub(r"\W+", "_", str(col)).strip("_")
+        s = re.sub(r"\W+", "_", col).strip("_")
         sanitized_map[col] = s or "col"
 
     df_sql = df.rename(columns=sanitized_map)
@@ -2151,7 +2175,7 @@ def export_transformed_workbook(
         try:
             sanitized_map = {}
             for col in df.columns:
-                s = re.sub(r"\W+", "_", str(col)).strip("_")
+                s = re.sub(r"\W+", "_", col).strip("_")
                 sanitized_map[col] = s or "col"
             df_sql = df.rename(columns=sanitized_map)
             df_sql.to_sql("source", conn, index=False, if_exists="replace")
@@ -2207,7 +2231,7 @@ def export_transformed_workbook(
 
     # 9. Direct Export
     exported_rows = len(df)
-    exported_cols = [str(c) for c in df.columns]
+    exported_cols = [c for c in df.columns]
 
     is_csv_dest = destination_path.lower().endswith(".csv")
 
@@ -2220,37 +2244,39 @@ def export_transformed_workbook(
 
             if format_headers or auto_fit_columns or freeze_header:
                 wb = openpyxl.load_workbook(destination_path)
-                ws = wb[destination_sheet] if destination_sheet in wb.sheetnames else wb.active
+                ws: Any = (
+                    wb[destination_sheet] if (destination_sheet and destination_sheet in wb.sheetnames) else wb.active
+                )
+                if ws is not None:
+                    if freeze_header:
+                        ws.freeze_panes = "A2"
 
-                if freeze_header:
-                    ws.freeze_panes = "A2"
+                    # Style headers
+                    if format_headers:
+                        norm_fill = _normalize_hex_color(header_fill_color) or "1F497D"
+                        norm_font = _normalize_hex_color(header_font_color) or "FFFFFF"
+                        header_fill = PatternFill(start_color=norm_fill, end_color=norm_fill, fill_type="solid")
+                        header_font = Font(name="Calibri", size=11, bold=True, color=norm_font)
+                        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-                # Style headers
-                if format_headers:
-                    norm_fill = _normalize_hex_color(header_fill_color) or "1F497D"
-                    norm_font = _normalize_hex_color(header_font_color) or "FFFFFF"
-                    header_fill = PatternFill(start_color=norm_fill, end_color=norm_fill, fill_type="solid")
-                    header_font = Font(name="Calibri", size=11, bold=True, color=norm_font)
-                    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                        for col_idx in range(1, len(exported_cols) + 1):
+                            cell = ws.cell(row=1, column=col_idx)
+                            cell.fill = header_fill
+                            cell.font = header_font
+                            cell.alignment = header_align
 
-                    for col_idx in range(1, len(exported_cols) + 1):
-                        cell = ws.cell(row=1, column=col_idx)
-                        cell.fill = header_fill
-                        cell.font = header_font
-                        cell.alignment = header_align
-
-                # Auto-fit column widths
-                if auto_fit_columns:
-                    for col_idx, col_name in enumerate(exported_cols, start=1):
-                        col_letter = get_column_letter(col_idx)
-                        max_len = len(str(col_name))
-                        sample_vals = (
-                            df[col_name].dropna().head(50).astype(str).tolist() if col_name in df.columns else []
-                        )
-                        if sample_vals:
-                            sample_max = max(len(v) for v in sample_vals)
-                            max_len = max(max_len, sample_max)
-                        ws.column_dimensions[col_letter].width = max(min(max_len + 4, 60), 10)
+                    # Auto-fit column widths
+                    if auto_fit_columns:
+                        for col_idx, col_name in enumerate(exported_cols, start=1):
+                            col_letter = get_column_letter(col_idx)
+                            max_len = len(col_name)
+                            sample_vals = (
+                                df[col_name].dropna().head(50).astype(str).tolist() if col_name in df.columns else []
+                            )
+                            if sample_vals:
+                                sample_max = max(len(v) for v in sample_vals)
+                                max_len = max(max_len, sample_max)
+                            ws.column_dimensions[col_letter].width = max(min(max_len + 4, 60), 10)
 
                 _safe_save_workbook(wb, destination_path)
                 wb.close()
@@ -2323,8 +2349,8 @@ def analyze_reconciliation_keys(
     total_f1 = len(df1)
     total_f2 = len(df2)
 
-    f1_nulls = int(df1[f1_keys].isnull().any(axis=1).sum())
-    f2_nulls = int(df2[f2_keys].isnull().any(axis=1).sum())
+    f1_nulls = df1[f1_keys].isnull().any(axis=1).sum()
+    f2_nulls = df2[f2_keys].isnull().any(axis=1).sum()
 
     f1_dupes = int(df1.duplicated(subset=f1_keys).sum())
     f2_dupes = int(df2.duplicated(subset=f2_keys).sum())
@@ -2481,15 +2507,21 @@ def reconcile_and_merge(
                 c2_col = f"{c2}_FILE2" if f"{c2}_FILE2" in row_dict else c2
                 v1 = row_dict.get(c1_col)
                 v2 = row_dict.get(c2_col)
-                try:
-                    num1 = float(v1)
-                    num2 = float(v2)
-                    diff = round(num1 - num2, 4)
-                    row_dict[f"DIFF_{c1}"] = diff
-                    if abs(diff) > numeric_tolerance:
-                        has_variance = True
-                        variance_flags.append(f"{c1} diff: {diff}")
-                except (ValueError, TypeError):
+                if v1 is not None and v2 is not None:
+                    try:
+                        num1 = float(v1)
+                        num2 = float(v2)
+                        diff = round(num1 - num2, 4)
+                        row_dict[f"DIFF_{c1}"] = diff
+                        if abs(diff) > numeric_tolerance:
+                            has_variance = True
+                            variance_flags.append(f"{c1} diff: {diff}")
+                    except (ValueError, TypeError):
+                        if str(v1).strip().lower() != str(v2).strip().lower():
+                            has_variance = True
+                            row_dict[f"DIFF_{c1}"] = f"Mismatch: '{v1}' != '{v2}'"
+                            variance_flags.append(f"{c1} mismatch")
+                else:
                     if str(v1).strip().lower() != str(v2).strip().lower():
                         has_variance = True
                         row_dict[f"DIFF_{c1}"] = f"Mismatch: '{v1}' != '{v2}'"
@@ -3092,7 +3124,7 @@ def create_table(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = _get_sheet(wb, sheet_name)
 
     # Clean table name
     clean_name = re.sub(r"[^a-zA-Z0-9_]", "_", table_name.strip())
@@ -3106,10 +3138,14 @@ def create_table(
 
     # Ensure top-row headers are strings to satisfy openpyxl requirements
     min_col, min_row, max_col, max_row = range_boundaries(range_address.upper())
-    for col_i in range(min_col, max_col + 1):
-        c_val = ws.cell(row=min_row, column=col_i).value
+    min_c = min_col or 1
+    min_r = min_row or 1
+    max_c = max_col or min_c
+    max_r = max_row or min_r
+    for col_i in range(min_c, max_c + 1):
+        c_val = ws.cell(row=min_r, column=col_i).value
         if c_val is None or not isinstance(c_val, str):
-            ws.cell(row=min_row, column=col_i, value=str(c_val) if c_val is not None else f"Column_{col_i}")
+            ws.cell(row=min_r, column=col_i, value=str(c_val) if c_val is not None else f"Column_{col_i}")
 
     tab = Table(displayName=clean_name, ref=range_address.upper())
     if table_style:
@@ -3160,13 +3196,18 @@ def list_tables(file_path: str, sheet_name: Optional[str] = None) -> Dict[str, A
 
     target_sheets = [wb[sheet_name]] if (sheet_name and sheet_name in wb.sheetnames) else wb.worksheets
 
-    for ws in target_sheets:
+    for ws_item in target_sheets:
+        ws: Any = ws_item
         for t_key in list(ws.tables):
             tab = ws.tables[t_key] if isinstance(t_key, str) else t_key
             min_col, min_row, max_col, max_row = range_boundaries(tab.ref)
+            min_c = min_col or 1
+            min_r = min_row or 1
+            max_c = max_col or min_c
+            max_r = max_row or min_r
             headers = []
-            for col_idx in range(min_col, max_col + 1):
-                val = ws.cell(row=min_row, column=col_idx).value
+            for col_idx in range(min_c, max_c + 1):
+                val = ws.cell(row=min_r, column=col_idx).value
                 headers.append(str(val) if val is not None else f"Column_{col_idx}")
 
             tables_found.append(
@@ -3177,7 +3218,7 @@ def list_tables(file_path: str, sheet_name: Optional[str] = None) -> Dict[str, A
                     "range": tab.ref,
                     "columns": headers,
                     "column_count": len(headers),
-                    "row_count": max(0, max_row - min_row),
+                    "row_count": max(0, max_r - min_r),
                     "style": tab.tableStyleInfo.name if tab.tableStyleInfo else None,
                 }
             )
@@ -3223,12 +3264,12 @@ def insert_column(
     target_header = header_name if header_name is not None else header
 
     wb = openpyxl.load_workbook(file_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = _get_sheet(wb, sheet_name)
 
     ws.insert_cols(target_col, amount=1)
 
     if target_header is not None:
-        ws.cell(row=1, column=target_col, value=str(target_header))
+        ws.cell(row=1, column=target_col, value=target_header)
 
     if values:
         for idx, val in enumerate(values):
@@ -3274,7 +3315,7 @@ def delete_column(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = _get_sheet(wb, sheet_name)
 
     target_idx = None
     if isinstance(col_identifier, int) or (isinstance(col_identifier, str) and col_identifier.isdigit()):
@@ -3350,7 +3391,7 @@ def insert_rows(
     num_rows = len(row_data) if row_data else (count if count is not None else max(1, amount))
 
     wb = openpyxl.load_workbook(file_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = _get_sheet(wb, sheet_name)
 
     ws.insert_rows(target_row, amount=num_rows)
 
@@ -3406,7 +3447,7 @@ def delete_rows(
     num_rows = count if count is not None else max(1, amount)
 
     wb = openpyxl.load_workbook(file_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = _get_sheet(wb, sheet_name)
 
     ws.delete_rows(target_row, amount=num_rows)
 
@@ -3449,7 +3490,7 @@ def merge_cells(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     wb = openpyxl.load_workbook(file_path)
-    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+    ws = _get_sheet(wb, sheet_name)
 
     ws.merge_cells(range_address)
     min_col, min_row, _, _ = range_boundaries(range_address)
@@ -3525,8 +3566,8 @@ def diff_workbooks(
             df_a = xl_a.parse(s)
             df_b = xl_b.parse(s)
 
-            df_a.columns = [str(c).strip() for c in df_a.columns]
-            df_b.columns = [str(c).strip() for c in df_b.columns]
+            df_a.columns = [c.strip() for c in df_a.columns]
+            df_b.columns = [c.strip() for c in df_b.columns]
 
             if key_column and key_column in df_a.columns and key_column in df_b.columns:
                 # Key-based comparison

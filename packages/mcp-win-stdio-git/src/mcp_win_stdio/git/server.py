@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Literal, Optional
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
 
@@ -1791,7 +1791,7 @@ def gh_auth_status() -> Dict[str, Any]:
         return get_gh_missing_guidance()
 
     res = run_gh_command(["auth", "status"], cwd=resolve_repo_path())
-    out = (res.get("stderr") or res.get("stdout") or "")
+    out = res.get("stderr") or res.get("stdout") or ""
     return {
         "success": bool(res.get("success")),
         "raw_status": out,

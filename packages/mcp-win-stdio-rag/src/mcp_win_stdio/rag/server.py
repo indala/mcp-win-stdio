@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 from mcp_win_stdio.rag.crawler import AsyncPlaywrightCrawler, get_domain_hash
 from mcp_win_stdio.rag.ingest import parse_github_url, scan_local_codebase, stream_github_repo_in_memory
