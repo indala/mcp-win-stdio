@@ -1763,16 +1763,19 @@ def export_to_pdf(file_path: str, output_pdf_path: Optional[str] = None) -> Dict
                 docx2pdf = __import__("docx2pdf")
                 docx2pdf.convert(abs_docx, abs_pdf)
             except Exception:
-                return {"error": f"Failed to export PDF via Word COM: {com_err}. Ensure Microsoft Word is installed."}
+                return {
+                    "status": "error",
+                    "error": f"Failed to export PDF via Word COM: {com_err}. Ensure Microsoft Word is installed.",
+                }
 
         return {
             "status": "success",
             "source_docx": abs_docx,
             "output_pdf": abs_pdf,
-            "pdf_size_bytes": os.path.getsize(abs_pdf),
+            "pdf_size_bytes": os.path.getsize(abs_pdf) if os.path.exists(abs_pdf) else 0,
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "error": str(e)}
 
 
 if __name__ == "__main__":

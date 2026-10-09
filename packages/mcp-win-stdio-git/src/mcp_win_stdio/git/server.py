@@ -1791,11 +1791,11 @@ def gh_auth_status() -> Dict[str, Any]:
         return get_gh_missing_guidance()
 
     res = run_gh_command(["auth", "status"], cwd=resolve_repo_path())
-    out = res.get("stderr") or res.get("stdout")
+    out = (res.get("stderr") or res.get("stdout") or "")
     return {
-        "success": res.get("success"),
+        "success": bool(res.get("success")),
         "raw_status": out,
-        "is_logged_in": res.get("success") or "Logged in to" in out,
+        "is_logged_in": bool(res.get("success") or ("Logged in to" in out if out else False)),
     }
 
 
