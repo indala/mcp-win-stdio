@@ -15,11 +15,17 @@ authors = [
 keywords = ["mcp", "excel", "database", "pipeline", "etl", "duckdb", "sql", "streaming", "analytics", "stdio"]
 
 dependencies = [
+    "mcp-win-stdio>=0.2.5",
     "mcp>=1.2.0",
+    "pandas>=2.0.0",
+    "openpyxl>=3.1.0",
+    "sqlalchemy>=2.0.0",
 ]
 
 [project.scripts]
 mcp-win-stdio-excel-db = "mcp_win_stdio.excel_db.cli:main"
+mws-excel-db = "mcp_win_stdio.excel_db.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_win_stdio/excel_db"]
+packages = ["src/mcp_win_stdio"]
+

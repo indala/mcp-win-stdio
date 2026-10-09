@@ -6,7 +6,6 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-import pytest
 
 # Ensure all packages are on sys.path
 for p in Path("packages").glob("*/src"):
@@ -14,29 +13,27 @@ for p in Path("packages").glob("*/src"):
 sys.path.insert(0, os.path.abspath("src"))
 
 from mcp_win_stdio.excel.server import (
-    create_workbook,
     create_table,
-    list_tables,
-    insert_column,
+    create_workbook,
     delete_column,
-    insert_rows,
     delete_rows,
-    merge_cells,
     diff_workbooks,
+    insert_column,
+    insert_rows,
+    list_tables,
+    merge_cells,
 )
 from mcp_win_stdio.word.server import (
-    create_document,
     add_heading,
     add_paragraph,
+    create_document,
+    export_to_pdf,
     fill_template,
     replace_text,
-    export_to_pdf,
 )
+
 from mcp_win_stdio.excel_db.server import (
     compare_master_datasets,
-    generate_master_migration_plan,
-    sync_master_to_db,
-    py_template_pipeline,
 )
 
 
@@ -80,7 +77,7 @@ def test_excel_table_and_mutation_tools():
         )
         assert row_res["status"] == "success"
 
-        # 5. delete_column  
+        # 5. delete_column
         del_col = delete_column(wb_path, sheet_name="Inventory", col_identifier="Total Value")
         assert del_col["status"] == "success"
 
@@ -163,7 +160,7 @@ def test_excel_db_master_reconciliation():
             ["SKU", "Item Description", "Quantity", "Price"],
             ["MAT-01", "Camera Lens 50mm", 10, 450.0],
             ["MAT-02", "Tripod Pro Carbon", 4, 220.0],  # qty changed
-            ["MAT-03", "Wireless Mic Kit", 2, 310.0],    # new item
+            ["MAT-03", "Wireless Mic Kit", 2, 310.0],  # new item
         ]
         create_workbook(f1, sheet_name="Sheet1", data=data_a)
         create_workbook(f2, sheet_name="Sheet1", data=data_b)
@@ -172,7 +169,12 @@ def test_excel_db_master_reconciliation():
             source_a_path=f1,
             source_b_path=f2,
             key_columns=["material_number"],
-            column_mapping={"SKU": "material_number", "Item Description": "description", "Quantity": "qty", "Price": "rate"},
+            column_mapping={
+                "SKU": "material_number",
+                "Item Description": "description",
+                "Quantity": "qty",
+                "Price": "rate",
+            },
             output_audit_path=audit_out,
             tolerance=0.01,
         )
@@ -184,7 +186,6 @@ def test_excel_db_master_reconciliation():
 
 
 def test_rag_compact_search_and_chunk_context():
-    import json
     from mcp_win_stdio.rag.store import RAGVectorStore
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -214,7 +215,7 @@ def test_rag_compact_search_and_chunk_context():
                         "section_title": "revenue_header",
                         "anchor_url": "",
                         "text": "import os\nimport sys\n# Financial revenue calculator module header.",
-                        "content_hash": "chunk_h0"
+                        "content_hash": "chunk_h0",
                     },
                     {
                         "chunk_index": 1,
@@ -223,7 +224,7 @@ def test_rag_compact_search_and_chunk_context():
                         "section_title": "calculate_total_revenue",
                         "anchor_url": "",
                         "text": long_code,
-                        "content_hash": "chunk_h1"
+                        "content_hash": "chunk_h1",
                     },
                     {
                         "chunk_index": 2,
@@ -232,9 +233,9 @@ def test_rag_compact_search_and_chunk_context():
                         "section_title": "revenue_footer",
                         "anchor_url": "",
                         "text": "def format_currency(val: float) -> str:\n    return f'${val:,.2f}'",
-                        "content_hash": "chunk_h2"
-                    }
-                ]
+                        "content_hash": "chunk_h2",
+                    },
+                ],
             }
         ]
 

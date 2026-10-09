@@ -5,11 +5,11 @@ Ensures Python Scripts and binary directories are registered in Windows User PAT
 
 import ctypes
 import os
-from pathlib import Path
 import site
 import sys
 import sysconfig
-from typing import List, Optional, Tuple
+from pathlib import Path
+from typing import List, Tuple
 
 if sys.platform == "win32":
     import winreg
@@ -161,7 +161,9 @@ def check_and_prompt_path_setup(auto_accept: bool = False) -> List[Path]:
     if auto_accept:
         do_add = True
     elif sys.stdin.isatty():
-        choice = input("\n👉 Would you like mws to automatically add it to your Windows User PATH? [Y/n]: ").strip().lower()
+        choice = (
+            input("\n👉 Would you like mws to automatically add it to your Windows User PATH? [Y/n]: ").strip().lower()
+        )
         if choice not in ("n", "no"):
             do_add = True
 

@@ -2,6 +2,7 @@
 Comprehensive guide, tool reference, and Claude prompt recipes for mcp-win-stdio-ssh.
 """
 
+
 def print_ssh_guide() -> None:
     """Print complete SSH MCP tool reference and workflow recipes."""
     guide_text = """

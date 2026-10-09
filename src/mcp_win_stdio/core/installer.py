@@ -4,14 +4,13 @@ Installer and transparent configuration engine for Claude Desktop and Claude Cod
 
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from mcp_win_stdio.core.config import load_config, save_config
-from mcp_win_stdio.core.discovery import get_server_info, list_available_servers
+from mcp_win_stdio.core.discovery import get_server_info
 
 
 def get_claude_desktop_config_path() -> Optional[Path]:
@@ -207,5 +206,3 @@ def uninstall_pip_packages(packages: List[str]) -> Tuple[bool, str]:
             return False, f"Pip uninstall error:\n{res.stderr or res.stdout}"
     except Exception as e:
         return False, f"Failed to run pip uninstall: {str(e)}"
-
-

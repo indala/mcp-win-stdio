@@ -4,23 +4,24 @@ High-Performance Excel MCP Server powered by Python, Pandas, OpenPyXL,
 and Native Windows Microsoft Excel (COM Automation via PyWin32).
 """
 
-import os
-from pathlib import Path
-import math
 import json
+import math
+import os
 import re
 import sqlite3
-from typing import Any, Optional, List, Dict, Union, Literal
-import pandas as pd
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, Union
+
 import openpyxl
-from copy import copy
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment, numbers
+import pandas as pd
+from openpyxl.chart import AreaChart, BarChart, LineChart, PieChart, Reference
 from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule, Rule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.styles.differential import DifferentialStyle
-from openpyxl.utils import get_column_letter, column_index_from_string
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
-from openpyxl.chart import BarChart, LineChart, PieChart, AreaChart, Reference
 from openpyxl.worksheet.table import Table, TableStyleInfo
+
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
@@ -29,8 +30,9 @@ except (ImportError, ModuleNotFoundError):
 # Try importing pywin32 for native Windows Excel COM automation
 HAS_WIN32 = False
 try:
-    import win32com.client
     import pythoncom
+    import win32com.client
+
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
@@ -39,6 +41,7 @@ except ImportError:
 HAS_RAPIDFUZZ = False
 try:
     from rapidfuzz import fuzz
+
     HAS_RAPIDFUZZ = True
 except ImportError:
     HAS_RAPIDFUZZ = False
@@ -231,15 +234,27 @@ def _apply_style_to_cell(
         cur_f = cell.font
         color = _normalize_hex_color(font_spec.get("color"))
         u_val = font_spec.get("underline")
-        underline = u_val if u_val in ["single", "double"] else ("single" if u_val is True else (None if u_val is False else None))
+        underline = (
+            u_val
+            if u_val in ["single", "double"]
+            else ("single" if u_val is True else (None if u_val is False else None))
+        )
         cell.font = Font(
             name=font_spec.get("name") or (cur_f.name if cur_f and cur_f.name else "Calibri"),
-            size=font_spec.get("size") if font_spec.get("size") is not None else (cur_f.size if cur_f and cur_f.size else 11),
+            size=font_spec.get("size")
+            if font_spec.get("size") is not None
+            else (cur_f.size if cur_f and cur_f.size else 11),
             bold=font_spec.get("bold") if font_spec.get("bold") is not None else (cur_f.bold if cur_f else False),
-            italic=font_spec.get("italic") if font_spec.get("italic") is not None else (cur_f.italic if cur_f else False),
+            italic=font_spec.get("italic")
+            if font_spec.get("italic") is not None
+            else (cur_f.italic if cur_f else False),
             underline=underline if underline is not None else (cur_f.underline if cur_f else None),
-            strike=font_spec.get("strike") if font_spec.get("strike") is not None else (cur_f.strike if cur_f else False),
-            color=color if color is not None else (cur_f.color.rgb if cur_f and cur_f.color and hasattr(cur_f.color, "rgb") else None),
+            strike=font_spec.get("strike")
+            if font_spec.get("strike") is not None
+            else (cur_f.strike if cur_f else False),
+            color=color
+            if color is not None
+            else (cur_f.color.rgb if cur_f and cur_f.color and hasattr(cur_f.color, "rgb") else None),
         )
 
     if fill_spec is not None:
@@ -257,9 +272,15 @@ def _apply_style_to_cell(
         cell.alignment = Alignment(
             horizontal=alignment_spec.get("horizontal") or (cur_a.horizontal if cur_a else None),
             vertical=alignment_spec.get("vertical") or (cur_a.vertical if cur_a else None),
-            wrap_text=alignment_spec.get("wrap_text") if alignment_spec.get("wrap_text") is not None else (cur_a.wrap_text if cur_a else None),
-            text_rotation=alignment_spec.get("text_rotation") if alignment_spec.get("text_rotation") is not None else (cur_a.text_rotation if cur_a else 0),
-            indent=alignment_spec.get("indent") if alignment_spec.get("indent") is not None else (cur_a.indent if cur_a else 0),
+            wrap_text=alignment_spec.get("wrap_text")
+            if alignment_spec.get("wrap_text") is not None
+            else (cur_a.wrap_text if cur_a else None),
+            text_rotation=alignment_spec.get("text_rotation")
+            if alignment_spec.get("text_rotation") is not None
+            else (cur_a.text_rotation if cur_a else 0),
+            indent=alignment_spec.get("indent")
+            if alignment_spec.get("indent") is not None
+            else (cur_a.indent if cur_a else 0),
         )
 
     if number_format is not None:
@@ -290,6 +311,7 @@ def _safe_save_workbook(wb: Any, save_path: str):
 # 1. PANDAS & OPENPYXL FAST DATA TOOLS
 # ==========================================
 
+
 @mcp.tool()
 def get_workbook_info(file_path: str) -> Dict[str, Any]:
     """
@@ -308,16 +330,18 @@ def get_workbook_info(file_path: str) -> Dict[str, Any]:
             ws = wb[name]
             headers = []
             for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
-                headers = [str(cell) if cell is not None else f"Column_{i+1}" for i, cell in enumerate(row)]
+                headers = [str(cell) if cell is not None else f"Column_{i + 1}" for i, cell in enumerate(row)]
                 break
 
-            sheets_info.append({
-                "name": name,
-                "max_rows": ws.max_row,
-                "max_columns": ws.max_column,
-                "header_count": len(headers),
-                "headers_preview": headers[:30],
-            })
+            sheets_info.append(
+                {
+                    "name": name,
+                    "max_rows": ws.max_row,
+                    "max_columns": ws.max_column,
+                    "header_count": len(headers),
+                    "headers_preview": headers[:30],
+                }
+            )
     finally:
         wb.close()
 
@@ -339,7 +363,7 @@ def preview_sheet(
 ) -> Dict[str, Any]:
     """
     Preview the first N rows of a sheet. Loads only requested rows for speed and minimal token consumption.
-    
+
     Args:
         file_path: Path to the Excel file (.xlsx, .xls, .xlsm).
         sheet_name: Sheet name or index (default is first sheet).
@@ -381,7 +405,7 @@ def query_rows(
     Query, filter, and paginate through Excel rows using Pandas vectorized expressions.
     To protect chat context window from credit-draining token bloat, responses are safety-capped.
     For bulk data (>100 rows), use 'get_column_values', 'compare_column_values', 'export_to_csv', or format='compact' / 'tsv'.
-    
+
     Args:
         file_path: Path to the Excel file.
         sheet_name: Sheet name or index.
@@ -454,7 +478,7 @@ def read_range(
     """
     Read a specific slice of rows (e.g. rows 100 to 150) without loading the entire spreadsheet.
     Capped to prevent context window bloat.
-    
+
     Args:
         file_path: Path to the Excel file.
         sheet_name: Sheet name or index.
@@ -521,7 +545,7 @@ def get_column_values(
     """
     Extract values from a single column in an Excel sheet with minimal token consumption.
     Ideal for extracting ID lists, SAP codes, SKUs, or status values without dumping full rows into chat.
-    
+
     Args:
         file_path: Path to the Excel file.
         column: Column name to extract.
@@ -586,7 +610,7 @@ def compare_column_values(
     Compare values in an Excel column against an external candidate list (e.g. from database query).
     Performs instant in-memory set diffing on the server without dumping thousands of rows into LLM context!
     Returns match statistics, count of missing items in candidate list, and count of new items.
-    
+
     Args:
         file_path: Path to the Excel file.
         column: Column name to compare.
@@ -639,9 +663,8 @@ def compare_column_values(
             f"Comparison Complete: {len(matching_keys)} matched. "
             f"{len(in_excel_only_keys)} new items in Excel not in candidate list. "
             f"{len(in_candidates_only_keys)} items in candidate list not in Excel."
-        )
+        ),
     }
-
 
 
 @mcp.tool()
@@ -715,11 +738,13 @@ def search_text(
         cleaned_row_list = _df_to_clean_records(df.iloc[[idx]])
         row_data = cleaned_row_list[0] if cleaned_row_list else {}
         matching_cols = [col for col in df.columns if str(search_term).lower() in str(df.at[idx, col]).lower()]
-        results.append({
-            "excel_row_number": idx + 2,
-            "matching_columns": matching_cols,
-            "row_data": row_data,
-        })
+        results.append(
+            {
+                "excel_row_number": idx + 2,
+                "matching_columns": matching_cols,
+                "row_data": row_data,
+            }
+        )
 
     return {
         "search_term": search_term,
@@ -949,7 +974,7 @@ def update_cells(
         coord = item.get("cell")
         if not coord:
             continue
-        
+
         cell_obj = sheet[coord]
         if "value" in item:
             cell_obj.value = item.get("value")
@@ -1051,6 +1076,7 @@ def write_range(
 # 1B. STYLING, CONDITIONAL FORMATTING & LAYOUT TOOLS
 # ============================================================================
 
+
 @mcp.tool()
 def format_cells(
     file_path: str,
@@ -1101,14 +1127,16 @@ def format_cells(
     if batch_formats:
         operations.extend(batch_formats)
     if range_address:
-        operations.append({
-            "range": range_address,
-            "font": font,
-            "fill": fill,
-            "border": border,
-            "alignment": alignment,
-            "number_format": number_format,
-        })
+        operations.append(
+            {
+                "range": range_address,
+                "font": font,
+                "fill": fill,
+                "border": border,
+                "alignment": alignment,
+                "number_format": number_format,
+            }
+        )
 
     if not operations:
         wb.close()
@@ -1276,16 +1304,18 @@ def get_cell_formatting(
                 "right": cell_obj.border.right.style if cell_obj.border.right else None,
             }
 
-        formatted_results.append({
-            "cell": coord,
-            "value": _clean_val(cell_obj.value),
-            "data_type": cell_obj.data_type,
-            "number_format": cell_obj.number_format,
-            "font": font_info,
-            "fill": fill_info,
-            "alignment": align_info,
-            "border": border_info,
-        })
+        formatted_results.append(
+            {
+                "cell": coord,
+                "value": _clean_val(cell_obj.value),
+                "data_type": cell_obj.data_type,
+                "number_format": cell_obj.number_format,
+                "font": font_info,
+                "fill": fill_info,
+                "alignment": align_info,
+                "border": border_info,
+            }
+        )
 
     wb.close()
     return {
@@ -1654,7 +1684,9 @@ def clean_and_deduplicate_sheet(
             df[col] = df[col].astype(str).str.strip().replace({"nan": None, "None": None, "<NA>": None})
 
     if normalize_dates:
-        target_date_cols = date_columns if date_columns else list(df.select_dtypes(include=["object", "string", "datetime"]).columns)
+        target_date_cols = (
+            date_columns if date_columns else list(df.select_dtypes(include=["object", "string", "datetime"]).columns)
+        )
         for col in target_date_cols:
             if col in df.columns:
                 try:
@@ -1801,7 +1833,7 @@ def export_to_csv(
     """
     Export an Excel sheet to a clean CSV file on disk for fast external or Python/SQL processing.
     Avoids consuming any LLM context window tokens while handling massive datasets (10,000+ rows).
-    
+
     Args:
         file_path: Path to the Excel file.
         output_csv_path: Destination path for the CSV.
@@ -1843,7 +1875,7 @@ def export_to_json(
     """
     Export an Excel sheet directly to a JSON file on disk.
     Allows LLMs and scripts to process structured JSON locally without bloating chat context window.
-    
+
     Args:
         file_path: Path to the Excel file.
         output_json_path: Destination path for the exported .json file.
@@ -1893,7 +1925,7 @@ def profile_sheet(
     Generate an instant high-level statistical profile and data quality audit of an entire Excel sheet.
     Provides complete analytics (null rates, unique counts, top frequent values, numeric distributions)
     in a single compact response (~400 tokens) without dumping raw rows into the chat context.
-    
+
     Args:
         file_path: Path to the Excel file.
         sheet_name: Sheet name or index (default first sheet).
@@ -1962,7 +1994,7 @@ def query_excel_sql(
     directly on an Excel sheet using an in-memory SQL engine (SQLite).
     Allows powerful analytics, deduplication, and filtering on the server with minimal token consumption!
     The Excel table is exposed as 'sheet' (and 'data'). Column names are sanitized to valid SQL identifiers (spaces -> underscores).
-    
+
     Args:
         file_path: Path to the Excel file.
         sql_query: SQL query to execute (e.g. "SELECT prefix, COUNT(*), MAX(code) FROM sheet GROUP BY prefix").
@@ -2140,7 +2172,9 @@ def export_transformed_workbook(
                 df[col_name] = expr
                 continue
             expr_str = expr.strip()
-            if (expr_str.startswith("'") and expr_str.endswith("'")) or (expr_str.startswith('"') and expr_str.endswith('"')):
+            if (expr_str.startswith("'") and expr_str.endswith("'")) or (
+                expr_str.startswith('"') and expr_str.endswith('"')
+            ):
                 df[col_name] = expr_str[1:-1]
             else:
                 try:
@@ -2210,7 +2244,9 @@ def export_transformed_workbook(
                     for col_idx, col_name in enumerate(exported_cols, start=1):
                         col_letter = get_column_letter(col_idx)
                         max_len = len(str(col_name))
-                        sample_vals = df[col_name].dropna().head(50).astype(str).tolist() if col_name in df.columns else []
+                        sample_vals = (
+                            df[col_name].dropna().head(50).astype(str).tolist() if col_name in df.columns else []
+                        )
                         if sample_vals:
                             sample_max = max(len(v) for v in sample_vals)
                             max_len = max(max_len, sample_max)
@@ -2242,6 +2278,7 @@ def export_transformed_workbook(
 # ==========================================================
 # 2. MULTI-KEY RECONCILIATION & DISCREPANCY ANALYSIS TOOLS
 # ==========================================================
+
 
 @mcp.tool()
 def analyze_reconciliation_keys(
@@ -2333,22 +2370,32 @@ def analyze_reconciliation_keys(
             if best_score >= 80:
                 potential_fuzzy += 1
                 if len(fuzzy_samples) < 5:
-                    fuzzy_samples.append({
-                        "key_file1": u1.replace("___", " | "),
-                        "key_file2": best_match.replace("___", " | ") if best_match else "",
-                        "similarity_%": round(best_score, 1)
-                    })
+                    fuzzy_samples.append(
+                        {
+                            "key_file1": u1.replace("___", " | "),
+                            "key_file2": best_match.replace("___", " | ") if best_match else "",
+                            "similarity_%": round(best_score, 1),
+                        }
+                    )
 
     recommendations = []
     if f1_dupes > 0 or f2_dupes > 0:
-        recommendations.append(f"Duplicate keys found (File 1: {f1_dupes}, File 2: {f2_dupes}). Many-to-many matching might expand row count.")
+        recommendations.append(
+            f"Duplicate keys found (File 1: {f1_dupes}, File 2: {f2_dupes}). Many-to-many matching might expand row count."
+        )
     if clean_match_rate > raw_match_rate:
         diff_gain = round(clean_match_rate - raw_match_rate, 1)
-        recommendations.append(f"Whitespace & case normalization increases match rate by +{diff_gain}%. Enabled by default.")
+        recommendations.append(
+            f"Whitespace & case normalization increases match rate by +{diff_gain}%. Enabled by default."
+        )
     if dtype_mismatches:
-        recommendations.append("Key data types differ between files (e.g. integer vs text). Auto-string conversion recommended.")
+        recommendations.append(
+            "Key data types differ between files (e.g. integer vs text). Auto-string conversion recommended."
+        )
     if potential_fuzzy > 0:
-        recommendations.append(f"Detected {potential_fuzzy} additional candidates matchable via Fuzzy Matching (>=80% similarity).")
+        recommendations.append(
+            f"Detected {potential_fuzzy} additional candidates matchable via Fuzzy Matching (>=80% similarity)."
+        )
 
     return {
         "valid": True,
@@ -2415,14 +2462,7 @@ def reconcile_and_merge(
     df1["_NORM_KEY_"] = make_normalized_key(df1, f1_keys)
     df2["_NORM_KEY_"] = make_normalized_key(df2, f2_keys)
 
-    merged = pd.merge(
-        df1,
-        df2,
-        on="_NORM_KEY_",
-        how="outer",
-        suffixes=("_FILE1", "_FILE2"),
-        indicator=True
-    )
+    merged = pd.merge(df1, df2, on="_NORM_KEY_", how="outer", suffixes=("_FILE1", "_FILE2"), indicator=True)
 
     reconciled_rows = []
     unmatched_f1_rows = []
@@ -2516,15 +2556,23 @@ def reconcile_and_merge(
             r.pop("_NORM_KEY_", None)
 
     # Save to Excel with 3 dedicated sheets
-    df_reconciled = pd.DataFrame(reconciled_rows) if reconciled_rows else pd.DataFrame([{"Message": "No exact matches found"}])
-    df_fuzzy = pd.DataFrame(fuzzy_matched_rows) if fuzzy_matched_rows else pd.DataFrame([{"Message": "No fuzzy matches found"}])
-    
+    df_reconciled = (
+        pd.DataFrame(reconciled_rows) if reconciled_rows else pd.DataFrame([{"Message": "No exact matches found"}])
+    )
+    df_fuzzy = (
+        pd.DataFrame(fuzzy_matched_rows)
+        if fuzzy_matched_rows
+        else pd.DataFrame([{"Message": "No fuzzy matches found"}])
+    )
+
     all_unmatched = []
     for r in unmatched_f1_rows:
         all_unmatched.append(r)
     for r in unmatched_f2_rows:
         all_unmatched.append(r)
-    df_unmatched = pd.DataFrame(all_unmatched) if all_unmatched else pd.DataFrame([{"Message": "No unmatched exceptions"}])
+    df_unmatched = (
+        pd.DataFrame(all_unmatched) if all_unmatched else pd.DataFrame([{"Message": "No unmatched exceptions"}])
+    )
 
     out_dir = os.path.dirname(os.path.abspath(output_file_path))
     if out_dir:
@@ -2563,6 +2611,7 @@ def reconcile_and_merge(
 # ==========================================================
 # 3. NATIVE MICROSOFT EXCEL WINDOWS AUTOMATION (COM / PyWin32)
 # ==========================================================
+
 
 def _get_abs_path(path: str) -> str:
     return os.path.abspath(os.path.expanduser(path))
@@ -2723,7 +2772,6 @@ def refresh_data_and_pivots(file_path: str) -> Dict[str, Any]:
         pythoncom.CoUninitialize()
 
 
-
 @mcp.tool()
 def run_vba_macro(
     file_path: str,
@@ -2775,7 +2823,6 @@ def run_vba_macro(
         pythoncom.CoUninitialize()
 
 
-
 @mcp.tool()
 def get_active_excel_window() -> Dict[str, Any]:
     """
@@ -2813,6 +2860,7 @@ def get_active_excel_window() -> Dict[str, Any]:
 # 5. ADVANCED EXCEL AUDITING & MODIFICATION TOOLS
 # ==========================================================
 
+
 @mcp.tool()
 def audit_formulas(
     file_path: str,
@@ -2821,7 +2869,7 @@ def audit_formulas(
 ) -> Dict[str, Any]:
     """
     Audit an Excel workbook for broken formulas, cell error values, and reference faults (#REF!, #VALUE!, #N/A, #DIV/0!, #NAME?, #NUM!, #NULL!).
-    
+
     Args:
         file_path: Path to the Excel file.
         sheet_name: Optional sheet name to inspect. If omitted, checks all sheets.
@@ -2876,12 +2924,14 @@ def audit_formulas(
                         pass
 
                 if found_error_type:
-                    errors_found.append({
-                        "sheet": s_name,
-                        "cell": cell.coordinate,
-                        "formula": f_str,
-                        "error_type": found_error_type,
-                    })
+                    errors_found.append(
+                        {
+                            "sheet": s_name,
+                            "cell": cell.coordinate,
+                            "formula": f_str,
+                            "error_type": found_error_type,
+                        }
+                    )
                     if len(errors_found) >= safe_max:
                         break
             if len(errors_found) >= safe_max:
@@ -2921,7 +2971,7 @@ def search_and_replace_cells(
     """
     Search and replace text within spreadsheet cells.
     Defaults to dry_run=True to preview changes safely before modifying files.
-    
+
     Args:
         file_path: Path to the target Excel file.
         search_val: String to search for.
@@ -2968,12 +3018,14 @@ def search_and_replace_cells(
                         new_val = pattern.sub(replace_val, orig_val)
 
                 if matched and new_val != orig_val:
-                    replacements.append({
-                        "sheet": s_name,
-                        "cell": cell.coordinate,
-                        "old_value": orig_val[:100],
-                        "new_value": new_val[:100],
-                    })
+                    replacements.append(
+                        {
+                            "sheet": s_name,
+                            "cell": cell.coordinate,
+                            "old_value": orig_val[:100],
+                            "new_value": new_val[:100],
+                        }
+                    )
                     if not dry_run:
                         cell.value = new_val
 
@@ -3011,6 +3063,7 @@ def search_and_replace_cells(
 # 8. NATIVE EXCEL TABLES, STRUCTURED MUTATIONS & WORKBOOK DIFF
 # ============================================================================
 
+
 @mcp.tool()
 def create_table(
     file_path: str,
@@ -3020,11 +3073,11 @@ def create_table(
     table_style: Optional[str] = "TableStyleMedium9",
     show_filter: bool = True,
     show_row_stripes: bool = True,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Convert a rectangular cell range (e.g. 'A1:F50') into a native styled Excel Table (ListObject) with auto-filters.
-    
+
     Args:
         file_path: Path to Excel workbook.
         range_address: Rectangular range address (e.g. 'A1:H25').
@@ -3042,7 +3095,7 @@ def create_table(
     ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
 
     # Clean table name
-    clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', table_name.strip())
+    clean_name = re.sub(r"[^a-zA-Z0-9_]", "_", table_name.strip())
     if not clean_name or clean_name[0].isdigit():
         clean_name = f"Tbl_{clean_name}"
 
@@ -3065,7 +3118,7 @@ def create_table(
             showFirstColumn=False,
             showLastColumn=False,
             showRowStripes=show_row_stripes,
-            showColumnStripes=False
+            showColumnStripes=False,
         )
         tab.tableStyleInfo = style
 
@@ -3086,15 +3139,12 @@ def create_table(
         "table_name": clean_name,
         "range": range_address.upper(),
         "table_style": table_style,
-        "show_filter": show_filter
+        "show_filter": show_filter,
     }
 
 
 @mcp.tool()
-def list_tables(
-    file_path: str,
-    sheet_name: Optional[str] = None
-) -> Dict[str, Any]:
+def list_tables(file_path: str, sheet_name: Optional[str] = None) -> Dict[str, Any]:
     """
     List all native Excel Tables (ListObjects) in a workbook, including their sheet locations, range bounds, and column names.
 
@@ -3119,24 +3169,22 @@ def list_tables(
                 val = ws.cell(row=min_row, column=col_idx).value
                 headers.append(str(val) if val is not None else f"Column_{col_idx}")
 
-            tables_found.append({
-                "sheet": ws.title,
-                "name": getattr(tab, "name", str(t_key)),
-                "displayName": getattr(tab, "displayName", str(t_key)),
-                "range": tab.ref,
-                "columns": headers,
-                "column_count": len(headers),
-                "row_count": max(0, max_row - min_row),
-                "style": tab.tableStyleInfo.name if tab.tableStyleInfo else None
-            })
+            tables_found.append(
+                {
+                    "sheet": ws.title,
+                    "name": getattr(tab, "name", str(t_key)),
+                    "displayName": getattr(tab, "displayName", str(t_key)),
+                    "range": tab.ref,
+                    "columns": headers,
+                    "column_count": len(headers),
+                    "row_count": max(0, max_row - min_row),
+                    "style": tab.tableStyleInfo.name if tab.tableStyleInfo else None,
+                }
+            )
 
     wb.close()
 
-    return {
-        "file_path": file_path,
-        "total_tables": len(tables_found),
-        "tables": tables_found
-    }
+    return {"file_path": file_path, "total_tables": len(tables_found), "tables": tables_found}
 
 
 @mcp.tool()
@@ -3149,7 +3197,7 @@ def insert_column(
     header: Optional[str] = None,
     values: Optional[List[Any]] = None,
     formula_template: Optional[str] = None,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Insert a new column at a 1-indexed column position, shifting subsequent columns right.
@@ -3204,16 +3252,13 @@ def insert_column(
         "column_inserted_index": target_col,
         "column_letter": get_column_letter(target_col),
         "header_name": target_header,
-        "total_columns": ws.max_column
+        "total_columns": ws.max_column,
     }
 
 
 @mcp.tool()
 def delete_column(
-    file_path: str,
-    col_identifier: Union[int, str],
-    sheet_name: Optional[str] = None,
-    output_path: Optional[str] = None
+    file_path: str, col_identifier: Union[int, str], sheet_name: Optional[str] = None, output_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Delete a column from a worksheet by 1-indexed column number, column letter ('C'), or header name.
@@ -3264,7 +3309,7 @@ def delete_column(
         "sheet_name": ws.title,
         "deleted_column_index": target_idx,
         "deleted_column_letter": col_letter_deleted,
-        "remaining_columns": ws.max_column
+        "remaining_columns": ws.max_column,
     }
 
 
@@ -3278,7 +3323,7 @@ def insert_rows(
     sheet_name: Optional[str] = None,
     data: Optional[List[List[Any]]] = None,
     rows_data: Optional[List[List[Any]]] = None,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Insert one or more blank or populated rows starting at a 1-indexed row position.
@@ -3325,7 +3370,7 @@ def insert_rows(
         "sheet_name": ws.title,
         "inserted_at_row": target_row,
         "rows_inserted_count": num_rows,
-        "total_rows": ws.max_row
+        "total_rows": ws.max_row,
     }
 
 
@@ -3337,7 +3382,7 @@ def delete_rows(
     amount: int = 1,
     count: Optional[int] = None,
     sheet_name: Optional[str] = None,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Delete one or more rows from a worksheet by 1-indexed row number.
@@ -3376,7 +3421,7 @@ def delete_rows(
         "sheet_name": ws.title,
         "deleted_start_row": target_row,
         "deleted_rows_count": num_rows,
-        "remaining_rows": ws.max_row
+        "remaining_rows": ws.max_row,
     }
 
 
@@ -3387,7 +3432,7 @@ def merge_cells(
     sheet_name: Optional[str] = None,
     value: Optional[Any] = None,
     alignment: Optional[Dict[str, str]] = None,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Merge a rectangular cell range (e.g. 'A1:D1') with optional text and center/middle alignment.
@@ -3417,7 +3462,7 @@ def merge_cells(
         top_left_cell.alignment = Alignment(
             horizontal=alignment.get("horizontal", "center"),
             vertical=alignment.get("vertical", "center"),
-            wrap_text=alignment.get("wrap_text", False)
+            wrap_text=alignment.get("wrap_text", False),
         )
 
     save_path = output_path or file_path
@@ -3431,7 +3476,7 @@ def merge_cells(
         "sheet_name": ws.title,
         "merged_range": range_address.upper(),
         "anchor_cell": top_left_cell.coordinate,
-        "value": value
+        "value": value,
     }
 
 
@@ -3442,7 +3487,7 @@ def diff_workbooks(
     sheet_name: Optional[str] = None,
     key_column: Optional[str] = None,
     numeric_tolerance: float = 0.001,
-    output_report_path: Optional[str] = None
+    output_report_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Deterministically compare two Excel workbooks cell-by-cell or row-by-row on a key column.
@@ -3494,26 +3539,35 @@ def diff_workbooks(
                         v_b = row.get(f"{col}_b")
                         if pd.isna(v_a) and pd.isna(v_b):
                             continue
-                        if isinstance(v_a, (int, float)) and isinstance(v_b, (int, float)) and not isinstance(v_a, bool) and not isinstance(v_b, bool):
+                        if (
+                            isinstance(v_a, (int, float))
+                            and isinstance(v_b, (int, float))
+                            and not isinstance(v_a, bool)
+                            and not isinstance(v_b, bool)
+                        ):
                             if abs(float(v_a) - float(v_b)) > numeric_tolerance:
-                                all_diffs.append({
+                                all_diffs.append(
+                                    {
+                                        "sheet": s,
+                                        "key": row[key_column],
+                                        "field": col,
+                                        "value_a": _clean_val(v_a),
+                                        "value_b": _clean_val(v_b),
+                                        "delta": round(float(v_b) - float(v_a), 4),
+                                    }
+                                )
+                                total_mismatches += 1
+                        elif str(v_a).strip() != str(v_b).strip():
+                            all_diffs.append(
+                                {
                                     "sheet": s,
                                     "key": row[key_column],
                                     "field": col,
                                     "value_a": _clean_val(v_a),
                                     "value_b": _clean_val(v_b),
-                                    "delta": round(float(v_b) - float(v_a), 4)
-                                })
-                                total_mismatches += 1
-                        elif str(v_a).strip() != str(v_b).strip():
-                            all_diffs.append({
-                                "sheet": s,
-                                "key": row[key_column],
-                                "field": col,
-                                "value_a": _clean_val(v_a),
-                                "value_b": _clean_val(v_b),
-                                "delta": None
-                            })
+                                    "delta": None,
+                                }
+                            )
                             total_mismatches += 1
             else:
                 # Coordinate-based cell comparison
@@ -3526,26 +3580,35 @@ def diff_workbooks(
                         v_b = df_b.iloc[r_idx][col] if r_idx < len(df_b) else None
                         if pd.isna(v_a) and pd.isna(v_b):
                             continue
-                        if isinstance(v_a, (int, float)) and isinstance(v_b, (int, float)) and not isinstance(v_a, bool) and not isinstance(v_b, bool):
+                        if (
+                            isinstance(v_a, (int, float))
+                            and isinstance(v_b, (int, float))
+                            and not isinstance(v_a, bool)
+                            and not isinstance(v_b, bool)
+                        ):
                             if abs(float(v_a) - float(v_b)) > numeric_tolerance:
-                                all_diffs.append({
+                                all_diffs.append(
+                                    {
+                                        "sheet": s,
+                                        "row": r_idx + 2,
+                                        "column": col,
+                                        "value_a": _clean_val(v_a),
+                                        "value_b": _clean_val(v_b),
+                                        "delta": round(float(v_b) - float(v_a), 4),
+                                    }
+                                )
+                                total_mismatches += 1
+                        elif str(v_a).strip() != str(v_b).strip():
+                            all_diffs.append(
+                                {
                                     "sheet": s,
                                     "row": r_idx + 2,
                                     "column": col,
                                     "value_a": _clean_val(v_a),
                                     "value_b": _clean_val(v_b),
-                                    "delta": round(float(v_b) - float(v_a), 4)
-                                })
-                                total_mismatches += 1
-                        elif str(v_a).strip() != str(v_b).strip():
-                            all_diffs.append({
-                                "sheet": s,
-                                "row": r_idx + 2,
-                                "column": col,
-                                "value_a": _clean_val(v_a),
-                                "value_b": _clean_val(v_b),
-                                "delta": None
-                            })
+                                    "delta": None,
+                                }
+                            )
                             total_mismatches += 1
 
         report_path = None
@@ -3566,7 +3629,7 @@ def diff_workbooks(
             "shared_sheets_audited": shared_sheets,
             "total_differences_count": total_mismatches,
             "sample_differences": all_diffs[:20],
-            "diff_report_file": report_path
+            "diff_report_file": report_path,
         }
     finally:
         try:
@@ -3581,4 +3644,3 @@ def diff_workbooks(
 
 if __name__ == "__main__":
     mcp.run()
-

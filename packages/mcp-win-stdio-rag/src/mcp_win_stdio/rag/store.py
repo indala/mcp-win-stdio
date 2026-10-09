@@ -6,19 +6,20 @@ and Automatic Orphan / TTL Eviction.
 """
 
 import contextlib
-from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
 try:
     import numpy as np
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.metrics.pairwise import cosine_similarity
+
     _HAS_SKLEARN = True
 except Exception:
     _HAS_SKLEARN = False
@@ -57,7 +58,7 @@ def build_fts5_query(query_str: str) -> str:
     """
     Build a robust SQLite FTS5 MATCH query with subword expansion and prefix wildcards.
     """
-    cleaned = re.sub(r'["\';]', ' ', query_str)
+    cleaned = re.sub(r'["\';]', " ", query_str)
     raw_tokens = [t.strip() for t in cleaned.split() if len(t.strip()) > 1]
     if not raw_tokens:
         return ""
@@ -78,9 +79,34 @@ def build_fts5_query(query_str: str) -> str:
 
 
 COMMON_STOPWORDS = {
-    "the", "and", "for", "with", "from", "that", "this", "what", "how", "why",
-    "can", "are", "into", "when", "where", "does", "have", "using", "uses",
-    "type", "types", "typed", "typescript", "code", "file", "files", "example", "examples"
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "that",
+    "this",
+    "what",
+    "how",
+    "why",
+    "can",
+    "are",
+    "into",
+    "when",
+    "where",
+    "does",
+    "have",
+    "using",
+    "uses",
+    "type",
+    "types",
+    "typed",
+    "typescript",
+    "code",
+    "file",
+    "files",
+    "example",
+    "examples",
 }
 
 
@@ -89,7 +115,7 @@ def _stem_token(word: str) -> str:
     w = word.lower()
     for suffix in ("ing", "tions", "tion", "ies", "es", "s", "ed"):
         if w.endswith(suffix) and len(w) - len(suffix) >= 3:
-            return w[:-len(suffix)]
+            return w[: -len(suffix)]
     return w
 
 
@@ -111,11 +137,7 @@ def analyze_query_coverage(query: str, text: str, section_title: str) -> Dict[st
             missing.append(t)
 
     ratio = len(matched) / len(sig_terms)
-    return {
-        "matched": matched,
-        "missing": missing,
-        "coverage_ratio": round(ratio, 2)
-    }
+    return {"matched": matched, "missing": missing, "coverage_ratio": round(ratio, 2)}
 
 
 def chunk_section_text(section_title: str, text: str, max_words: int = 250, overlap: int = 30) -> List[str]:
@@ -186,7 +208,7 @@ class RAGVectorStore:
                 ("collection", "TEXT DEFAULT ''"),
                 ("file_path", "TEXT DEFAULT ''"),
                 ("line_start", "INTEGER DEFAULT 0"),
-                ("line_end", "INTEGER DEFAULT 0")
+                ("line_end", "INTEGER DEFAULT 0"),
             ]:
                 if col_name not in existing_cols:
                     try:
@@ -272,10 +294,13 @@ class RAGVectorStore:
                     for cid, coll, fp, st, txt in rows:
                         toks = " ".join(extract_code_subwords(f"{fp} {st} {txt}"))
                         fts_records.append((cid, coll or "", fp or "", st or "", txt or "", toks))
-                    conn.executemany("""
+                    conn.executemany(
+                        """
                         INSERT INTO chunks_fts (chunk_id, collection, file_path, section_title, text, tokens)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    """, fts_records)
+                    """,
+                        fts_records,
+                    )
             except Exception:
                 pass
 
@@ -292,12 +317,7 @@ class RAGVectorStore:
             return dict(cur.fetchall())
 
     def update_file_chunks(
-        self,
-        collection: str,
-        file_path: str,
-        content_hash: str,
-        chunks: List[Dict[str, Any]],
-        size_bytes: int = 0
+        self, collection: str, file_path: str, content_hash: str, chunks: List[Dict[str, Any]], size_bytes: int = 0
     ) -> int:
         """
         Incrementally index chunks for a single modified/new file, removing any old chunks.
@@ -315,58 +335,68 @@ class RAGVectorStore:
             for idx, c in enumerate(chunks):
                 text = c.get("text", "")
                 c_hash = hashlib.sha256(f"{file_path}:{idx}:{text}".encode("utf-8")).hexdigest()
-                chunk_records.append((
-                    collection,
-                    file_path,
-                    c.get("page_url", ""),
-                    c.get("anchor_url", ""),
-                    c.get("section_title", ""),
-                    c.get("anchor_id", ""),
-                    c.get("line_start", 0),
-                    c.get("line_end", 0),
-                    idx,
-                    text,
-                    c_hash,
-                    c.get("word_count", len(text.split()))
-                ))
+                chunk_records.append(
+                    (
+                        collection,
+                        file_path,
+                        c.get("page_url", ""),
+                        c.get("anchor_url", ""),
+                        c.get("section_title", ""),
+                        c.get("anchor_id", ""),
+                        c.get("line_start", 0),
+                        c.get("line_end", 0),
+                        idx,
+                        text,
+                        c_hash,
+                        c.get("word_count", len(text.split())),
+                    )
+                )
 
-            conn.executemany("""
+            conn.executemany(
+                """
                 INSERT OR IGNORE INTO chunks (
                     collection, file_path, url, anchor_url, section_title, anchor_id,
                     line_start, line_end, chunk_index, text, content_hash, word_count
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, chunk_records)
+            """,
+                chunk_records,
+            )
 
             # Update FTS5 virtual table with subword code tokens
             try:
-                cur = conn.execute("SELECT id, section_title, text FROM chunks WHERE collection = ? AND file_path = ?", (collection, file_path))
+                cur = conn.execute(
+                    "SELECT id, section_title, text FROM chunks WHERE collection = ? AND file_path = ?",
+                    (collection, file_path),
+                )
                 fts_records = []
                 for cid, st, txt in cur.fetchall():
                     toks = " ".join(extract_code_subwords(f"{file_path} {st} {txt}"))
                     fts_records.append((cid, collection, file_path, st, txt, toks))
                 if fts_records:
-                    conn.executemany("""
+                    conn.executemany(
+                        """
                         INSERT INTO chunks_fts (chunk_id, collection, file_path, section_title, text, tokens)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    """, fts_records)
+                    """,
+                        fts_records,
+                    )
             except Exception:
                 pass
 
             # Update manifest
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO files_manifest (
                     file_path, collection, content_hash, chunk_count, size_bytes, last_indexed_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
-            """, (file_path, collection, content_hash, len(chunk_records), size_bytes, now_iso))
+            """,
+                (file_path, collection, content_hash, len(chunk_records), size_bytes, now_iso),
+            )
 
             conn.commit()
             return len(chunk_records)
 
-    def update_files_batch(
-        self,
-        collection: str,
-        files_data: List[Dict[str, Any]]
-    ) -> int:
+    def update_files_batch(self, collection: str, files_data: List[Dict[str, Any]]) -> int:
         """
         Batch incrementally index chunks for multiple files in a single high-speed SQLite transaction.
         """
@@ -380,9 +410,14 @@ class RAGVectorStore:
             all_fps = [fd["file_path"] for fd in files_data]
 
             # Delete old chunks for these files
-            conn.executemany("DELETE FROM chunks WHERE collection = ? AND file_path = ?", [(collection, fp) for fp in all_fps])
+            conn.executemany(
+                "DELETE FROM chunks WHERE collection = ? AND file_path = ?", [(collection, fp) for fp in all_fps]
+            )
             try:
-                conn.executemany("DELETE FROM chunks_fts WHERE collection = ? AND file_path = ?", [(collection, fp) for fp in all_fps])
+                conn.executemany(
+                    "DELETE FROM chunks_fts WHERE collection = ? AND file_path = ?",
+                    [(collection, fp) for fp in all_fps],
+                )
             except Exception:
                 pass
 
@@ -395,58 +430,70 @@ class RAGVectorStore:
                 for idx, c in enumerate(f_chunks):
                     text = c.get("text", "")
                     c_hash = hashlib.sha256(f"{f_path}:{idx}:{text}".encode("utf-8")).hexdigest()
-                    chunk_records.append((
-                        collection,
-                        f_path,
-                        c.get("page_url", ""),
-                        c.get("anchor_url", ""),
-                        c.get("section_title", ""),
-                        c.get("anchor_id", ""),
-                        c.get("line_start", 0),
-                        c.get("line_end", 0),
-                        idx,
-                        text,
-                        c_hash,
-                        c.get("word_count", len(text.split()))
-                    ))
+                    chunk_records.append(
+                        (
+                            collection,
+                            f_path,
+                            c.get("page_url", ""),
+                            c.get("anchor_url", ""),
+                            c.get("section_title", ""),
+                            c.get("anchor_id", ""),
+                            c.get("line_start", 0),
+                            c.get("line_end", 0),
+                            idx,
+                            text,
+                            c_hash,
+                            c.get("word_count", len(text.split())),
+                        )
+                    )
 
-                manifest_records.append((
-                    f_path, collection, f_hash, len(f_chunks), s_bytes, now_iso
-                ))
+                manifest_records.append((f_path, collection, f_hash, len(f_chunks), s_bytes, now_iso))
                 total_chunks += len(f_chunks)
 
             if chunk_records:
-                conn.executemany("""
+                conn.executemany(
+                    """
                     INSERT OR IGNORE INTO chunks (
                         collection, file_path, url, anchor_url, section_title, anchor_id,
                         line_start, line_end, chunk_index, text, content_hash, word_count
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, chunk_records)
+                """,
+                    chunk_records,
+                )
 
                 # Batch sync FTS5 table with subword tokens
                 try:
                     for i in range(0, len(all_fps), 400):
                         batch_paths = all_fps[i : i + 400]
                         q_marks = ",".join("?" for _ in batch_paths)
-                        cur = conn.execute(f"SELECT id, file_path, section_title, text FROM chunks WHERE collection = ? AND file_path IN ({q_marks})", [collection] + batch_paths)
+                        cur = conn.execute(
+                            f"SELECT id, file_path, section_title, text FROM chunks WHERE collection = ? AND file_path IN ({q_marks})",
+                            [collection] + batch_paths,
+                        )
                         fts_records = []
                         for cid, fp, st, txt in cur.fetchall():
                             toks = " ".join(extract_code_subwords(f"{fp} {st} {txt}"))
                             fts_records.append((cid, collection, fp, st, txt, toks))
                         if fts_records:
-                            conn.executemany("""
+                            conn.executemany(
+                                """
                                 INSERT INTO chunks_fts (chunk_id, collection, file_path, section_title, text, tokens)
                                 VALUES (?, ?, ?, ?, ?, ?)
-                            """, fts_records)
+                            """,
+                                fts_records,
+                            )
                 except Exception:
                     pass
 
             if manifest_records:
-                conn.executemany("""
+                conn.executemany(
+                    """
                     INSERT OR REPLACE INTO files_manifest (
                         file_path, collection, content_hash, chunk_count, size_bytes, last_indexed_at
                     ) VALUES (?, ?, ?, ?, ?, ?)
-                """, manifest_records)
+                """,
+                    manifest_records,
+                )
 
             conn.commit()
         return total_chunks
@@ -461,12 +508,20 @@ class RAGVectorStore:
             if not orphans:
                 return 0
 
-            conn.executemany("DELETE FROM chunks WHERE collection = ? AND file_path = ?", [(collection, op) for op in orphans])
+            conn.executemany(
+                "DELETE FROM chunks WHERE collection = ? AND file_path = ?", [(collection, op) for op in orphans]
+            )
             try:
-                conn.executemany("DELETE FROM chunks_fts WHERE collection = ? AND file_path = ?", [(collection, op) for op in orphans])
+                conn.executemany(
+                    "DELETE FROM chunks_fts WHERE collection = ? AND file_path = ?",
+                    [(collection, op) for op in orphans],
+                )
             except Exception:
                 pass
-            conn.executemany("DELETE FROM files_manifest WHERE collection = ? AND file_path = ?", [(collection, op) for op in orphans])
+            conn.executemany(
+                "DELETE FROM files_manifest WHERE collection = ? AND file_path = ?",
+                [(collection, op) for op in orphans],
+            )
             conn.commit()
             return len(orphans)
 
@@ -477,7 +532,7 @@ class RAGVectorStore:
         source_uri: str,
         commit_sha: str = "",
         is_temp: bool = False,
-        ttl_hours: Optional[int] = None
+        ttl_hours: Optional[int] = None,
     ):
         """Set or update collection metadata and expiration TTL."""
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -487,11 +542,14 @@ class RAGVectorStore:
             expires_at = datetime.fromtimestamp(time.time() + (hours * 3600), tz=timezone.utc).isoformat()
 
         with self._get_connection() as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO collections_meta (
                     collection_name, collection_type, source_uri, commit_sha, is_temp, created_at, updated_at, expires_at
                 ) VALUES (?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM collections_meta WHERE collection_name = ?), ?), ?, ?)
-            """, (name, coll_type, source_uri, commit_sha, 1 if is_temp else 0, name, now_iso, now_iso, expires_at))
+            """,
+                (name, coll_type, source_uri, commit_sha, 1 if is_temp else 0, name, now_iso, now_iso, expires_at),
+            )
             conn.commit()
 
     # =========================================================================
@@ -514,30 +572,38 @@ class RAGVectorStore:
                     n.get("type", "entity"),
                     n.get("community", 0),
                     n.get("file", ""),
-                    n.get("summary", "")
+                    n.get("summary", ""),
                 )
-                for n in nodes if n.get("id") or n.get("name")
+                for n in nodes
+                if n.get("id") or n.get("name")
             ]
-            conn.executemany("""
+            conn.executemany(
+                """
                 INSERT OR REPLACE INTO graph_nodes (
                     node_id, label, node_type, community_id, file_path, summary
                 ) VALUES (?, ?, ?, ?, ?, ?)
-            """, node_records)
+            """,
+                node_records,
+            )
 
             edge_records = [
                 (
                     e.get("source", ""),
                     e.get("target", ""),
                     e.get("relation", "connected_to"),
-                    float(e.get("weight", 1.0))
+                    float(e.get("weight", 1.0)),
                 )
-                for e in edges if e.get("source") and e.get("target")
+                for e in edges
+                if e.get("source") and e.get("target")
             ]
-            conn.executemany("""
+            conn.executemany(
+                """
                 INSERT OR IGNORE INTO graph_edges (
                     source, target, relation, weight
                 ) VALUES (?, ?, ?, ?)
-            """, edge_records)
+            """,
+                edge_records,
+            )
 
             conn.commit()
 
@@ -580,47 +646,44 @@ class RAGVectorStore:
                             continue
                         seen_hashes.add(c_hash)
 
-                        chunk_records.append((
-                            collection_name or target_url,
-                            page_url,
-                            page_url,
-                            anchor_url,
-                            sec_title,
-                            anchor_id,
-                            0,
-                            0,
-                            chunk_idx,
-                            chunk,
-                            c_hash,
-                            len(chunk.split())
-                        ))
+                        chunk_records.append(
+                            (
+                                collection_name or target_url,
+                                page_url,
+                                page_url,
+                                anchor_url,
+                                sec_title,
+                                anchor_id,
+                                0,
+                                0,
+                                chunk_idx,
+                                chunk,
+                                c_hash,
+                                len(chunk.split()),
+                            )
+                        )
 
-            conn.executemany("""
+            conn.executemany(
+                """
                 INSERT OR IGNORE INTO chunks (
                     collection, file_path, url, anchor_url, section_title, anchor_id,
                     line_start, line_end, chunk_index, text, content_hash, word_count
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, chunk_records)
+            """,
+                chunk_records,
+            )
 
             conn.execute(
-                "INSERT OR REPLACE INTO site_meta (key, value) VALUES (?, ?)",
-                ("site_graph", json.dumps(site_graph))
+                "INSERT OR REPLACE INTO site_meta (key, value) VALUES (?, ?)", ("site_graph", json.dumps(site_graph))
             )
+            conn.execute("INSERT OR REPLACE INTO site_meta (key, value) VALUES (?, ?)", ("target_url", target_url))
             conn.execute(
                 "INSERT OR REPLACE INTO site_meta (key, value) VALUES (?, ?)",
-                ("target_url", target_url)
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO site_meta (key, value) VALUES (?, ?)",
-                ("is_single_page_doc", "true" if is_single_page else "false")
+                ("is_single_page_doc", "true" if is_single_page else "false"),
             )
             conn.commit()
 
-        self.set_collection_meta(
-            name=collection_name or target_url,
-            coll_type="web_docs",
-            source_uri=target_url
-        )
+        self.set_collection_meta(name=collection_name or target_url, coll_type="web_docs", source_uri=target_url)
 
     # =========================================================================
     # Search & Diagnostic Methods
@@ -633,7 +696,7 @@ class RAGVectorStore:
         collection: Optional[str] = None,
         max_chars_per_snippet: Optional[int] = None,
         filter_path: Optional[str] = None,
-        exclude_paths: Optional[List[str]] = None
+        exclude_paths: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Next-Gen Hybrid Search:
@@ -683,18 +746,20 @@ class RAGVectorStore:
 
                     for row in cur.fetchall():
                         cid, url, anchor_url, fp, st, ls, le, cidx, txt, bm_score = row
-                        bm25_results.append({
-                            "id": cid,
-                            "url": url,
-                            "anchor_url": anchor_url,
-                            "file_path": fp,
-                            "section_title": st,
-                            "line_start": ls,
-                            "line_end": le,
-                            "chunk_index": cidx,
-                            "text": txt,
-                            "bm25_score": float(bm_score)
-                        })
+                        bm25_results.append(
+                            {
+                                "id": cid,
+                                "url": url,
+                                "anchor_url": anchor_url,
+                                "file_path": fp,
+                                "section_title": st,
+                                "line_start": ls,
+                                "line_end": le,
+                                "chunk_index": cidx,
+                                "text": txt,
+                                "bm25_score": float(bm_score),
+                            }
+                        )
                 except Exception:
                     pass
 
@@ -715,32 +780,47 @@ class RAGVectorStore:
                         cand_params.append(f"%{ep}%")
                         cand_params.append(f"%{ep}%")
                 cand_where_sql = ("WHERE " + " AND ".join(cand_where)) if cand_where else ""
-                cur = conn.execute(f"""
+                cur = conn.execute(
+                    f"""
                     SELECT id, url, anchor_url, file_path, section_title, line_start, line_end, chunk_index, text
                     FROM chunks {cand_where_sql} LIMIT 500
-                """, cand_params)
+                """,
+                    cand_params,
+                )
                 candidate_rows = cur.fetchall()
             else:
                 candidate_rows = [
-                    (r["id"], r["url"], r["anchor_url"], r["file_path"], r["section_title"], r["line_start"], r["line_end"], r["chunk_index"], r["text"])
+                    (
+                        r["id"],
+                        r["url"],
+                        r["anchor_url"],
+                        r["file_path"],
+                        r["section_title"],
+                        r["line_start"],
+                        r["line_end"],
+                        r["chunk_index"],
+                        r["text"],
+                    )
                     for r in bm25_results
                 ]
 
         if not candidate_rows:
             return []
 
-        c_ids, urls, anchor_urls, file_paths, section_titles, line_starts, line_ends, chunk_indices, texts = zip(*candidate_rows)
+        c_ids, urls, anchor_urls, file_paths, section_titles, line_starts, line_ends, chunk_indices, texts = zip(
+            *candidate_rows
+        )
 
         # 3. Dense / Subword N-gram Vector Similarity Ranking
         vector_ranked_ids: List[int] = []
         if _HAS_SKLEARN:
             try:
                 vectorizer = TfidfVectorizer(
-                    analyzer='word',
-                    token_pattern=r'(?u)\b\w+\b',
+                    analyzer="word",
+                    token_pattern=r"(?u)\b\w+\b",
                     ngram_range=(1, 2),
                     max_features=25000,
-                    sublinear_tf=True
+                    sublinear_tf=True,
                 )
                 tfidf_matrix = vectorizer.fit_transform(texts)
                 query_vec = vectorizer.transform([query])
@@ -783,7 +863,7 @@ class RAGVectorStore:
                 "line_start": line_starts[i],
                 "line_end": line_ends[i],
                 "chunk_index": chunk_indices[i],
-                "snippet": texts[i]
+                "snippet": texts[i],
             }
             for i in range(len(c_ids))
         }
@@ -832,7 +912,9 @@ class RAGVectorStore:
                         snippet_part += "\n```"
 
                     truncated_chars = total_chars - len(snippet_part)
-                    item["snippet"] = f"{snippet_part} ... [Truncated {truncated_chars} chars; call get_chunk_context(chunk_id={cid})]"
+                    item["snippet"] = (
+                        f"{snippet_part} ... [Truncated {truncated_chars} chars; call get_chunk_context(chunk_id={cid})]"
+                    )
                     item["is_truncated"] = True
                 else:
                     item["is_truncated"] = False
@@ -843,12 +925,7 @@ class RAGVectorStore:
 
         return final_results
 
-    def find_related(
-        self,
-        chunk_id: int,
-        top_k: int = 5,
-        collection: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+    def find_related(self, chunk_id: int, top_k: int = 5, collection: Optional[str] = None) -> List[Dict[str, Any]]:
         """Find chunks semantically and topical related to a given chunk ID."""
         with self._get_connection() as conn:
             cur = conn.execute("SELECT section_title, text FROM chunks WHERE id = ?", (chunk_id,))
@@ -860,20 +937,19 @@ class RAGVectorStore:
             results = self.search(query=query, top_k=top_k + 1, collection=collection)
             return [r for r in results if r.get("chunk_id") != chunk_id][:top_k]
 
-    def get_chunk_context(
-        self,
-        chunk_id: int,
-        window: int = 0
-    ) -> Optional[Dict[str, Any]]:
+    def get_chunk_context(self, chunk_id: int, window: int = 0) -> Optional[Dict[str, Any]]:
         """
         Fetch full content for a chunk by ID, optionally expanding with adjacent chunks.
         """
         with self._get_connection() as conn:
-            cur = conn.execute("""
+            cur = conn.execute(
+                """
                 SELECT id, collection, file_path, url, anchor_url, section_title,
                        line_start, line_end, chunk_index, text
                 FROM chunks WHERE id = ?
-            """, (chunk_id,))
+            """,
+                (chunk_id,),
+            )
             target = cur.fetchone()
             if not target:
                 return None
@@ -891,17 +967,20 @@ class RAGVectorStore:
                     "line_end": le,
                     "chunk_index": cidx,
                     "text": txt,
-                    "window": 0
+                    "window": 0,
                 }
 
             # Fetch surrounding chunks from same file/URL
-            cur_ctx = conn.execute("""
+            cur_ctx = conn.execute(
+                """
                 SELECT id, line_start, line_end, chunk_index, text
                 FROM chunks
                 WHERE collection = ? AND (file_path = ? OR url = ?)
                   AND chunk_index BETWEEN ? AND ?
                 ORDER BY chunk_index ASC
-            """, (col, fp, url, max(0, cidx - window), cidx + window))
+            """,
+                (col, fp, url, max(0, cidx - window), cidx + window),
+            )
 
             ctx_rows = cur_ctx.fetchall()
             combined_texts = []
@@ -927,7 +1006,7 @@ class RAGVectorStore:
                 "chunk_index": cidx,
                 "window": window,
                 "total_chunks_in_window": len(ctx_rows),
-                "full_text": "\n\n".join(combined_texts)
+                "full_text": "\n\n".join(combined_texts),
             }
 
     def get_metadata(self) -> Dict[str, Any]:
@@ -937,7 +1016,9 @@ class RAGVectorStore:
             meta = dict(cur.fetchall())
 
             try:
-                col_row = conn.execute("SELECT source_uri, collection_name, collection_type, commit_sha FROM collections_meta ORDER BY updated_at DESC LIMIT 1").fetchone()
+                col_row = conn.execute(
+                    "SELECT source_uri, collection_name, collection_type, commit_sha FROM collections_meta ORDER BY updated_at DESC LIMIT 1"
+                ).fetchone()
                 if col_row:
                     meta["source_uri"] = col_row[0]
                     meta["collection_name"] = col_row[1]
@@ -992,7 +1073,7 @@ class RAGVectorStore:
                         "total_items": len(graph),
                         "returned_items": max_items,
                         "truncated": True,
-                        "note": f"Showing first {max_items} entries. Use filter_path to narrow search."
+                        "note": f"Showing first {max_items} entries. Use filter_path to narrow search.",
                     }
                 return graph
 
@@ -1000,7 +1081,7 @@ class RAGVectorStore:
             if filter_path:
                 tree_cur = conn.execute(
                     "SELECT DISTINCT file_path, section_title, anchor_url FROM chunks WHERE file_path LIKE ? OR section_title LIKE ?",
-                    (f"%{filter_path}%", f"%{filter_path}%")
+                    (f"%{filter_path}%", f"%{filter_path}%"),
                 )
             else:
                 tree_cur = conn.execute("SELECT DISTINCT file_path, section_title, anchor_url FROM chunks")
@@ -1019,6 +1100,6 @@ class RAGVectorStore:
                     "total_items": len(tree),
                     "returned_items": max_items,
                     "truncated": True,
-                    "note": f"Showing first {max_items} files/docs. Use filter_path to narrow search."
+                    "note": f"Showing first {max_items} files/docs. Use filter_path to narrow search.",
                 }
             return tree

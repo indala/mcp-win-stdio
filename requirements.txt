@@ -1,0 +1,33 @@
+# Core MCP Runtime & Protocol
+mcp>=1.2.0
+
+# Spreadsheets & Excel MCP
+pandas>=2.0.0
+openpyxl>=3.1.0
+rapidfuzz>=3.0.0
+
+# Word Documents MCP
+python-docx>=1.1.0
+
+# Workspace Explorer MCP
+pathspec>=0.11.0
+
+# Database Operations MCP (PostgreSQL & MySQL)
+psycopg2-binary>=2.9.0
+pymysql>=1.1.0
+
+# Remote SSH & Multi-Host SFTP MCP
+paramiko>=3.0.0
+cryptography>=3.3.0
+
+# High-Speed Excel & Database Pipeline MCP
+sqlalchemy>=2.0.0
+
+# Web Documentation Crawler & RAG MCP
+networkx>=3.0
+numpy>=1.24.0
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+
+# Windows COM Automation (Native Office on Windows)
+pywin32>=306; sys_platform == 'win32'

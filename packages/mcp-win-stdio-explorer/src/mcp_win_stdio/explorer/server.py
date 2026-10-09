@@ -6,17 +6,16 @@ in-file grep, windowed reading, and disk export.
 """
 
 import ast
-from datetime import datetime, timedelta, timezone
 import fnmatch
 import hashlib
 import json
 import mimetypes
 import os
-from pathlib import Path
 import re
 import stat
 import subprocess
-import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple, Union
 
 try:
@@ -61,20 +60,64 @@ GIT_DIRS = {
 }
 
 BINARY_EXTENSIONS = {
-    ".exe", ".dll", ".so", ".dylib", ".bin", ".iso", ".img",
-    ".zip", ".tar", ".gz", ".7z", ".rar", ".bz2", ".xz",
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tiff",
-    ".mp3", ".wav", ".flac", ".ogg", ".aac",
-    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
-    ".pyc", ".pyo", ".pyd", ".class", ".jar", ".war",
-    ".ttf", ".otf", ".woff", ".woff2", ".eot"
+    ".exe",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".bin",
+    ".iso",
+    ".img",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".7z",
+    ".rar",
+    ".bz2",
+    ".xz",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".bmp",
+    ".tiff",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".ogg",
+    ".aac",
+    ".mp4",
+    ".mkv",
+    ".avi",
+    ".mov",
+    ".wmv",
+    ".webm",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".pyc",
+    ".pyo",
+    ".pyd",
+    ".class",
+    ".jar",
+    ".war",
+    ".ttf",
+    ".otf",
+    ".woff",
+    ".woff2",
+    ".eot",
 }
 
 
 # ==========================================
 # HELPER UTILITIES
 # ==========================================
+
 
 def _format_size(size_bytes: int) -> str:
     if size_bytes < 1024:
@@ -216,10 +259,10 @@ def _matches_gitignore(gi_spec: Optional[pathspec.PathSpec], rel_posix: str, is_
     return False
 
 
-
 # ==========================================
 # 1. DIRECTORY LISTING & NAVIGATION
 # ==========================================
+
 
 @mcp.tool()
 def list_dir(
@@ -234,7 +277,7 @@ def list_dir(
     """
     List contents of a directory with rich file and folder metadata (PowerShell Get-ChildItem style).
     If a folder is directly requested, it is ALWAYS explored even if it is in an ignore list.
-    
+
     Args:
         path: Path to the directory.
         include_hidden: Include hidden files and folders (default False).
@@ -267,7 +310,7 @@ def list_dir(
                     is_dir = entry.is_dir(follow_symlinks=False)
                     size = 0 if is_dir else st.st_size
                     mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
-                    
+
                     child_count = None
                     is_heavy = False
                     if is_dir:
@@ -277,21 +320,25 @@ def list_dir(
                         except Exception:
                             child_count = None
 
-                    items.append({
-                        "name": entry.name,
-                        "path": str(entry_path),
-                        "is_dir": is_dir,
-                        "type": "directory" if is_dir else "file",
-                        "extension": entry_path.suffix.lower() if not is_dir else "",
-                        "size_bytes": size,
-                        "size_formatted": _format_size(size) if not is_dir else (
-                            f"{child_count} items (heavy build/cache)" if is_heavy else f"{child_count} items"
-                        ) if child_count is not None else "dir",
-                        "child_count": child_count,
-                        "is_heavy_dir": is_heavy,
-                        "modified_at": mtime,
-                        "is_symlink": entry.is_symlink(),
-                    })
+                    items.append(
+                        {
+                            "name": entry.name,
+                            "path": str(entry_path),
+                            "is_dir": is_dir,
+                            "type": "directory" if is_dir else "file",
+                            "extension": entry_path.suffix.lower() if not is_dir else "",
+                            "size_bytes": size,
+                            "size_formatted": _format_size(size)
+                            if not is_dir
+                            else (f"{child_count} items (heavy build/cache)" if is_heavy else f"{child_count} items")
+                            if child_count is not None
+                            else "dir",
+                            "child_count": child_count,
+                            "is_heavy_dir": is_heavy,
+                            "modified_at": mtime,
+                            "is_symlink": entry.is_symlink(),
+                        }
+                    )
                 except Exception:
                     continue
 
@@ -327,6 +374,7 @@ def list_dir(
 # 2. DIRECTORY TREE (SMART COLLAPSING & NOISE SAFE)
 # ==========================================
 
+
 @mcp.tool()
 def get_directory_tree(
     path: str,
@@ -343,7 +391,7 @@ def get_directory_tree(
     """
     Render a clean, token-safe directory hierarchy with smart collapsing and .gitignore awareness.
     Instead of blowing context on node_modules or .git, it collapses them into informative summary nodes.
-    
+
     Args:
         path: Root directory path.
         max_depth: Maximum recursion depth (1 to 5, default 2).
@@ -410,10 +458,12 @@ def get_directory_tree(
             for i, entry in enumerate(filtered_entries):
                 if nodes_count[0] >= max_nodes:
                     circuit_broken[0] = True
-                    lines.append(f"{prefix}... [Circuit breaker: Reached {max_nodes} items safety cap. Narrow down with subfolder or lower max_depth]")
+                    lines.append(
+                        f"{prefix}... [Circuit breaker: Reached {max_nodes} items safety cap. Narrow down with subfolder or lower max_depth]"
+                    )
                     return
 
-                is_last = (i == count - 1)
+                is_last = i == count - 1
                 connector = c_last if is_last else c_branch
                 sub_prefix = "    " if is_last else c_pipe
                 e_path = Path(entry.path)
@@ -471,7 +521,9 @@ def get_directory_tree(
                 for entry in entries:
                     if nodes_count[0] >= max_nodes:
                         circuit_broken[0] = True
-                        node["children"].append({"name": "[TRUNCATED]", "message": f"Safety limit of {max_nodes} reached."})
+                        node["children"].append(
+                            {"name": "[TRUNCATED]", "message": f"Safety limit of {max_nodes} reached."}
+                        )
                         return node
 
                     e_path = Path(entry.path)
@@ -485,30 +537,36 @@ def get_directory_tree(
 
                     if entry.is_dir():
                         nodes_count[0] += 1
-                        is_heavy = (ignore_mode == "smart" and entry.name in HEAVY_BUILD_DIRS) or (entry.name in GIT_DIRS)
+                        is_heavy = (ignore_mode == "smart" and entry.name in HEAVY_BUILD_DIRS) or (
+                            entry.name in GIT_DIRS
+                        )
                         is_gi_ignored = _matches_gitignore(gi_spec, rel_posix, is_dir=True)
                         if collapse_heavy_dirs and (is_heavy or is_gi_ignored):
                             c_items, c_bytes = _get_collapsed_summary(e_path)
-                            node["children"].append({
-                                "name": entry.name,
-                                "path": str(e_path),
-                                "type": "directory",
-                                "collapsed": True,
-                                "estimated_items": c_items,
-                                "estimated_size": _format_size(c_bytes),
-                            })
+                            node["children"].append(
+                                {
+                                    "name": entry.name,
+                                    "path": str(e_path),
+                                    "type": "directory",
+                                    "collapsed": True,
+                                    "estimated_items": c_items,
+                                    "estimated_size": _format_size(c_bytes),
+                                }
+                            )
                         else:
                             node["children"].append(_walk_json(e_path, depth + 1))
                     elif include_files and not only_dirs:
                         nodes_count[0] += 1
                         st = entry.stat()
-                        node["children"].append({
-                            "name": entry.name,
-                            "path": str(e_path),
-                            "type": "file",
-                            "size_bytes": st.st_size,
-                            "size_formatted": _format_size(st.st_size),
-                        })
+                        node["children"].append(
+                            {
+                                "name": entry.name,
+                                "path": str(e_path),
+                                "type": "file",
+                                "size_bytes": st.st_size,
+                                "size_formatted": _format_size(st.st_size),
+                            }
+                        )
             except Exception:
                 pass
             return node
@@ -519,6 +577,7 @@ def get_directory_tree(
 # ==========================================
 # 3. ADVANCED FILE SEARCH (FIND)
 # ==========================================
+
 
 @mcp.tool()
 def find_files(
@@ -538,7 +597,7 @@ def find_files(
     """
     Advanced file search across directories with filters for name patterns, extensions, sizes, and timestamps.
     Honors .gitignore and build caches dynamically without rigid lockouts.
-    
+
     Args:
         search_path: Root folder to search within.
         pattern: Glob pattern for matching names (e.g. "*config*", "data_*.csv", "test*").
@@ -580,11 +639,14 @@ def find_files(
         # Ignore pruning
         if ignore_mode == "smart":
             dirnames[:] = [
-                d for d in dirnames
+                d
+                for d in dirnames
                 if d not in HEAVY_BUILD_DIRS
                 and d not in GIT_DIRS
                 and not _is_hidden(current_p / d)
-                and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+                and not _matches_gitignore(
+                    gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True
+                )
             ]
         elif ignore_mode == "git_only":
             dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
@@ -606,15 +668,17 @@ def find_files(
                         continue
                     if dt_before and mtime > dt_before:
                         continue
-                    matches.append({
-                        "name": d,
-                        "path": str(d_path),
-                        "relative_path": str(d_path.relative_to(root)),
-                        "type": "directory",
-                        "size_bytes": 0,
-                        "size_formatted": "dir",
-                        "modified_at": mtime.isoformat(),
-                    })
+                    matches.append(
+                        {
+                            "name": d,
+                            "path": str(d_path),
+                            "relative_path": str(d_path.relative_to(root)),
+                            "type": "directory",
+                            "size_bytes": 0,
+                            "size_formatted": "dir",
+                            "modified_at": mtime.isoformat(),
+                        }
+                    )
                     if len(matches) >= max_results:
                         break
                 except Exception:
@@ -652,16 +716,18 @@ def find_files(
                     if dt_before and mtime > dt_before:
                         continue
 
-                    matches.append({
-                        "name": f,
-                        "path": str(f_path),
-                        "relative_path": str(f_path.relative_to(root)),
-                        "type": "file",
-                        "extension": f_path.suffix.lower(),
-                        "size_bytes": size,
-                        "size_formatted": _format_size(size),
-                        "modified_at": mtime.isoformat(),
-                    })
+                    matches.append(
+                        {
+                            "name": f,
+                            "path": str(f_path),
+                            "relative_path": str(f_path.relative_to(root)),
+                            "type": "file",
+                            "extension": f_path.suffix.lower(),
+                            "size_bytes": size,
+                            "size_formatted": _format_size(size),
+                            "modified_at": mtime.isoformat(),
+                        }
+                    )
                     if len(matches) >= max_results:
                         break
                 except Exception:
@@ -683,6 +749,7 @@ def find_files(
 # 4. LIGHTNING-FAST FUZZY FILE SEARCH
 # ==========================================
 
+
 @mcp.tool()
 def fuzzy_find(
     query: str,
@@ -696,7 +763,7 @@ def fuzzy_find(
     """
     Rapid, typo-tolerant fuzzy file search using RapidFuzz.
     Find files by approximate name or abbreviation (e.g., 'usrctrl' -> 'user_controller.py', 'authsrv' -> 'auth_service.ts').
-    
+
     Args:
         query: Approximate or partial file name to find.
         search_path: Root folder to search.
@@ -719,11 +786,14 @@ def fuzzy_find(
         current_p = Path(dirpath)
         if ignore_mode == "smart":
             dirnames[:] = [
-                d for d in dirnames
+                d
+                for d in dirnames
                 if d not in HEAVY_BUILD_DIRS
                 and d not in GIT_DIRS
                 and not _is_hidden(current_p / d)
-                and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+                and not _matches_gitignore(
+                    gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True
+                )
             ]
         elif ignore_mode == "git_only":
             dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
@@ -759,14 +829,16 @@ def fuzzy_find(
         full_p = file_map[match_rel_path]
         try:
             st = full_p.stat()
-            formatted_matches.append({
-                "name": full_p.name,
-                "relative_path": match_rel_path,
-                "path": str(full_p),
-                "similarity_score": round(score, 1),
-                "size_formatted": _format_size(st.st_size),
-                "modified_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
-            })
+            formatted_matches.append(
+                {
+                    "name": full_p.name,
+                    "relative_path": match_rel_path,
+                    "path": str(full_p),
+                    "similarity_score": round(score, 1),
+                    "size_formatted": _format_size(st.st_size),
+                    "modified_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
         except Exception:
             continue
 
@@ -783,6 +855,7 @@ def fuzzy_find(
 # 5. FAST GREP / CONTENT SEARCH
 # ==========================================
 
+
 @mcp.tool()
 def grep_search(
     query: str,
@@ -798,7 +871,7 @@ def grep_search(
 ) -> Dict[str, Any]:
     """
     Search for text or regex patterns INSIDE files across a directory or within a single file.
-    
+
     Args:
         query: Search term or regular expression pattern.
         search_path: Directory or file to search.
@@ -835,11 +908,14 @@ def grep_search(
             current_p = Path(dirpath)
             if ignore_mode == "smart":
                 dirnames[:] = [
-                    d for d in dirnames
+                    d
+                    for d in dirnames
                     if d not in HEAVY_BUILD_DIRS
                     and d not in GIT_DIRS
                     and not _is_hidden(current_p / d)
-                    and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(target)).replace("\\", "/"), is_dir=True)
+                    and not _matches_gitignore(
+                        gi_spec, str((current_p / d).relative_to(target)).replace("\\", "/"), is_dir=True
+                    )
                 ]
             elif ignore_mode == "git_only":
                 dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
@@ -890,12 +966,14 @@ def grep_search(
                     if len(line_c) > 200:
                         line_c = line_c[:200] + "... [line truncated]"
 
-                    matches.append({
-                        "file": str(f_path),
-                        "line_number": line_no,
-                        "line_content": line_c,
-                        "context": "\n".join(ctx_snippet),
-                    })
+                    matches.append(
+                        {
+                            "file": str(f_path),
+                            "line_number": line_no,
+                            "line_content": line_c,
+                            "context": "\n".join(ctx_snippet),
+                        }
+                    )
 
                     if len(matches) >= max_matches:
                         break
@@ -914,13 +992,16 @@ def grep_search(
         "matches": matches,
     }
     if len(matches) >= max_matches:
-        res_grep["notice"] = f"... [TRUNCATED: Reached limit of {max_matches} matches. Narrow your query or file_patterns to see more] ..."
+        res_grep["notice"] = (
+            f"... [TRUNCATED: Reached limit of {max_matches} matches. Narrow your query or file_patterns to see more] ..."
+        )
     return res_grep
 
 
 # ==========================================
 # 6. CODE OUTLINE & STRUCTURE EXTRACTOR
 # ==========================================
+
 
 @mcp.tool()
 def get_code_outline(
@@ -930,7 +1011,7 @@ def get_code_outline(
     Extract high-level classes, functions, interfaces, methods, and exports from a code file
     without loading thousands of lines of implementation. Saves 90%+ context window tokens.
     Supports Python, JavaScript, TypeScript, and JSON files.
-    
+
     Args:
         file_path: Path to the source file (.py, .js, .ts, .jsx, .tsx, .json).
     """
@@ -960,32 +1041,38 @@ def get_code_outline(
                             if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
                                 m_doc = ast.get_docstring(sub)
                                 args = [a.arg for a in sub.args.args]
-                                methods.append({
-                                    "name": sub.name,
-                                    "type": "async_method" if isinstance(sub, ast.AsyncFunctionDef) else "method",
-                                    "line": sub.lineno,
-                                    "args": args,
-                                    "docstring": m_doc.splitlines()[0] if m_doc else None,
-                                })
-                        symbols.append({
-                            "name": node.name,
-                            "type": "class",
-                            "line": node.lineno,
-                            "bases": bases,
-                            "docstring": first_doc,
-                            "methods": methods,
-                        })
+                                methods.append(
+                                    {
+                                        "name": sub.name,
+                                        "type": "async_method" if isinstance(sub, ast.AsyncFunctionDef) else "method",
+                                        "line": sub.lineno,
+                                        "args": args,
+                                        "docstring": m_doc.splitlines()[0] if m_doc else None,
+                                    }
+                                )
+                        symbols.append(
+                            {
+                                "name": node.name,
+                                "type": "class",
+                                "line": node.lineno,
+                                "bases": bases,
+                                "docstring": first_doc,
+                                "methods": methods,
+                            }
+                        )
                     elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         doc = ast.get_docstring(node)
                         first_doc = doc.splitlines()[0] if doc else None
                         args = [a.arg for a in node.args.args]
-                        symbols.append({
-                            "name": node.name,
-                            "type": "async_function" if isinstance(node, ast.AsyncFunctionDef) else "function",
-                            "line": node.lineno,
-                            "args": args,
-                            "docstring": first_doc,
-                        })
+                        symbols.append(
+                            {
+                                "name": node.name,
+                                "type": "async_function" if isinstance(node, ast.AsyncFunctionDef) else "function",
+                                "line": node.lineno,
+                                "args": args,
+                                "docstring": first_doc,
+                            }
+                        )
             except SyntaxError as se:
                 return {"error": f"Python syntax error in file: {str(se)}"}
 
@@ -999,12 +1086,14 @@ def get_code_outline(
                 m = pat.match(line)
                 if m:
                     kind, name = m.group(1), m.group(2)
-                    symbols.append({
-                        "name": name,
-                        "type": kind,
-                        "line": idx + 1,
-                        "signature": line.strip()[:100],
-                    })
+                    symbols.append(
+                        {
+                            "name": name,
+                            "type": kind,
+                            "line": idx + 1,
+                            "signature": line.strip()[:100],
+                        }
+                    )
 
         # 3. JSON SHAPE
         elif ext == ".json":
@@ -1016,7 +1105,12 @@ def get_code_outline(
                         for k, v in data.items()
                     ]
                 elif isinstance(data, list):
-                    symbols = [{"total_array_items": len(data), "sample_element_type": type(data[0]).__name__ if data else None}]
+                    symbols = [
+                        {
+                            "total_array_items": len(data),
+                            "sample_element_type": type(data[0]).__name__ if data else None,
+                        }
+                    ]
             except Exception as je:
                 return {"error": f"Invalid JSON file: {str(je)}"}
 
@@ -1035,6 +1129,7 @@ def get_code_outline(
 # 7. TOKEN-SAFE FILE READING
 # ==========================================
 
+
 @mcp.tool()
 def read_file(
     file_path: str,
@@ -1047,7 +1142,7 @@ def read_file(
     """
     Read text from a file with precise line range windowing and token protection.
     Detects and protects against binary file dumps.
-    
+
     Args:
         file_path: Path to the file.
         start_line: First line to read (1-indexed, inclusive). Default is 1.
@@ -1112,7 +1207,9 @@ def read_file(
             "content": "\n".join(output_lines),
         }
         if e_line < total_lines:
-            res["notice"] = f"... [TRUNCATED: Showing lines {s_line}-{e_line} of {total_lines}. Use start_line={e_line+1} to view next window] ..."
+            res["notice"] = (
+                f"... [TRUNCATED: Showing lines {s_line}-{e_line} of {total_lines}. Use start_line={e_line + 1} to view next window] ..."
+            )
         return res
     except Exception as e:
         return {"error": f"Failed to read file: {str(e)}"}
@@ -1128,7 +1225,7 @@ def read_head_tail(
     """
     Quickly read the first N lines (head) or last N lines (tail) of a file.
     Ideal for inspection of large logs, data files, or configs.
-    
+
     Args:
         file_path: Path to the file.
         mode: 'head' for top lines or 'tail' for bottom lines.
@@ -1175,6 +1272,7 @@ def read_head_tail(
 # 8. FILE METADATA & DIAGNOSTICS
 # ==========================================
 
+
 @mcp.tool()
 def get_file_info(
     path: str,
@@ -1182,7 +1280,7 @@ def get_file_info(
 ) -> Dict[str, Any]:
     """
     Get detailed diagnostic metadata about any file or directory.
-    
+
     Args:
         path: File or directory path.
         include_hash: Compute SHA256 and MD5 hashes (files only, default False).
@@ -1245,6 +1343,7 @@ def get_file_info(
 # 9. WORKSPACE DIAGNOSTIC SUMMARY
 # ==========================================
 
+
 @mcp.tool()
 def workspace_summary(
     path: str,
@@ -1255,7 +1354,7 @@ def workspace_summary(
     """
     Instant comprehensive overview of a project/workspace folder:
     file count breakdown by extension, total size, recent files, largest files, and Git status.
-    
+
     Args:
         path: Path to the workspace root directory.
         top_n: Number of largest / recent files to highlight (default 5).
@@ -1280,11 +1379,14 @@ def workspace_summary(
         current_p = Path(dirpath)
         if ignore_mode == "smart":
             dirnames[:] = [
-                d for d in dirnames
+                d
+                for d in dirnames
                 if d not in HEAVY_BUILD_DIRS
                 and d not in GIT_DIRS
                 and not _is_hidden(current_p / d)
-                and not _matches_gitignore(gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True)
+                and not _matches_gitignore(
+                    gi_spec, str((current_p / d).relative_to(root)).replace("\\", "/"), is_dir=True
+                )
             ]
         elif ignore_mode == "git_only":
             dirnames[:] = [d for d in dirnames if d not in GIT_DIRS]
@@ -1310,14 +1412,16 @@ def workspace_summary(
                 ext_counts[ext] = ext_counts.get(ext, 0) + 1
                 ext_sizes[ext] = ext_sizes.get(ext, 0) + sz
 
-                all_files_info.append({
-                    "name": f,
-                    "relative_path": rel_posix,
-                    "size_bytes": sz,
-                    "size_formatted": _format_size(sz),
-                    "modified_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
-                    "mtime_ts": mtime,
-                })
+                all_files_info.append(
+                    {
+                        "name": f,
+                        "relative_path": rel_posix,
+                        "size_bytes": sz,
+                        "size_formatted": _format_size(sz),
+                        "modified_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+                        "mtime_ts": mtime,
+                    }
+                )
             except Exception:
                 continue
 
@@ -1337,10 +1441,14 @@ def workspace_summary(
     git_dir = root / ".git"
     if git_dir.exists():
         try:
-            res_b = subprocess.run(["git", "branch", "--show-current"], cwd=str(root), capture_output=True, text=True, timeout=3)
+            res_b = subprocess.run(
+                ["git", "branch", "--show-current"], cwd=str(root), capture_output=True, text=True, timeout=3
+            )
             if res_b.returncode == 0:
                 git_branch = res_b.stdout.strip()
-            res_s = subprocess.run(["git", "status", "--porcelain"], cwd=str(root), capture_output=True, text=True, timeout=3)
+            res_s = subprocess.run(
+                ["git", "status", "--porcelain"], cwd=str(root), capture_output=True, text=True, timeout=3
+            )
             if res_s.returncode == 0:
                 chg = len([l for l in res_s.stdout.splitlines() if l.strip()])
                 git_status = f"{chg} modified/untracked files" if chg else "clean working tree"
@@ -1365,6 +1473,7 @@ def workspace_summary(
 # 10. EXPORT COMPLETE INVENTORY TO FILE
 # ==========================================
 
+
 @mcp.tool()
 def export_tree_to_file(
     path: str,
@@ -1376,7 +1485,7 @@ def export_tree_to_file(
     """
     Export a complete un-truncated directory map or file inventory directly to a file on disk.
     This avoids consuming chat context window tokens while creating persistent workspace documentation.
-    
+
     Args:
         path: Root directory to map.
         output_file_path: Target path to save the map (default is <path>/workspace_map.md or .json).
@@ -1415,7 +1524,9 @@ def export_tree_to_file(
                 format="tree",
                 tree_style="ascii",
             )
-            header = f"# Workspace Map for {root.name}\nGenerated: {datetime.now(timezone.utc).isoformat()}\n\n```text\n"
+            header = (
+                f"# Workspace Map for {root.name}\nGenerated: {datetime.now(timezone.utc).isoformat()}\n\n```text\n"
+            )
             footer = "\n```\n"
             with open(out_p, "w", encoding="utf-8") as f:
                 f.write(header + str(tree_text) + footer)
@@ -1436,6 +1547,7 @@ def export_tree_to_file(
 # 12. ADVANCED EXPLORER TOOLS
 # ==========================================
 
+
 @mcp.tool()
 def find_symbol(
     path: str,
@@ -1447,7 +1559,7 @@ def find_symbol(
     """
     Search for symbol definitions (functions, classes, methods, interfaces, types) across codebase files.
     Honors .gitignore and smart ignore rules.
-    
+
     Args:
         path: Workspace or directory root to search.
         symbol_name: Name of symbol (e.g. 'UserService', 'calculate_tax', 'handle_request').
@@ -1481,7 +1593,8 @@ def find_symbol(
         for dirpath, dirnames, filenames in os.walk(root):
             curr = Path(dirpath)
             dirnames[:] = [
-                d for d in dirnames
+                d
+                for d in dirnames
                 if d not in HEAVY_BUILD_DIRS
                 and d not in GIT_DIRS
                 and not _is_hidden(curr / d)
@@ -1522,14 +1635,20 @@ def find_symbol(
                             n_name = node.name
                             matches = (n_name == sym_query) if exact_match else (sym_query in n_name.lower())
                             if matches:
-                                kind = "class" if isinstance(node, ast.ClassDef) else ("async_function" if isinstance(node, ast.AsyncFunctionDef) else "function")
-                                symbols_found.append({
-                                    "file": str(fp),
-                                    "name": n_name,
-                                    "kind": kind,
-                                    "line": node.lineno,
-                                    "language": "python"
-                                })
+                                kind = (
+                                    "class"
+                                    if isinstance(node, ast.ClassDef)
+                                    else ("async_function" if isinstance(node, ast.AsyncFunctionDef) else "function")
+                                )
+                                symbols_found.append(
+                                    {
+                                        "file": str(fp),
+                                        "name": n_name,
+                                        "kind": kind,
+                                        "line": node.lineno,
+                                        "language": "python",
+                                    }
+                                )
                                 if len(symbols_found) >= safe_max:
                                     break
                 except Exception:
@@ -1537,41 +1656,50 @@ def find_symbol(
 
             # JS/TS regex parsing
             elif ext in {".ts", ".tsx", ".js", ".jsx", ".mjs"}:
-                pat = re.compile(r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(class|function|interface|type|enum|const)\s+([A-Za-z0-9_$]+)", re.MULTILINE)
+                pat = re.compile(
+                    r"^\s*(?:export\s+(?:default\s+)?)?(?:async\s+)?(class|function|interface|type|enum|const)\s+([A-Za-z0-9_$]+)",
+                    re.MULTILINE,
+                )
                 for idx, line in enumerate(lines):
                     m = pat.match(line)
                     if m:
                         kind, n_name = m.group(1), m.group(2)
                         matches = (n_name == sym_query) if exact_match else (sym_query in n_name.lower())
                         if matches:
-                            symbols_found.append({
-                                "file": str(fp),
-                                "name": n_name,
-                                "kind": kind,
-                                "line": idx + 1,
-                                "signature": line.strip()[:120],
-                                "language": "typescript" if "ts" in ext else "javascript"
-                            })
+                            symbols_found.append(
+                                {
+                                    "file": str(fp),
+                                    "name": n_name,
+                                    "kind": kind,
+                                    "line": idx + 1,
+                                    "signature": line.strip()[:120],
+                                    "language": "typescript" if "ts" in ext else "javascript",
+                                }
+                            )
                             if len(symbols_found) >= safe_max:
                                 break
 
             # Go / Rust / C regex
             elif ext in {".go", ".rs", ".c", ".cpp", ".h"}:
-                pat = re.compile(r"^\s*(?:pub\s+)?(?:fn|func|struct|enum|trait|type|class)\s+([A-Za-z0-9_]+)", re.MULTILINE)
+                pat = re.compile(
+                    r"^\s*(?:pub\s+)?(?:fn|func|struct|enum|trait|type|class)\s+([A-Za-z0-9_]+)", re.MULTILINE
+                )
                 for idx, line in enumerate(lines):
                     m = pat.match(line)
                     if m:
                         n_name = m.group(1)
                         matches = (n_name == sym_query) if exact_match else (sym_query in n_name.lower())
                         if matches:
-                            symbols_found.append({
-                                "file": str(fp),
-                                "name": n_name,
-                                "kind": "declaration",
-                                "line": idx + 1,
-                                "signature": line.strip()[:120],
-                                "language": ext.lstrip(".")
-                            })
+                            symbols_found.append(
+                                {
+                                    "file": str(fp),
+                                    "name": n_name,
+                                    "kind": "declaration",
+                                    "line": idx + 1,
+                                    "signature": line.strip()[:120],
+                                    "language": ext.lstrip("."),
+                                }
+                            )
                             if len(symbols_found) >= safe_max:
                                 break
 
@@ -1589,7 +1717,9 @@ def find_symbol(
         "symbols": symbols_found,
     }
     if has_more:
-        res["notice"] = f"... [TRUNCATED: Showing first {safe_max} symbol matches. Specify language or exact_match to narrow results] ..."
+        res["notice"] = (
+            f"... [TRUNCATED: Showing first {safe_max} symbol matches. Specify language or exact_match to narrow results] ..."
+        )
     return res
 
 
@@ -1602,7 +1732,7 @@ def get_code_stats(
     """
     Compute lines of code (LOC), comments, blank lines, and file counts aggregated by programming language.
     Honors .gitignore and smart ignore rules.
-    
+
     Args:
         path: Workspace or directory root to analyze.
         respect_gitignore: Whether to ignore files in .gitignore (default True).
@@ -1648,7 +1778,8 @@ def get_code_stats(
     for dirpath, dirnames, filenames in os.walk(root):
         curr = Path(dirpath)
         dirnames[:] = [
-            d for d in dirnames
+            d
+            for d in dirnames
             if d not in HEAVY_BUILD_DIRS
             and d not in GIT_DIRS
             and not _is_hidden(curr / d)
@@ -1712,7 +1843,7 @@ def find_duplicate_files(
     """
     Find duplicate files in a workspace by analyzing file sizes and SHA256 checksums.
     Honors .gitignore and smart ignore rules.
-    
+
     Args:
         path: Workspace or directory root to search.
         min_size_bytes: Minimum file size in bytes to consider (default 512).
@@ -1730,7 +1861,8 @@ def find_duplicate_files(
     for dirpath, dirnames, filenames in os.walk(root):
         curr = Path(dirpath)
         dirnames[:] = [
-            d for d in dirnames
+            d
+            for d in dirnames
             if d not in HEAVY_BUILD_DIRS
             and d not in GIT_DIRS
             and not _is_hidden(curr / d)
@@ -1774,14 +1906,16 @@ def find_duplicate_files(
             if len(dup_paths) > 1:
                 wasted = sz * (len(dup_paths) - 1)
                 total_wasted_bytes += wasted
-                duplicate_groups.append({
-                    "sha256": h[:16] + "...",
-                    "file_size_bytes": sz,
-                    "file_size_formatted": _format_size(sz),
-                    "wasted_space_formatted": _format_size(wasted),
-                    "duplicate_count": len(dup_paths),
-                    "files": dup_paths,
-                })
+                duplicate_groups.append(
+                    {
+                        "sha256": h[:16] + "...",
+                        "file_size_bytes": sz,
+                        "file_size_formatted": _format_size(sz),
+                        "wasted_space_formatted": _format_size(wasted),
+                        "duplicate_count": len(dup_paths),
+                        "files": dup_paths,
+                    }
+                )
                 if len(duplicate_groups) >= safe_max:
                     break
         if len(duplicate_groups) >= safe_max:

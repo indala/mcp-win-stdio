@@ -3,9 +3,7 @@ CLI entry point for mcp-win-stdio-word.
 """
 
 import argparse
-import os
 import sys
-from pathlib import Path
 
 from mcp_win_stdio.word import __version__
 from mcp_win_stdio.word.guide import print_guide
@@ -35,6 +33,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("\n--- Word COM Automation Check ---")
     try:
         import win32com.client
+
         app = win32com.client.Dispatch("Word.Application")
         app.Visible = False
         ver = app.Version

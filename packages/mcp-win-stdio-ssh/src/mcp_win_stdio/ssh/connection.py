@@ -6,13 +6,10 @@ bastion/jump host tunneling, and resilient connection pooling.
 
 import json
 import os
-from pathlib import Path
-import re
-import socket
 import sys
 import threading
-import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import paramiko
 from paramiko.config import SSHConfig
@@ -102,7 +99,7 @@ def parse_system_ssh_config() -> Dict[str, Dict[str, Any]]:
             entry = ssh_cfg.lookup(host)
             identity_files = entry.get("identityfile", [])
             key_path = identity_files[0] if identity_files else None
-            
+
             # Resolve ~ in key path
             if key_path:
                 key_path = str(Path(key_path).expanduser())
@@ -203,8 +200,7 @@ def resolve_host_info(target_name: Optional[str] = None) -> Dict[str, Any]:
             set_active_host_name(first_name)
             return registered[first_name]
         raise ValueError(
-            "No SSH host specified and no active host is configured. "
-            "Use 'add_host' or provide 'host' parameter."
+            "No SSH host specified and no active host is configured. Use 'add_host' or provide 'host' parameter."
         )
 
     raise ValueError(f"SSH host '{host_name}' not found. Available hosts: {list(registered.keys())}")
@@ -314,9 +310,7 @@ def get_cached_or_connect(
                 pass
             del _CLIENT_POOL[name]
 
-        client = create_ssh_client(
-            host_info, password=password, passphrase=passphrase, timeout=timeout
-        )
+        client = create_ssh_client(host_info, password=password, passphrase=passphrase, timeout=timeout)
         _CLIENT_POOL[name] = client
         return client
 
@@ -360,10 +354,12 @@ def get_pool_status() -> List[Dict[str, Any]]:
         for name, client in _CLIENT_POOL.items():
             transport = client.get_transport()
             is_active = transport.is_active() if transport else False
-            status.append({
-                "name": name,
-                "isActive": is_active,
-                "remoteAddress": f"{transport.getpeername()}" if (transport and is_active) else "closed",
-                "isCurrentDefault": name == get_active_host_name(),
-            })
+            status.append(
+                {
+                    "name": name,
+                    "isActive": is_active,
+                    "remoteAddress": f"{transport.getpeername()}" if (transport and is_active) else "closed",
+                    "isCurrentDefault": name == get_active_host_name(),
+                }
+            )
     return status

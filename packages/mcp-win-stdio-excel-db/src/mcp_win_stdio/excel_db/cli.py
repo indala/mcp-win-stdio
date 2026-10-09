@@ -4,8 +4,9 @@ CLI entry point for mcp-win-stdio-excel-db.
 """
 
 import argparse
-import sys
+
 from mcp_win_stdio.excel_db.server import mcp
+
 
 def main():
     parser = argparse.ArgumentParser(description="mcp-win-stdio-excel-db MCP Server")
@@ -17,6 +18,7 @@ def main():
         mcp.run(transport="sse", port=args.port)
     else:
         mcp.run(transport="stdio")
+
 
 if __name__ == "__main__":
     main()

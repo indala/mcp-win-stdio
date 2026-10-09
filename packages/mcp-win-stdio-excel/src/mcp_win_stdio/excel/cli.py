@@ -5,10 +5,10 @@ CLI entry point for mcp-win-stdio-excel.
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from mcp_win_stdio.excel import __version__
 from mcp_win_stdio.excel.guide import print_guide
@@ -108,7 +108,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
                 del data["mcpServers"]["excel"]
                 with open(desktop_cfg, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
-                print(f"[OK] Removed 'excel' from Claude Desktop.")
+                print("[OK] Removed 'excel' from Claude Desktop.")
         except Exception as e:
             print(f"[ERROR] Claude Desktop: {e}")
 
@@ -140,6 +140,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("\n--- Excel COM Automation Check ---")
     try:
         import win32com.client
+
         app = win32com.client.DispatchEx("Excel.Application")
         ver = app.Version
         app.Quit()

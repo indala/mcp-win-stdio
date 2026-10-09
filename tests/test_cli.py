@@ -13,16 +13,17 @@ for p in Path("packages").glob("*/src"):
     sys.path.insert(0, str(p.resolve()))
 sys.path.insert(0, os.path.abspath("src"))
 
-from mcp_win_stdio.core.config import ensure_workspace_dirs
-from mcp_win_stdio.core.discovery import get_server_info, list_available_servers
-from mcp_win_stdio.cli import print_dashboard, cmd_guide
-from mcp_win_stdio.excel.guide import print_excel_guide
-from mcp_win_stdio.word.guide import print_word_guide
-from mcp_win_stdio.explorer.guide import print_explorer_guide
-from mcp_win_stdio.tsc.guide import print_tsc_guide
 from mcp_win_stdio.db.guide import print_db_guide
+from mcp_win_stdio.excel.guide import print_excel_guide
+from mcp_win_stdio.explorer.guide import print_explorer_guide
 from mcp_win_stdio.git.guide import print_git_guide
 from mcp_win_stdio.ssh.guide import print_ssh_guide
+from mcp_win_stdio.tsc.guide import print_tsc_guide
+from mcp_win_stdio.word.guide import print_word_guide
+
+from mcp_win_stdio.cli import print_dashboard
+from mcp_win_stdio.core.config import ensure_workspace_dirs
+from mcp_win_stdio.core.discovery import list_available_servers
 
 
 def test_discovery():
@@ -88,15 +89,16 @@ def test_dashboard():
 
 
 def test_all_servers_import():
-    from mcp_win_stdio.excel.server import mcp as excel_mcp
-    from mcp_win_stdio.word.server import mcp as word_mcp
-    from mcp_win_stdio.explorer.server import mcp as explorer_mcp
-    from mcp_win_stdio.tsc.server import mcp as tsc_mcp
     from mcp_win_stdio.db.server import mcp as db_mcp
+    from mcp_win_stdio.excel.server import mcp as excel_mcp
+    from mcp_win_stdio.explorer.server import mcp as explorer_mcp
     from mcp_win_stdio.git.server import mcp as git_mcp
     from mcp_win_stdio.ssh.server import mcp as ssh_mcp
-    from mcp_win_stdio.rag.server import mcp as rag_mcp
+    from mcp_win_stdio.tsc.server import mcp as tsc_mcp
+    from mcp_win_stdio.word.server import mcp as word_mcp
+
     from mcp_win_stdio.excel_db.server import mcp as excel_db_mcp
+    from mcp_win_stdio.rag.server import mcp as rag_mcp
 
     assert excel_mcp is not None
     assert word_mcp is not None
@@ -111,7 +113,7 @@ def test_all_servers_import():
 
 
 def test_updater():
-    from mcp_win_stdio.core.updater import parse_version, format_update_banner, check_for_update
+    from mcp_win_stdio.core.updater import format_update_banner, parse_version
 
     assert parse_version("0.2.4") == (0, 2, 4)
     assert parse_version("0.2.4") > parse_version("0.2.3")
@@ -126,7 +128,8 @@ def test_updater():
 
 def test_project_setup_and_migration(tmp_path):
     import json
-    from mcp_win_stdio.cli import setup_project_mcp, remove_project_mcp
+
+    from mcp_win_stdio.cli import remove_project_mcp, setup_project_mcp
 
     # 1. Simulate legacy .vscode/mcp.json existing in project
     legacy_vscode_dir = tmp_path / ".vscode"
@@ -178,10 +181,10 @@ def test_project_setup_and_migration(tmp_path):
 
 def test_init_clients(tmp_path):
     from mcp_win_stdio.cli import (
+        init_all_clients,
         init_antigravity,
         init_claude,
         init_copilot,
-        init_all_clients,
     )
 
     # 1. Antigravity
@@ -214,8 +217,9 @@ def test_init_clients(tmp_path):
 
 
 def test_cmd_init_dispatch(tmp_path, monkeypatch):
-    from mcp_win_stdio.cli import cmd_init_project
     import argparse
+
+    from mcp_win_stdio.cli import cmd_init_project
 
     monkeypatch.chdir(tmp_path)
 
@@ -235,6 +239,7 @@ def test_cmd_init_dispatch(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     import tempfile
+
     test_discovery()
     test_guides()
     test_dashboard()
@@ -244,4 +249,3 @@ if __name__ == "__main__":
         test_project_setup_and_migration(Path(tmp_dir))
         test_init_clients(Path(tmp_dir))
     print("ALL TESTS PASSED!")
-

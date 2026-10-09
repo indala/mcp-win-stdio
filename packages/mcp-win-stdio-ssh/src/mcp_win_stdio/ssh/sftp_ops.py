@@ -3,16 +3,14 @@ SFTP File Operations and Directory Traversal for mcp-win-stdio-ssh.
 Provides token-safe remote file reading, streaming writing, metadata inspection, and sync operations.
 """
 
-from datetime import datetime
 import os
-from pathlib import Path
 import stat
 import threading
-import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
 
 import paramiko
-
 from mcp_win_stdio.ssh.connection import get_cached_or_connect, resolve_host_info
 
 _SFTP_CLIENTS: Dict[str, paramiko.SFTPClient] = {}
@@ -56,7 +54,7 @@ def list_remote_directory(
 ) -> Dict[str, Any]:
     """
     List contents of a remote directory with detailed metadata and context window protection.
-    
+
     Args:
         remote_path: Target directory path on remote server.
         limit: Max items to return per batch (default 100, max 250).
@@ -85,16 +83,20 @@ def list_remote_directory(
             is_symlink = stat.S_ISLNK(attr.st_mode)
             mtime_dt = datetime.fromtimestamp(attr.st_mtime) if attr.st_mtime else None
 
-            items.append({
-                "name": attr.filename,
-                "type": "directory" if is_dir else ("symlink" if is_symlink else "file"),
-                "sizeBytes": attr.st_size,
-                "sizeFormatted": f"{attr.st_size / 1024:.1f} KB" if attr.st_size < 1024*1024 else f"{attr.st_size / (1024*1024):.2f} MB",
-                "permissions": format_file_mode(attr.st_mode),
-                "modified": mtime_dt.isoformat() if mtime_dt else None,
-                "uid": attr.st_uid,
-                "gid": attr.st_gid,
-            })
+            items.append(
+                {
+                    "name": attr.filename,
+                    "type": "directory" if is_dir else ("symlink" if is_symlink else "file"),
+                    "sizeBytes": attr.st_size,
+                    "sizeFormatted": f"{attr.st_size / 1024:.1f} KB"
+                    if attr.st_size < 1024 * 1024
+                    else f"{attr.st_size / (1024 * 1024):.2f} MB",
+                    "permissions": format_file_mode(attr.st_mode),
+                    "modified": mtime_dt.isoformat() if mtime_dt else None,
+                    "uid": attr.st_uid,
+                    "gid": attr.st_gid,
+                }
+            )
 
         safe_limit = min(max(1, limit), 250)
         safe_offset = max(0, offset)
@@ -399,6 +401,7 @@ def remove_remote_path(
         st = sftp.stat(remote_path)
         if stat.S_ISDIR(st.st_mode):
             if recursive:
+
                 def _rm_recursive(rem_dir: str):
                     for attr in sftp.listdir_attr(rem_dir):
                         item = f"{rem_dir.rstrip('/')}/{attr.filename}"
@@ -407,6 +410,7 @@ def remove_remote_path(
                         else:
                             sftp.remove(item)
                     sftp.rmdir(rem_dir)
+
                 _rm_recursive(remote_path)
             else:
                 sftp.rmdir(remote_path)

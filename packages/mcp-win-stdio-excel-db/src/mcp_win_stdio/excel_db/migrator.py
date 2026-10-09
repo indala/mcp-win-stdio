@@ -4,14 +4,13 @@ Master Data Migration and Synchronization Engine.
 Generates transactional SQL upserts with FK pre-flight validation and executes dry-run syncs.
 """
 
-import json
 import math
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text
 
 from mcp_win_stdio.excel_db.stream import resolve_sqlalchemy_url
 
@@ -32,10 +31,7 @@ def _clean_sql_val(v: Any) -> str:
         return f"'{escaped}'"
 
 
-def _resolve_fk_mappings(
-    engine,
-    fk_lookups: Optional[Dict[str, Dict[str, str]]]
-) -> Dict[str, Dict[str, Any]]:
+def _resolve_fk_mappings(engine, fk_lookups: Optional[Dict[str, Dict[str, str]]]) -> Dict[str, Dict[str, Any]]:
     """
     Fetch lookup maps from database for resolving human-readable codes (e.g. 'm')
     to database foreign key IDs (UUIDs).
@@ -76,7 +72,7 @@ def generate_master_migration_plan(
     on_conflict_action: str = "update",
     fk_lookups: Optional[Dict[str, Dict[str, str]]] = None,
     price_history_table: Optional[str] = None,
-    db_resolver_func = None
+    db_resolver_func=None,
 ) -> Dict[str, Any]:
     """
     Generate atomic, transactional PostgreSQL/MySQL migration SQL from an Excel master.
@@ -148,12 +144,14 @@ def generate_master_migration_plan(
                 elif code_str.lower() in lookup_map:
                     val = lookup_map[code_str.lower()]
                 else:
-                    fk_errors.append({
-                        "excel_row": row_num,
-                        "column": xl_col,
-                        "unresolved_value": code_str,
-                        "target_table": fk_lookups[db_col].get("table")
-                    })
+                    fk_errors.append(
+                        {
+                            "excel_row": row_num,
+                            "column": xl_col,
+                            "unresolved_value": code_str,
+                            "target_table": fk_lookups[db_col].get("table"),
+                        }
+                    )
                     has_error = True
 
             row_data[db_col] = val
@@ -168,7 +166,9 @@ def generate_master_migration_plan(
         if on_conflict_action.lower() == "update" and update_cols:
             update_clauses = [f"{c} = EXCLUDED.{c}" for c in update_cols]
             # Add updated_at if standard
-            conflict_sql = f"ON CONFLICT ({', '.join(key_columns)}) DO UPDATE SET\n    " + ",\n    ".join(update_clauses)
+            conflict_sql = f"ON CONFLICT ({', '.join(key_columns)}) DO UPDATE SET\n    " + ",\n    ".join(
+                update_clauses
+            )
         else:
             conflict_sql = f"ON CONFLICT ({', '.join(key_columns)}) DO NOTHING"
 
@@ -198,7 +198,7 @@ def generate_master_migration_plan(
         "generated_statements_count": processed_count,
         "output_sql_file": out_file_str,
         "sql_preview": sql_statements[:5],
-        "duration_seconds": round(duration, 3)
+        "duration_seconds": round(duration, 3),
     }
 
 
@@ -212,7 +212,7 @@ def sync_master_to_db(
     fk_lookups: Optional[Dict[str, Dict[str, str]]] = None,
     dry_run: bool = True,
     chunk_size: int = 500,
-    db_resolver_func = None
+    db_resolver_func=None,
 ) -> Dict[str, Any]:
     """
     Safely execute master data synchronization against live PostgreSQL/MySQL database.
@@ -240,14 +240,14 @@ def sync_master_to_db(
         connection_name_or_url=connection_name_or_url,
         sheet_name=sheet_name,
         fk_lookups=fk_lookups,
-        db_resolver_func=db_resolver_func
+        db_resolver_func=db_resolver_func,
     )
 
     if plan["fk_unresolved_errors_count"] > 0:
         return {
             "status": "aborted",
             "reason": f"Foreign key validation failed for {plan['fk_unresolved_errors_count']} rows.",
-            "fk_errors": plan["fk_errors_sample"]
+            "fk_errors": plan["fk_errors_sample"],
         }
 
     db_url = db_resolver_func(connection_name_or_url) if db_resolver_func else connection_name_or_url
@@ -258,7 +258,7 @@ def sync_master_to_db(
         trans = conn.begin()
         try:
             # Parse individual statements
-            raw_stmts = plan.get("sql_preview", []) # Generated statements
+            raw_stmts = plan.get("sql_preview", [])  # Generated statements
             # Re-read or generate full list
             full_plan = generate_master_migration_plan(
                 excel_path=excel_path,
@@ -268,7 +268,7 @@ def sync_master_to_db(
                 connection_name_or_url=connection_name_or_url,
                 sheet_name=sheet_name,
                 fk_lookups=fk_lookups,
-                db_resolver_func=db_resolver_func
+                db_resolver_func=db_resolver_func,
             )
             # Execute in batches
             for stmt in full_plan.get("sql_preview", []):
@@ -297,5 +297,5 @@ def sync_master_to_db(
         "dry_run": dry_run,
         "rows_processed": executed_count,
         "target_table": target_table,
-        "duration_seconds": round(duration, 3)
+        "duration_seconds": round(duration, 3),
     }

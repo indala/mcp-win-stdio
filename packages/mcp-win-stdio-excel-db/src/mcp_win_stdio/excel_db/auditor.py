@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from openpyxl.styles import Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from sqlalchemy import create_engine, text
 
@@ -29,10 +29,7 @@ def _clean_val(v: Any) -> Any:
     return v
 
 
-def _load_dataset(
-    source: Union[str, Dict[str, Any]],
-    db_resolver_func = None
-) -> pd.DataFrame:
+def _load_dataset(source: Union[str, Dict[str, Any]], db_resolver_func=None) -> pd.DataFrame:
     """
     Load a dataset from either a file path (Excel/CSV) or a configuration dict (DB/Excel).
     """
@@ -45,7 +42,7 @@ def _load_dataset(
         else:
             df = pd.read_excel(path)
 
-        if len(df) > 0 and (df.columns.dtype == 'int64' or all(str(c).isdigit() for c in df.columns)):
+        if len(df) > 0 and (df.columns.dtype == "int64" or all(str(c).isdigit() for c in df.columns)):
             new_cols = [str(x).strip() for x in df.iloc[0]]
             df = df.iloc[1:].reset_index(drop=True)
             df.columns = new_cols
@@ -93,7 +90,7 @@ def compare_master_datasets(
     numeric_tolerance: float = 0.001,
     ignore_whitespace_case: bool = True,
     output_report_path: Optional[str] = None,
-    db_resolver_func = None
+    db_resolver_func=None,
 ) -> Dict[str, Any]:
     """
     Deterministically compare two master datasets (Excel vs Excel, DB vs Excel, or DB vs DB).
@@ -150,13 +147,7 @@ def compare_master_datasets(
         df_b[k] = df_b[k].astype(str).str.strip()
 
     # 5. Full Outer Join on Key Columns
-    merged = pd.merge(
-        df_a, df_b,
-        on=key_columns,
-        how="outer",
-        suffixes=("_a", "_b"),
-        indicator=True
-    )
+    merged = pd.merge(df_a, df_b, on=key_columns, how="outer", suffixes=("_a", "_b"), indicator=True)
 
     only_in_a = merged[merged["_merge"] == "left_only"].copy()
     only_in_b = merged[merged["_merge"] == "right_only"].copy()
@@ -182,7 +173,7 @@ def compare_master_datasets(
                     "source_a": _clean_val(val_a),
                     "source_b": _clean_val(val_b),
                     "delta": None,
-                    "type": "null_mismatch"
+                    "type": "null_mismatch",
                 }
                 col_discrepancy_counts[col] += 1
                 continue
@@ -200,7 +191,7 @@ def compare_master_datasets(
                         "source_b": _clean_val(val_b),
                         "delta": round(delta, 4),
                         "pct_change": pct,
-                        "type": "numeric_diff"
+                        "type": "numeric_diff",
                     }
                     col_discrepancy_counts[col] += 1
             else:
@@ -219,16 +210,13 @@ def compare_master_datasets(
                         "source_a": _clean_val(val_a),
                         "source_b": _clean_val(val_b),
                         "delta": None,
-                        "type": "text_diff"
+                        "type": "text_diff",
                     }
                     col_discrepancy_counts[col] += 1
 
         if row_diffs:
             keys_dict = {k: row[k] for k in key_columns}
-            discrepancies.append({
-                "keys": keys_dict,
-                "differences": row_diffs
-            })
+            discrepancies.append({"keys": keys_dict, "differences": row_diffs})
 
     identical_records_count = len(in_both) - len(discrepancies)
 
@@ -252,7 +240,7 @@ def compare_master_datasets(
             left=Side(style="thin", color="D3D3D3"),
             right=Side(style="thin", color="D3D3D3"),
             top=Side(style="thin", color="D3D3D3"),
-            bottom=Side(style="thin", color="D3D3D3")
+            bottom=Side(style="thin", color="D3D3D3"),
         )
 
         # Tab 1: Overview
@@ -293,7 +281,14 @@ def compare_master_datasets(
         # Tab 2: Discrepancies
         if discrepancies:
             ws_diff = wb.create_sheet("Field Differences")
-            diff_headers = list(key_columns) + ["Field", "Source A (Baseline)", "Source B (New)", "Delta", "% Change", "Diff Type"]
+            diff_headers = list(key_columns) + [
+                "Field",
+                "Source A (Baseline)",
+                "Source B (New)",
+                "Delta",
+                "% Change",
+                "Diff Type",
+            ]
             ws_diff.append(diff_headers)
             for c_idx in range(1, len(diff_headers) + 1):
                 cell = ws_diff.cell(row=1, column=c_idx)
@@ -309,7 +304,7 @@ def compare_master_datasets(
                         str(diff_info["source_b"]),
                         diff_info.get("delta"),
                         diff_info.get("pct_change"),
-                        diff_info.get("type")
+                        diff_info.get("type"),
                     ]
                     ws_diff.append(row_vals)
                     # highlight
@@ -379,7 +374,7 @@ def compare_master_datasets(
         "column_discrepancy_counts": col_discrepancy_counts,
         "sample_discrepancies": discrepancies[:10],
         "audit_report_file": report_file_path,
-        "duration_seconds": round(duration, 3)
+        "duration_seconds": round(duration, 3),
     }
 
 
@@ -390,26 +385,18 @@ def reconcile_db_vs_excel(
     db_url_or_config: Union[str, Dict[str, Any]],
     sheet_name: Optional[Union[str, int]] = 0,
     compare_columns: Optional[List[str]] = None,
-    output_report_path: Optional[str] = None
+    output_report_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Backwards-compatible wrapper delegating to compare_master_datasets.
     """
-    db_source = {
-        "type": "db",
-        "connection": db_url_or_config,
-        "query": sql_query
-    }
-    excel_source = {
-        "type": "excel",
-        "path": excel_path,
-        "sheet": sheet_name
-    }
+    db_source = {"type": "db", "connection": db_url_or_config, "query": sql_query}
+    excel_source = {"type": "excel", "path": excel_path, "sheet": sheet_name}
     return compare_master_datasets(
         source_a=db_source,
         source_b=excel_source,
         key_columns=key_columns,
         compare_columns=compare_columns,
         output_report_path=output_report_path,
-        db_resolver_func=lambda c: c
+        db_resolver_func=lambda c: c,
     )

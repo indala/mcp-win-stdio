@@ -3,12 +3,10 @@ CLI entry point for mcp-win-stdio-ssh.
 """
 
 import argparse
-import os
-from pathlib import Path
 import shutil
-import subprocess
 import sys
 import time
+from pathlib import Path
 
 # Ensure Windows console uses UTF-8 without crashing on cp1252
 if sys.platform == "win32":
@@ -21,10 +19,10 @@ if sys.platform == "win32":
 from mcp_win_stdio.ssh import __version__
 from mcp_win_stdio.ssh.connection import (
     SYSTEM_SSH_CONFIG,
-    get_all_registered_hosts,
     get_active_host_name,
-    resolve_host_info,
+    get_all_registered_hosts,
     get_cached_or_connect,
+    resolve_host_info,
 )
 from mcp_win_stdio.ssh.guide import print_ssh_guide
 from mcp_win_stdio.ssh.server import mcp
@@ -54,7 +52,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if ssh_bin:
         print(f"[OK] System SSH CLI: {ssh_bin}")
     else:
-        print(f"[INFO] System SSH CLI: Not on PATH (Optional: Paramiko native SSH client active)")
+        print("[INFO] System SSH CLI: Not on PATH (Optional: Paramiko native SSH client active)")
 
     # 3. SSH Config & Keys
     ssh_dir = Path.home() / ".ssh"
@@ -63,13 +61,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         if SYSTEM_SSH_CONFIG.exists():
             print(f"[OK] SSH Config:    {SYSTEM_SSH_CONFIG}")
         else:
-            print(f"[INFO] SSH Config:   No ~/.ssh/config found (can use add_host or create config)")
+            print("[INFO] SSH Config:   No ~/.ssh/config found (can use add_host or create config)")
 
         keys = [f.name for f in ssh_dir.iterdir() if f.is_file() and not f.name.endswith(".pub") and "id_" in f.name]
         if keys:
             print(f"[OK] Found Keys:     {', '.join(keys)}")
         else:
-            print(f"[INFO] Found Keys:    No default id_* keys found in ~/.ssh/")
+            print("[INFO] Found Keys:    No default id_* keys found in ~/.ssh/")
     else:
         print(f"[INFO] SSH Directory: {ssh_dir} not created yet.")
 
@@ -107,7 +105,9 @@ def cmd_test(args: argparse.Namespace) -> None:
             stdin, stdout, stderr = client.exec_command("uname -srmo 2>/dev/null || ver", timeout=5)
             os_info = stdout.read().decode("utf-8", errors="replace").strip()
 
-            print(f" [OK] {h_name:<16} -> {h_info.get('user')}@{h_info.get('hostname')}:{h_info.get('port')} ({lat_ms}ms) | {os_info}")
+            print(
+                f" [OK] {h_name:<16} -> {h_info.get('user')}@{h_info.get('hostname')}:{h_info.get('port')} ({lat_ms}ms) | {os_info}"
+            )
         except Exception as e:
             print(f" [FAIL] {h_name:<14} -> Error: {e}")
 

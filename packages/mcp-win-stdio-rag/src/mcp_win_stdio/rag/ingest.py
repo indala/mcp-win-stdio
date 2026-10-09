@@ -8,34 +8,104 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import re
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import urllib.request
 import zipfile
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 # File extensions to index by default
 DEFAULT_DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
 DEFAULT_CODE_EXTENSIONS = {
-    ".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-    ".go", ".rs", ".java", ".cpp", ".c", ".h", ".hpp",
-    ".cs", ".rb", ".php", ".swift", ".kt", ".sql", ".sh"
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".go",
+    ".rs",
+    ".java",
+    ".cpp",
+    ".c",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".php",
+    ".swift",
+    ".kt",
+    ".sql",
+    ".sh",
 }
 DEFAULT_CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".toml", ".prisma", ".graphql"}
 
 IGNORED_DIRS = {
-    ".git", ".svn", ".hg", "node_modules", "dist", "build", "out",
-    ".next", ".nuxt", ".output", "target", "bin", "obj", "__pycache__",
-    ".cache", "coverage", ".turbo", "venv", ".venv", "env", ".env",
-    "site-packages", ".idea", ".vscode", ".gemini", ".cursor",
-    "vendor", "vendors", "thirdparty", "third_party", "bower_components",
-    "locale", "locales", "translations", "cache", "tmp", "temp", "var", "storage"
+    ".git",
+    ".svn",
+    ".hg",
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    ".next",
+    ".nuxt",
+    ".output",
+    "target",
+    "bin",
+    "obj",
+    "__pycache__",
+    ".cache",
+    "coverage",
+    ".turbo",
+    "venv",
+    ".venv",
+    "env",
+    ".env",
+    "site-packages",
+    ".idea",
+    ".vscode",
+    ".gemini",
+    ".cursor",
+    "vendor",
+    "vendors",
+    "thirdparty",
+    "third_party",
+    "bower_components",
+    "locale",
+    "locales",
+    "translations",
+    "cache",
+    "tmp",
+    "temp",
+    "var",
+    "storage",
 }
 
 IGNORED_FILE_SUFFIXES = (
-    ".min.js", ".min.css", ".bundle.js", ".map", ".lock",
-    "package-lock.json", "composer.lock", "yarn.lock", "pnpm-lock.yaml",
-    ".po", ".mo", ".pot", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".eot"
+    ".min.js",
+    ".min.css",
+    ".bundle.js",
+    ".map",
+    ".lock",
+    "package-lock.json",
+    "composer.lock",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    ".po",
+    ".mo",
+    ".pot",
+    ".svg",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".ico",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
 )
 
 
@@ -65,7 +135,7 @@ def strip_frontmatter(content: str) -> Tuple[str, int]:
     if lines and lines[0].strip() == "---":
         for i in range(1, len(lines)):
             if lines[i].strip() == "---":
-                return "\n".join(lines[i + 1:]).lstrip("\n"), i + 1
+                return "\n".join(lines[i + 1 :]).lstrip("\n"), i + 1
     return content, 0
 
 
@@ -77,7 +147,7 @@ def chunk_markdown_by_headings(content: str, rel_path: str, base_url_prefix: str
     cleaned_content, offset = strip_frontmatter(content)
     lines = cleaned_content.splitlines()
     chunks: List[Dict[str, Any]] = []
-    
+
     current_title = Path(rel_path).stem.replace("-", " ").replace("_", " ").title()
     current_anchor = ""
     current_lines: List[str] = []
@@ -92,18 +162,28 @@ def chunk_markdown_by_headings(content: str, rel_path: str, base_url_prefix: str
             if current_lines:
                 sec_text = "\n".join(current_lines).strip()
                 if sec_text and not is_stub_chunk(current_title, sec_text):
-                    anchor_url = f"{base_url_prefix}#{current_anchor}" if (base_url_prefix and current_anchor) else (f"{base_url_prefix}#L{start_line}-L{idx-1}" if base_url_prefix else f"{rel_path}#L{start_line}-L{idx-1}")
-                    chunks.append({
-                        "section_title": current_title,
-                        "anchor_id": current_anchor,
-                        "anchor_url": anchor_url,
-                        "file_path": rel_path,
-                        "line_start": start_line,
-                        "line_end": idx - 1,
-                        "text": f"## {current_title}\n{sec_text}",
-                        "word_count": len(sec_text.split())
-                    })
-            
+                    anchor_url = (
+                        f"{base_url_prefix}#{current_anchor}"
+                        if (base_url_prefix and current_anchor)
+                        else (
+                            f"{base_url_prefix}#L{start_line}-L{idx - 1}"
+                            if base_url_prefix
+                            else f"{rel_path}#L{start_line}-L{idx - 1}"
+                        )
+                    )
+                    chunks.append(
+                        {
+                            "section_title": current_title,
+                            "anchor_id": current_anchor,
+                            "anchor_url": anchor_url,
+                            "file_path": rel_path,
+                            "line_start": start_line,
+                            "line_end": idx - 1,
+                            "text": f"## {current_title}\n{sec_text}",
+                            "word_count": len(sec_text.split()),
+                        }
+                    )
+
             # Start new section
             heading_text = match.group(2).strip()
             current_title = heading_text
@@ -117,22 +197,34 @@ def chunk_markdown_by_headings(content: str, rel_path: str, base_url_prefix: str
     if current_lines:
         sec_text = "\n".join(current_lines).strip()
         if sec_text and not is_stub_chunk(current_title, sec_text):
-            anchor_url = f"{base_url_prefix}#{current_anchor}" if (base_url_prefix and current_anchor) else (f"{base_url_prefix}#L{start_line}-L{len(lines) + offset}" if base_url_prefix else f"{rel_path}#L{start_line}-L{len(lines) + offset}")
-            chunks.append({
-                "section_title": current_title,
-                "anchor_id": current_anchor,
-                "anchor_url": anchor_url,
-                "file_path": rel_path,
-                "line_start": start_line,
-                "line_end": len(lines) + offset,
-                "text": f"## {current_title}\n{sec_text}" if not sec_text.startswith("#") else sec_text,
-                "word_count": len(sec_text.split())
-            })
+            anchor_url = (
+                f"{base_url_prefix}#{current_anchor}"
+                if (base_url_prefix and current_anchor)
+                else (
+                    f"{base_url_prefix}#L{start_line}-L{len(lines) + offset}"
+                    if base_url_prefix
+                    else f"{rel_path}#L{start_line}-L{len(lines) + offset}"
+                )
+            )
+            chunks.append(
+                {
+                    "section_title": current_title,
+                    "anchor_id": current_anchor,
+                    "anchor_url": anchor_url,
+                    "file_path": rel_path,
+                    "line_start": start_line,
+                    "line_end": len(lines) + offset,
+                    "text": f"## {current_title}\n{sec_text}" if not sec_text.startswith("#") else sec_text,
+                    "word_count": len(sec_text.split()),
+                }
+            )
 
     return chunks
 
 
-def chunk_code_by_definitions(content: str, rel_path: str, base_url_prefix: str = "", max_chunk_lines: int = 60) -> List[Dict[str, Any]]:
+def chunk_code_by_definitions(
+    content: str, rel_path: str, base_url_prefix: str = "", max_chunk_lines: int = 60
+) -> List[Dict[str, Any]]:
     """
     Split code files into logical chunks by classes, functions, traits, routes, or line windows with exact line spans.
     Preserves docblock comments and class/function context.
@@ -156,22 +248,30 @@ def chunk_code_by_definitions(content: str, rel_path: str, base_url_prefix: str 
     for idx, line in enumerate(lines, start=1):
         stripped = line.strip()
         match = def_regex.match(stripped)
-        is_split_point = (match is not None and not stripped.startswith("const ") and len(current_lines) >= 12) or (len(current_lines) >= max_chunk_lines)
+        is_split_point = (match is not None and not stripped.startswith("const ") and len(current_lines) >= 12) or (
+            len(current_lines) >= max_chunk_lines
+        )
 
         if is_split_point and len(current_lines) >= 10:
             code_text = "\n".join(current_lines).strip()
             if code_text:
-                anchor_url = f"{base_url_prefix}#L{start_line}-L{idx-1}" if base_url_prefix else f"{rel_path}#L{start_line}-L{idx-1}"
-                chunks.append({
-                    "section_title": f"{current_symbol} ({rel_path}:{start_line})",
-                    "anchor_id": f"L{start_line}-L{idx-1}",
-                    "anchor_url": anchor_url,
-                    "file_path": rel_path,
-                    "line_start": start_line,
-                    "line_end": idx - 1,
-                    "text": f"// File: {rel_path} (Lines {start_line}-{idx-1})\n{code_text}",
-                    "word_count": len(code_text.split())
-                })
+                anchor_url = (
+                    f"{base_url_prefix}#L{start_line}-L{idx - 1}"
+                    if base_url_prefix
+                    else f"{rel_path}#L{start_line}-L{idx - 1}"
+                )
+                chunks.append(
+                    {
+                        "section_title": f"{current_symbol} ({rel_path}:{start_line})",
+                        "anchor_id": f"L{start_line}-L{idx - 1}",
+                        "anchor_url": anchor_url,
+                        "file_path": rel_path,
+                        "line_start": start_line,
+                        "line_end": idx - 1,
+                        "text": f"// File: {rel_path} (Lines {start_line}-{idx - 1})\n{code_text}",
+                        "word_count": len(code_text.split()),
+                    }
+                )
             current_lines = [line]
             start_line = idx
             if match and match.group(1):
@@ -185,17 +285,23 @@ def chunk_code_by_definitions(content: str, rel_path: str, base_url_prefix: str 
     if current_lines:
         code_text = "\n".join(current_lines).strip()
         if code_text:
-            anchor_url = f"{base_url_prefix}#L{start_line}-L{len(lines)}" if base_url_prefix else f"{rel_path}#L{start_line}-L{len(lines)}"
-            chunks.append({
-                "section_title": f"{current_symbol} ({rel_path}:{start_line})",
-                "anchor_id": f"L{start_line}-L{len(lines)}",
-                "anchor_url": anchor_url,
-                "file_path": rel_path,
-                "line_start": start_line,
-                "line_end": len(lines),
-                "text": f"// File: {rel_path} (Lines {start_line}-{len(lines)})\n{code_text}",
-                "word_count": len(code_text.split())
-            })
+            anchor_url = (
+                f"{base_url_prefix}#L{start_line}-L{len(lines)}"
+                if base_url_prefix
+                else f"{rel_path}#L{start_line}-L{len(lines)}"
+            )
+            chunks.append(
+                {
+                    "section_title": f"{current_symbol} ({rel_path}:{start_line})",
+                    "anchor_id": f"L{start_line}-L{len(lines)}",
+                    "anchor_url": anchor_url,
+                    "file_path": rel_path,
+                    "line_start": start_line,
+                    "line_end": len(lines),
+                    "text": f"// File: {rel_path} (Lines {start_line}-{len(lines)})\n{code_text}",
+                    "word_count": len(code_text.split()),
+                }
+            )
 
     return chunks
 
@@ -219,7 +325,7 @@ def parse_github_url(url: str) -> Dict[str, str]:
         "repo": repo,
         "branch": branch,
         "subpath": subpath.rstrip("/"),
-        "full_name": f"{owner}/{repo}"
+        "full_name": f"{owner}/{repo}",
     }
 
 
@@ -227,7 +333,7 @@ def stream_github_repo_in_memory(
     repo_url: str,
     subpath: Optional[str] = None,
     allowed_extensions: Optional[Set[str]] = None,
-    auth_token: Optional[str] = None
+    auth_token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Stream and extract files from a GitHub repository in-memory via zipball without local git clone.
@@ -300,7 +406,7 @@ def stream_github_repo_in_memory(
 
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as z:
         for entry in z.infolist():
-            if entry.is_dir() or entry.file_size == 0 or entry.file_size > 1_500_000: # Skip files > 1.5MB
+            if entry.is_dir() or entry.file_size == 0 or entry.file_size > 1_500_000:  # Skip files > 1.5MB
                 continue
 
             # Zip root contains an outer prefix: owner-repo-sha/...
@@ -337,21 +443,18 @@ def stream_github_repo_in_memory(
             else:
                 chunks = chunk_code_by_definitions(text_content, rel_file_path, base_url_prefix=github_blob_url)
 
-            files_data.append({
-                "file_path": rel_file_path,
-                "content_hash": content_hash,
-                "github_url": github_blob_url,
-                "chunks": chunks,
-                "size_bytes": len(raw_bytes),
-                "is_doc": ext in DEFAULT_DOC_EXTENSIONS
-            })
+            files_data.append(
+                {
+                    "file_path": rel_file_path,
+                    "content_hash": content_hash,
+                    "github_url": github_blob_url,
+                    "chunks": chunks,
+                    "size_bytes": len(raw_bytes),
+                    "is_doc": ext in DEFAULT_DOC_EXTENSIONS,
+                }
+            )
 
-    return {
-        "repo_meta": meta,
-        "commit_sha": latest_sha,
-        "total_files": len(files_data),
-        "files": files_data
-    }
+    return {"repo_meta": meta, "commit_sha": latest_sha, "total_files": len(files_data), "files": files_data}
 
 
 ProgressCallback = Optional[Callable[[str, int, int, int, int, str], None]]
@@ -362,7 +465,7 @@ def scan_local_codebase(
     allowed_extensions: Optional[Set[str]] = None,
     cached_hashes: Optional[Dict[str, str]] = None,
     max_file_size: int = 1_000_000,
-    progress_cb: ProgressCallback = None
+    progress_cb: ProgressCallback = None,
 ) -> Tuple[List[Dict[str, Any]], int, Set[str]]:
     """
     High-performance 5-phase scan of local directory tree with live phase & percentage telemetry.
@@ -413,13 +516,15 @@ def scan_local_codebase(
 
     total_discovered = len(discovered_files)
     if progress_cb:
-        progress_cb("DISCOVERY", 1, 5, total_discovered, total_discovered, f"Discovered {total_discovered} eligible files")
+        progress_cb(
+            "DISCOVERY", 1, 5, total_discovered, total_discovered, f"Discovered {total_discovered} eligible files"
+        )
 
     # ---------------------------------------------------------
     # PHASE 2: CACHE DIFF & NEXT.JS 0ms SKIP CHECK
     # ---------------------------------------------------------
     if progress_cb:
-        progress_cb("CACHE_DIFF", 2, 5, 0, total_discovered, f"Diffing content hashes against SQLite manifest...")
+        progress_cb("CACHE_DIFF", 2, 5, 0, total_discovered, "Diffing content hashes against SQLite manifest...")
 
     pending_chunk_files: List[Tuple[str, str, str, int, bool]] = []
     unchanged_skipped = 0
@@ -443,7 +548,14 @@ def scan_local_codebase(
             progress_cb("CACHE_DIFF", 2, 5, idx, total_discovered, f"Checked {idx}/{total_discovered} file hashes")
 
     if progress_cb:
-        progress_cb("CACHE_DIFF", 2, 5, total_discovered, total_discovered, f"Cache Diff: {unchanged_skipped} unchanged (0ms skip), {len(pending_chunk_files)} modified/new")
+        progress_cb(
+            "CACHE_DIFF",
+            2,
+            5,
+            total_discovered,
+            total_discovered,
+            f"Cache Diff: {unchanged_skipped} unchanged (0ms skip), {len(pending_chunk_files)} modified/new",
+        )
 
     # ---------------------------------------------------------
     # PHASE 3: SEMANTIC DEFINITION CHUNKING
@@ -460,17 +572,21 @@ def scan_local_codebase(
             else:
                 chunks = chunk_code_by_definitions(content, rel_path)
 
-            files_to_update.append({
-                "file_path": rel_path,
-                "content_hash": content_hash,
-                "chunks": chunks,
-                "size_bytes": s_size,
-                "is_doc": is_doc
-            })
+            files_to_update.append(
+                {
+                    "file_path": rel_path,
+                    "content_hash": content_hash,
+                    "chunks": chunks,
+                    "size_bytes": s_size,
+                    "is_doc": is_doc,
+                }
+            )
         except Exception:
             continue
 
         if progress_cb and (idx % 50 == 0 or idx == total_to_chunk):
-            progress_cb("SEMANTIC_CHUNKING", 3, 5, idx, total_to_chunk, f"Parsed {idx}/{total_to_chunk} files ({rel_path})")
+            progress_cb(
+                "SEMANTIC_CHUNKING", 3, 5, idx, total_to_chunk, f"Parsed {idx}/{total_to_chunk} files ({rel_path})"
+            )
 
     return files_to_update, unchanged_skipped, live_paths

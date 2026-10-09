@@ -6,16 +6,16 @@ Part of mcp-win-stdio.
 
 import csv
 import decimal
-import os
-import sys
 import json
+import os
 import re
 import subprocess
+import sys
 import uuid
-from datetime import datetime, date, time
+from datetime import date, datetime, time
 from pathlib import Path
-from typing import Any, Optional, List, Dict, Union
-from urllib.parse import urlparse, unquote
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import unquote, urlparse
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -26,6 +26,7 @@ except (ImportError, ModuleNotFoundError):
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
+
     PG_ERROR = psycopg2.Error
 except (ImportError, Exception):
     psycopg2 = None
@@ -35,6 +36,7 @@ except (ImportError, Exception):
 try:
     import pymysql
     from pymysql.cursors import DictCursor
+
     MY_ERROR = pymysql.MySQLError
 except (ImportError, Exception):
     pymysql = None
@@ -171,10 +173,7 @@ def _init_config() -> None:
             elif "SERVERS" in data and isinstance(data["SERVERS"], dict):
                 conns = data["SERVERS"]
             elif isinstance(data, dict):
-                conns = {
-                    k: v for k, v in data.items()
-                    if k != "default" and (_is_db_url(v) or isinstance(v, dict))
-                }
+                conns = {k: v for k, v in data.items() if k != "default" and (_is_db_url(v) or isinstance(v, dict))}
             else:
                 conns = {}
 
@@ -236,7 +235,7 @@ def _split_sql_statements(sql: str) -> List[str]:
 
     while i < n:
         c = sql[i]
-        c2 = sql[i:i+2]
+        c2 = sql[i : i + 2]
 
         if in_line_comment:
             if c == "\n":
@@ -257,7 +256,7 @@ def _split_sql_statements(sql: str) -> List[str]:
 
         if in_single_quote:
             if c == "'":
-                if i + 1 < n and sql[i+1] == "'":
+                if i + 1 < n and sql[i + 1] == "'":
                     current.append("''")
                     i += 2
                     continue
@@ -274,7 +273,7 @@ def _split_sql_statements(sql: str) -> List[str]:
             continue
 
         if in_dollar_quote:
-            if sql[i:i+len(dollar_tag)] == dollar_tag:
+            if sql[i : i + len(dollar_tag)] == dollar_tag:
                 in_dollar_quote = False
                 current.append(dollar_tag)
                 i += len(dollar_tag)
@@ -336,10 +335,7 @@ def _split_sql_statements(sql: str) -> List[str]:
 
 
 def _format_db_error(
-    e: Exception,
-    engine: str = "unknown",
-    sql: Optional[str] = None,
-    statement_idx: Optional[int] = None
+    e: Exception, engine: str = "unknown", sql: Optional[str] = None, statement_idx: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Format PostgreSQL and MySQL database errors into rich, actionable diagnostic objects.
@@ -381,7 +377,9 @@ def _format_db_error(
                         pos = int(diag.statement_position) - 1
                         start_pos = max(0, pos - 40)
                         end_pos = min(len(sql), pos + 40)
-                        error_payload["sql_context"] = f"... {sql[start_pos:pos]} >>> {sql[pos:pos+1]} <<< {sql[pos+1:end_pos]} ..."
+                        error_payload["sql_context"] = (
+                            f"... {sql[start_pos:pos]} >>> {sql[pos : pos + 1]} <<< {sql[pos + 1 : end_pos]} ..."
+                        )
                     except Exception:
                         pass
         if getattr(e, "pgerror", None):
@@ -430,9 +428,7 @@ def _resolve_conn(connection: Optional[str] = None, server: Optional[str] = None
 
 
 def _get_connection(
-    target_name: Optional[str] = None,
-    fallback_server: Optional[str] = None,
-    visited: Optional[set] = None
+    target_name: Optional[str] = None, fallback_server: Optional[str] = None, visited: Optional[set] = None
 ) -> Dict[str, Any]:
     global _ACTIVE_CONNECTION
     if visited is None:
@@ -456,7 +452,9 @@ def _get_connection(
         raise ValueError("No database connection specified and no active connection set.")
 
     if name in visited:
-        raise ValueError(f"Circular connection reference detected for '{name}'. Available connections: {list(_RAW_CONFIG.keys())}")
+        raise ValueError(
+            f"Circular connection reference detected for '{name}'. Available connections: {list(_RAW_CONFIG.keys())}"
+        )
     visited.add(name)
 
     # 0. Raw database URL
@@ -518,9 +516,12 @@ def _get_connection(
             if not pymysql:
                 raise RuntimeError("MySQL driver (pymysql) is not available.")
             conn = pymysql.connect(
-                host=info["host"], port=info["port"], user=info["user"],
-                password=info["password"], database=info["database"],
-                connect_timeout=2
+                host=info["host"],
+                port=info["port"],
+                user=info["user"],
+                password=info["password"],
+                database=info["database"],
+                connect_timeout=2,
             )
             conn.close()
 
@@ -563,7 +564,7 @@ def _get_mysql_client(info: Dict[str, Any], dbname: Optional[str] = None):
         password=info["password"],
         database=dbname or info["database"],
         cursorclass=DictCursor,
-        autocommit=True
+        autocommit=True,
     )
 
 
@@ -573,13 +574,13 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
 
     if "." in t:
         parts = t.split(".", 1)
-        s = parts[0].strip('"`\'')
-        t = parts[1].strip('"`\'')
+        s = parts[0].strip("\"`'")
+        t = parts[1].strip("\"`'")
 
     if s and s.lower() != "public":
         cur.execute(
             "SELECT table_schema, table_name FROM information_schema.tables WHERE (table_schema = %s OR table_schema ILIKE %s) AND (table_name = %s OR table_name ILIKE %s) LIMIT 1",
-            (s, s, t, t)
+            (s, s, t, t),
         )
         row = cur.fetchone()
         if row:
@@ -589,7 +590,7 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
     # Try public
     cur.execute(
         "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema = 'public' AND (table_name = %s OR table_name ILIKE %s) LIMIT 1",
-        (t, t)
+        (t, t),
     )
     row = cur.fetchone()
     if row:
@@ -598,14 +599,14 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
     # Search all non-system
     cur.execute(
         "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast') AND (table_name = %s OR table_name ILIKE %s) ORDER BY (table_name = %s) DESC",
-        (t, t, t)
+        (t, t, t),
     )
     rows = cur.fetchall()
     if rows:
         return {
             "schema": rows[0]["table_schema"],
             "table": rows[0]["table_name"],
-            "note": f"Auto-resolved '{t}' to schema '{rows[0]['table_schema']}'."
+            "note": f"Auto-resolved '{t}' to schema '{rows[0]['table_schema']}'.",
         }
 
     return {"schema": s or "public", "table": t, "notFound": True}
@@ -613,7 +614,7 @@ def _resolve_pg_table(cur, table_name: str, schema: Optional[str] = None) -> Dic
 
 PII_COLUMN_PATTERN = re.compile(
     r"^(.*_)?(password|passwd|secret|hash|salt|token|auth|api_key|private_key|card_number|credit_card|cvv|cvc|ssn|pin|access_token)(_.*)?$",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
 
@@ -671,44 +672,34 @@ def list_connections() -> Dict[str, Any]:
                 info["url"] = url
                 _CONNECTION_REGISTRY[k] = info
 
-            conns.append({
-                "name": k,
-                "engine": info.get("engine", "unknown"),
-                "host": info.get("host", ""),
-                "port": info.get("port", ""),
-                "database": info.get("database", ""),
-                "isActive": k == _ACTIVE_CONNECTION,
-                "status": "connected"
-            })
+            conns.append(
+                {
+                    "name": k,
+                    "engine": info.get("engine", "unknown"),
+                    "host": info.get("host", ""),
+                    "port": info.get("port", ""),
+                    "database": info.get("database", ""),
+                    "isActive": k == _ACTIVE_CONNECTION,
+                    "status": "connected",
+                }
+            )
         except Exception as e:
-            conns.append({
-                "name": k,
-                "isActive": k == _ACTIVE_CONNECTION,
-                "status": "unreachable",
-                "error": str(e)
-            })
-    return {
-        "activeConnection": _ACTIVE_CONNECTION,
-        "totalConnections": len(conns),
-        "connections": conns
-    }
+            conns.append({"name": k, "isActive": k == _ACTIVE_CONNECTION, "status": "unreachable", "error": str(e)})
+    return {"activeConnection": _ACTIVE_CONNECTION, "totalConnections": len(conns), "connections": conns}
 
 
 @mcp.tool()
-def test_connection(
-    connection: Optional[str] = None,
-    server: Optional[str] = None,
-    timeout: int = 3
-) -> Dict[str, Any]:
+def test_connection(connection: Optional[str] = None, server: Optional[str] = None, timeout: int = 3) -> Dict[str, Any]:
     """
     Test live connectivity and latency to a configured database connection or server.
-    
+
     Args:
         connection: Optional database connection alias or URL to test. Defaults to active connection.
         server: Optional server alias.
         timeout: Socket connection timeout in seconds (default: 3).
     """
     import time
+
     target = _resolve_conn(connection, server)
     try:
         info = _get_connection(target)
@@ -717,7 +708,7 @@ def test_connection(
             "success": False,
             "connected": False,
             "error": str(e),
-            "message": f"Connection '{target}' could not be resolved."
+            "message": f"Connection '{target}' could not be resolved.",
         }
 
     t0 = time.time()
@@ -735,7 +726,7 @@ def test_connection(
                 user=info["user"],
                 password=info["password"],
                 database=info["database"] or None,
-                connect_timeout=timeout
+                connect_timeout=timeout,
             )
             with conn.cursor() as cur:
                 cur.execute("SELECT version();")
@@ -753,7 +744,7 @@ def test_connection(
             "database": info["database"],
             "latencyMs": latency_ms,
             "serverVersion": ver,
-            "message": f"Successfully connected to {info['engine']} database '{info['database']}' on {info['host']}:{info['port']} ({latency_ms}ms)."
+            "message": f"Successfully connected to {info['engine']} database '{info['database']}' on {info['host']}:{info['port']} ({latency_ms}ms).",
         }
     except Exception as e:
         latency_ms = round((time.time() - t0) * 1000, 2)
@@ -766,7 +757,7 @@ def test_connection(
             "port": info["port"],
             "latencyMs": latency_ms,
             "error": str(e),
-            "message": f"Failed to connect to {info['engine']} on {info['host']}:{info['port']} after {latency_ms}ms: {e}"
+            "message": f"Failed to connect to {info['engine']} on {info['host']}:{info['port']} after {latency_ms}ms: {e}",
         }
 
 
@@ -818,7 +809,7 @@ def remove_connection(name: str) -> Dict[str, Any]:
         "success": True,
         "message": f"Connection '{matched_key}' removed successfully.",
         "activeConnection": _ACTIVE_CONNECTION,
-        "remainingConnections": list(_RAW_CONFIG.keys())
+        "remainingConnections": list(_RAW_CONFIG.keys()),
     }
 
 
@@ -833,7 +824,7 @@ def use_database(
     Switch active database connection. Supports connection aliases (e.g. 'showreel', 'production'),
     database names, or sibling databases on the active/specified server.
     Sticky connection state is guaranteed for all subsequent tool calls when connection/server is omitted.
-    
+
     Args:
         database: Database name to connect to, or registered connection/server alias.
         server: Optional server or connection alias (e.g. 'showreel', 'localhost') to locate sibling database on.
@@ -841,13 +832,18 @@ def use_database(
         name: Optional alias for database or connection name.
     """
     global _ACTIVE_CONNECTION
-    target = _normalize_connection_param(database) or _normalize_connection_param(connection) or _normalize_connection_param(name) or _normalize_connection_param(server)
+    target = (
+        _normalize_connection_param(database)
+        or _normalize_connection_param(connection)
+        or _normalize_connection_param(name)
+        or _normalize_connection_param(server)
+    )
     base_server = _normalize_connection_param(server) or _normalize_connection_param(connection)
 
     if not target and not base_server:
         return {
             "error": True,
-            "message": f"Please specify a database name or connection alias. Available connections: {list(_RAW_CONFIG.keys())}"
+            "message": f"Please specify a database name or connection alias. Available connections: {list(_RAW_CONFIG.keys())}",
         }
 
     if not target:
@@ -867,7 +863,7 @@ def use_database(
                     "engine": info["engine"],
                     "database": info["database"],
                     "host": info["host"],
-                    "port": info["port"]
+                    "port": info["port"],
                 }
             except Exception as e:
                 return _format_db_error(e)
@@ -888,7 +884,7 @@ def use_database(
                     "engine": info["engine"],
                     "database": info["database"],
                     "host": info["host"],
-                    "port": info["port"]
+                    "port": info["port"],
                 }
         except Exception:
             pass
@@ -898,7 +894,7 @@ def use_database(
     if not base_name:
         return {
             "error": True,
-            "message": f"No active connection available to derive sibling database '{target}' from. Please specify server/connection parameter. Available: {list(_RAW_CONFIG.keys())}"
+            "message": f"No active connection available to derive sibling database '{target}' from. Please specify server/connection parameter. Available: {list(_RAW_CONFIG.keys())}",
         }
 
     try:
@@ -919,9 +915,12 @@ def use_database(
             conn.close()
         else:
             conn = pymysql.connect(
-                host=info["host"], port=info["port"], user=info["user"],
-                password=info["password"], database=info["database"],
-                connect_timeout=3
+                host=info["host"],
+                port=info["port"],
+                user=info["user"],
+                password=info["password"],
+                database=info["database"],
+                connect_timeout=3,
             )
             conn.close()
     except Exception as e:
@@ -939,7 +938,7 @@ def use_database(
         "engine": info["engine"],
         "database": info["database"],
         "host": info["host"],
-        "port": info["port"]
+        "port": info["port"],
     }
 
 
@@ -952,14 +951,16 @@ def list_databases(connection: Optional[str] = None, server: Optional[str] = Non
             conn = _get_pg_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size FROM pg_database WHERE datistemplate = false AND datname NOT IN ('cloudsqladmin') ORDER BY datname;")
+                    cur.execute(
+                        "SELECT datname, pg_size_pretty(pg_database_size(datname)) AS size FROM pg_database WHERE datistemplate = false AND datname NOT IN ('cloudsqladmin') ORDER BY datname;"
+                    )
                     rows = cur.fetchall()
                     return {
                         "server": f"{info['host']}:{info['port']}",
                         "engine": "postgres",
                         "currentDatabase": info["database"],
                         "databasesCount": len(rows),
-                        "databases": rows
+                        "databases": rows,
                     }
             finally:
                 conn.close()
@@ -974,7 +975,7 @@ def list_databases(connection: Optional[str] = None, server: Optional[str] = Non
                         "engine": "mysql",
                         "currentDatabase": info["database"],
                         "databasesCount": len(rows),
-                        "databases": rows
+                        "databases": rows,
                     }
             finally:
                 conn.close()
@@ -1011,7 +1012,7 @@ def list_schemas(connection: Optional[str] = None, server: Optional[str] = None)
                         "connection": info["name"],
                         "database": info["database"],
                         "schemaCount": len(rows),
-                        "schemas": rows
+                        "schemas": rows,
                     }
             finally:
                 conn.close()
@@ -1019,13 +1020,11 @@ def list_schemas(connection: Optional[str] = None, server: Optional[str] = None)
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT table_schema AS schema_name, count(*) AS table_count, ROUND(SUM(data_length + index_length)/1024/1024, 2) AS total_size_mb FROM information_schema.tables WHERE table_schema = DATABASE() GROUP BY table_schema;")
+                    cur.execute(
+                        "SELECT table_schema AS schema_name, count(*) AS table_count, ROUND(SUM(data_length + index_length)/1024/1024, 2) AS total_size_mb FROM information_schema.tables WHERE table_schema = DATABASE() GROUP BY table_schema;"
+                    )
                     rows = cur.fetchall()
-                    return {
-                        "connection": info["name"],
-                        "database": info["database"],
-                        "schemas": rows
-                    }
+                    return {"connection": info["name"], "database": info["database"], "schemas": rows}
             finally:
                 conn.close()
     except Exception as e:
@@ -1034,7 +1033,9 @@ def list_schemas(connection: Optional[str] = None, server: Optional[str] = None)
 
 
 @mcp.tool()
-def describe_table(tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
+def describe_table(
+    tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
+) -> Dict[str, Any]:
     """Deep inspection of a table: column types, defaults, nullability, PKs, FKs, indexes, and sizes."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -1048,38 +1049,53 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
                             "error": True,
                             "code": "42P01",
                             "message": f"Table '{tableName}' not found in schema '{resolved['schema']}' or any user schema.",
-                            "suggestion": f"Use list_schemas or search_schema(searchTerm='{tableName}') to verify table and schema names."
+                            "suggestion": f"Use list_schemas or search_schema(searchTerm='{tableName}') to verify table and schema names.",
                         }
 
                     s = resolved["schema"]
                     t = resolved["table"]
 
-                    cur.execute("SELECT column_name, data_type, character_maximum_length, is_nullable, column_default FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position", (s, t))
+                    cur.execute(
+                        "SELECT column_name, data_type, character_maximum_length, is_nullable, column_default FROM information_schema.columns WHERE table_schema = %s AND table_name = %s ORDER BY ordinal_position",
+                        (s, t),
+                    )
                     cols = cur.fetchall()
 
-                    cur.execute("SELECT kcu.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s AND tc.table_name = %s", (s, t))
+                    cur.execute(
+                        "SELECT kcu.column_name FROM information_schema.table_constraints tc JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s AND tc.table_name = %s",
+                        (s, t),
+                    )
                     pks = [r["column_name"] for r in cur.fetchall()]
 
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT kcu.column_name, ccu.table_schema AS referenced_schema, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column, rc.update_rule, rc.delete_rule, tc.constraint_name
                     FROM information_schema.table_constraints tc
                     JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
                     JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
                     JOIN information_schema.referential_constraints rc ON rc.constraint_name = tc.constraint_name
                     WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s AND tc.table_name = %s
-                    """, (s, t))
+                    """,
+                        (s, t),
+                    )
                     out_fks = cur.fetchall()
 
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT i.indexname AS index_name, i.indexdef AS definition, pg_size_pretty(pg_relation_size(to_regclass(quote_ident(i.schemaname) || '.' || quote_ident(i.indexname)))) AS index_size, s.idx_scan AS index_scans
                     FROM pg_indexes i
                     LEFT JOIN pg_stat_user_indexes s ON s.schemaname = i.schemaname AND s.relname = i.tablename AND s.indexrelname = i.indexname
                     WHERE i.schemaname = %s AND i.tablename = %s
                     ORDER BY i.indexname
-                    """, (s, t))
+                    """,
+                        (s, t),
+                    )
                     indexes = cur.fetchall()
 
-                    cur.execute("SELECT c.reltuples::bigint AS estimated_rows, pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s", (s, t))
+                    cur.execute(
+                        "SELECT c.reltuples::bigint AS estimated_rows, pg_size_pretty(pg_total_relation_size(c.oid)) AS total_size FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = %s AND c.relname = %s",
+                        (s, t),
+                    )
                     stats = cur.fetchone() or {}
 
                     return {
@@ -1093,7 +1109,7 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
                         "columns": cols,
                         "primaryKeys": pks,
                         "foreignKeys": out_fks,
-                        "indexes": indexes
+                        "indexes": indexes,
                     }
             finally:
                 conn.close()
@@ -1105,7 +1121,10 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
                     cols = cur.fetchall()
                     cur.execute(f"SHOW INDEX FROM `{tableName}`;")
                     indexes = cur.fetchall()
-                    cur.execute("SELECT table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s", (tableName,))
+                    cur.execute(
+                        "SELECT table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
+                        (tableName,),
+                    )
                     t_info = cur.fetchone() or {}
                     return {
                         "connection": info["name"],
@@ -1114,7 +1133,7 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
                         "estimatedRows": t_info.get("estimated_rows", 0),
                         "totalSizeKb": t_info.get("total_size_kb", 0),
                         "columns": cols,
-                        "indexes": indexes
+                        "indexes": indexes,
                     }
             finally:
                 conn.close()
@@ -1125,16 +1144,13 @@ def describe_table(tableName: str, schema: Optional[str] = None, connection: Opt
 
 @mcp.tool()
 def get_table_ddl(
-    tableName: str,
-    schema: Optional[str] = None,
-    connection: Optional[str] = None,
-    server: Optional[str] = None
+    tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Reconstruct and return the complete, ground-truth CREATE TABLE DDL statement for a table.
     Includes all column types, defaults, nullability, primary keys, foreign keys (with ON DELETE/ON UPDATE actions),
     unique/check constraints, and separate table indexes.
-    
+
     Args:
         tableName: Name of the table.
         schema: Optional schema name (defaults to 'public' or auto-resolves in PostgreSQL).
@@ -1152,13 +1168,14 @@ def get_table_ddl(
                         return {
                             "error": True,
                             "code": "42P01",
-                            "message": f"Table '{tableName}' not found in schema '{resolved['schema']}' or any user schema."
+                            "message": f"Table '{tableName}' not found in schema '{resolved['schema']}' or any user schema.",
                         }
                     s = resolved["schema"]
                     t = resolved["table"]
 
                     # Columns
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT
                         column_name,
                         data_type,
@@ -1171,7 +1188,9 @@ def get_table_ddl(
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position;
-                    """, (s, t))
+                    """,
+                        (s, t),
+                    )
                     cols = cur.fetchall()
                     if not cols:
                         return {"error": True, "message": f"Table '{s}.{t}' has no columns."}
@@ -1213,7 +1232,8 @@ def get_table_ddl(
                         col_defs.append("    " + " ".join(parts))
 
                     # Constraints (PK, Unique, Check, FK)
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT
                         con.conname AS constraint_name,
                         con.contype AS constraint_type,
@@ -1223,7 +1243,9 @@ def get_table_ddl(
                     JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
                     WHERE nsp.nspname = %s AND rel.relname = %s
                     ORDER BY con.contype, con.conname;
-                    """, (s, t))
+                    """,
+                        (s, t),
+                    )
                     constraints = cur.fetchall()
 
                     for con in constraints:
@@ -1235,7 +1257,8 @@ def get_table_ddl(
                     ddl = f'CREATE TABLE "{s}"."{t}" (\n{body}\n);'
 
                     # Indexes (excluding those already generated by PK/UQ constraints)
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT indexname, indexdef
                     FROM pg_indexes
                     WHERE schemaname = %s AND tablename = %s
@@ -1246,7 +1269,9 @@ def get_table_ddl(
                           WHERE nsp.nspname = %s AND rel.relname = %s AND con.contype IN ('p', 'u')
                       )
                     ORDER BY indexname;
-                    """, (s, t, s, t))
+                    """,
+                        (s, t, s, t),
+                    )
                     idx_rows = cur.fetchall()
                     indexes = [r["indexdef"] + ";" for r in idx_rows]
                     if indexes:
@@ -1262,7 +1287,7 @@ def get_table_ddl(
                         "engine": "postgres",
                         "ddl": full_ddl,
                         "indexesCount": len(indexes),
-                        "constraintsCount": len(constraints)
+                        "constraintsCount": len(constraints),
                     }
             finally:
                 conn.close()
@@ -1278,7 +1303,7 @@ def get_table_ddl(
                         "database": info["database"],
                         "table": tableName,
                         "engine": "mysql",
-                        "ddl": ddl + ";"
+                        "ddl": ddl + ";",
                     }
             finally:
                 conn.close()
@@ -1297,7 +1322,7 @@ def schema_overview(
     """
     High-level architecture map of tables, column summaries, estimated row counts, and disk sizes.
     Capped to prevent context window bloat in large enterprise databases.
-    
+
     Args:
         schema: Target schema name or 'all' (PostgreSQL). Default 'public'.
         connection: Optional connection or server name to query.
@@ -1339,7 +1364,7 @@ def schema_overview(
                         "totalTableCount": len(rows),
                         "returnedTableCount": len(display_rows),
                         "limitReached": has_more,
-                        "tables": display_rows
+                        "tables": display_rows,
                     }
                     if has_more:
                         res["notice"] = (
@@ -1353,7 +1378,9 @@ def schema_overview(
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT table_name, table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;")
+                    cur.execute(
+                        "SELECT table_name, table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;"
+                    )
                     rows = cur.fetchall()
 
                     has_more = len(rows) > safe_max
@@ -1365,7 +1392,7 @@ def schema_overview(
                         "totalTableCount": len(rows),
                         "returnedTableCount": len(display_rows),
                         "limitReached": has_more,
-                        "tables": display_rows
+                        "tables": display_rows,
                     }
                     if has_more:
                         res["notice"] = (
@@ -1385,13 +1412,13 @@ def compact_schema_overview(
     schema: Optional[str] = "public",
     connection: Optional[str] = None,
     server: Optional[str] = None,
-    max_tables: int = 80
+    max_tables: int = 80,
 ) -> Dict[str, Any]:
     """
     Token-optimized compact schema overview returning ultra-concise 1-line table definitions.
     Example: '• props_management.materials (id: uuid PK, material_number: varchar UQ, department_id: uuid FK->departments)'
     Condenses 50+ enterprise tables into <1000 tokens to protect context windows.
-    
+
     Args:
         schema: Target schema name or 'all' (PostgreSQL, default: 'public').
         connection: Optional target database connection or server alias.
@@ -1430,7 +1457,8 @@ def compact_schema_overview(
                     for tbl in display_tables:
                         s_name = tbl["schema"]
                         t_name = tbl["table_name"]
-                        cur.execute("""
+                        cur.execute(
+                            """
                         SELECT
                             c.column_name,
                             c.data_type,
@@ -1452,7 +1480,9 @@ def compact_schema_overview(
                         FROM information_schema.columns c
                         WHERE c.table_schema = %s AND c.table_name = %s
                         ORDER BY c.ordinal_position;
-                        """, (s_name, t_name, s_name, t_name, s_name, t_name))
+                        """,
+                            (s_name, t_name, s_name, t_name, s_name, t_name),
+                        )
                         cols = cur.fetchall()
 
                         parts = []
@@ -1468,7 +1498,7 @@ def compact_schema_overview(
                             elif ctype == "f":
                                 fk = col.get("fk_def") or ""
                                 m = re.search(r"REFERENCES\s+([^\s\(]+)", fk, re.IGNORECASE)
-                                ref_target = m.group(1).replace('"', '') if m else "FK"
+                                ref_target = m.group(1).replace('"', "") if m else "FK"
                                 tag = f" FK->{ref_target}"
                             parts.append(f"{c_name}: {c_type}{tag}")
 
@@ -1481,7 +1511,7 @@ def compact_schema_overview(
                         "totalTables": len(tables),
                         "returnedTables": len(compact_lines),
                         "truncated": has_more,
-                        "compactSummary": compact_lines
+                        "compactSummary": compact_lines,
                     }
             finally:
                 conn.close()
@@ -1489,7 +1519,9 @@ def compact_schema_overview(
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;")
+                    cur.execute(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() ORDER BY table_name;"
+                    )
                     tables = [r.get("table_name") or r.get("TABLE_NAME") for r in cur.fetchall()]
 
                     display_tables = tables[:safe_max]
@@ -1519,7 +1551,7 @@ def compact_schema_overview(
                         "totalTables": len(tables),
                         "returnedTables": len(compact_lines),
                         "truncated": len(tables) > safe_max,
-                        "compactSummary": compact_lines
+                        "compactSummary": compact_lines,
                     }
             finally:
                 conn.close()
@@ -1535,12 +1567,12 @@ def get_table_sample(
     schema: Optional[str] = None,
     mask_sensitive: bool = True,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Fetch sample rows from a table along with column metadata and row count estimate.
     Automatically masks PII and credentials (passwords, tokens, keys) unless mask_sensitive=False.
-    
+
     Args:
         tableName: Name of the table to sample.
         limit: Number of sample rows to retrieve (default 5, max 100).
@@ -1569,7 +1601,7 @@ def get_table_sample(
                         "schema": s,
                         "maskedSensitiveData": mask_sensitive,
                         "sampleCount": len(cleaned_rows),
-                        "sampleRows": cleaned_rows
+                        "sampleRows": cleaned_rows,
                     }
             finally:
                 conn.close()
@@ -1586,7 +1618,7 @@ def get_table_sample(
                         "table": tableName,
                         "maskedSensitiveData": mask_sensitive,
                         "sampleCount": len(cleaned_rows),
-                        "sampleRows": cleaned_rows
+                        "sampleRows": cleaned_rows,
                     }
             finally:
                 conn.close()
@@ -1601,7 +1633,7 @@ def search_schema(
     schema: Optional[str] = "all",
     max_results: int = 50,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Search across tables and column names for a keyword with safety limits to protect context window."""
     safe_max = min(max(1, max_results), 100)
@@ -1613,7 +1645,11 @@ def search_schema(
             try:
                 with conn.cursor() as cur:
                     is_all = (schema or "all").lower() == "all"
-                    cond = "table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')" if is_all else "table_schema = %s"
+                    cond = (
+                        "table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
+                        if is_all
+                        else "table_schema = %s"
+                    )
                     sql = f"""
                     SELECT 'column' AS match_type, table_schema, table_name, column_name AS match_name, data_type AS details
                     FROM information_schema.columns WHERE {cond} AND (column_name ILIKE %s OR table_name ILIKE %s)
@@ -1632,7 +1668,7 @@ def search_schema(
                         "connection": info["name"],
                         "matchesCount": len(display_rows),
                         "has_more": has_more,
-                        "matches": display_rows
+                        "matches": display_rows,
                     }
                     if has_more:
                         res["notice"] = (
@@ -1663,7 +1699,7 @@ def search_schema(
                         "connection": info["name"],
                         "matchesCount": len(display_rows),
                         "has_more": has_more,
-                        "matches": display_rows
+                        "matches": display_rows,
                     }
                     if has_more:
                         res["notice"] = (
@@ -1685,12 +1721,12 @@ def read_query(
     limit: int = 50,
     max_cell_chars: int = 500,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Safely execute a read-only SELECT query inside a read-only transaction with automatic rollback and token-safe pagination.
     Forwards native PostgreSQL / MySQL error diagnostics directly upon error.
-    
+
     Args:
         sql: SELECT SQL query.
         params: Optional query parameters.
@@ -1790,13 +1826,13 @@ def execute_query(
     params: Optional[List[Any]] = None,
     dry_run: bool = False,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute INSERT, UPDATE, DELETE, or DDL statement(s).
     Supports transactional multi-statement batch execution with statement-by-statement progress,
     exact line/statement failure diagnostics, and dry_run rollback support.
-    
+
     Args:
         sql: SQL statement or semicolon-separated batch (e.g. CREATE TABLE ...; ALTER TABLE ...;).
         params: Optional parameter list for single statements (e.g. [123, "active"]).
@@ -1840,15 +1876,11 @@ def execute_query(
                             "dryRun": True,
                             "status": "SUCCESS (ROLLED BACK)",
                             "rowCount": rowcount,
-                            "statusMessage": status
+                            "statusMessage": status,
                         }
                     else:
                         conn.commit()
-                        return {
-                            "connection": info["name"],
-                            "status": status,
-                            "rowCount": rowcount
-                        }
+                        return {"connection": info["name"], "status": status, "rowCount": rowcount}
             except (psycopg2.Error, Exception) as e:
                 try:
                     conn.rollback()
@@ -1878,15 +1910,11 @@ def execute_query(
                             "connection": info["name"],
                             "dryRun": True,
                             "status": "SUCCESS (ROLLED BACK)",
-                            "rowCount": rowcount
+                            "rowCount": rowcount,
                         }
                     else:
                         cur.execute("COMMIT;")
-                        return {
-                            "connection": info["name"],
-                            "status": "SUCCESS",
-                            "rowCount": rowcount
-                        }
+                        return {"connection": info["name"], "status": "SUCCESS", "rowCount": rowcount}
             except (pymysql.Error, Exception) as e:
                 try:
                     conn.rollback()
@@ -1914,12 +1942,14 @@ def execute_query(
                         cur.execute(stmt)
                         rc = cur.rowcount if cur.rowcount != -1 else 0
                         total_rows_affected += rc
-                        executed_statements.append({
-                            "statement_index": idx + 1,
-                            "snippet": stmt[:80] + ("..." if len(stmt) > 80 else ""),
-                            "status": cur.statusmessage or "OK",
-                            "rows_affected": rc
-                        })
+                        executed_statements.append(
+                            {
+                                "statement_index": idx + 1,
+                                "snippet": stmt[:80] + ("..." if len(stmt) > 80 else ""),
+                                "status": cur.statusmessage or "OK",
+                                "rows_affected": rc,
+                            }
+                        )
                     except (psycopg2.Error, Exception) as stmt_err:
                         conn.rollback()
                         err_res = _format_db_error(stmt_err, "postgres", stmt, statement_idx=idx + 1)
@@ -1938,7 +1968,7 @@ def execute_query(
                         "status": "BATCH SUCCESS (ROLLED BACK)",
                         "total_statements": len(statements),
                         "total_rows_affected": total_rows_affected,
-                        "executed_statements": executed_statements
+                        "executed_statements": executed_statements,
                     }
                 else:
                     conn.commit()
@@ -1948,7 +1978,7 @@ def execute_query(
                         "status": "BATCH SUCCESS",
                         "total_statements": len(statements),
                         "total_rows_affected": total_rows_affected,
-                        "executed_statements": executed_statements
+                        "executed_statements": executed_statements,
                     }
         finally:
             conn.close()
@@ -1968,12 +1998,14 @@ def execute_query(
                         cur.execute(stmt)
                         rc = cur.rowcount if cur.rowcount != -1 else 0
                         total_rows_affected += rc
-                        executed_statements.append({
-                            "statement_index": idx + 1,
-                            "snippet": stmt[:80] + ("..." if len(stmt) > 80 else ""),
-                            "status": "OK",
-                            "rows_affected": rc
-                        })
+                        executed_statements.append(
+                            {
+                                "statement_index": idx + 1,
+                                "snippet": stmt[:80] + ("..." if len(stmt) > 80 else ""),
+                                "status": "OK",
+                                "rows_affected": rc,
+                            }
+                        )
                     except (pymysql.Error, Exception) as stmt_err:
                         cur.execute("ROLLBACK;")
                         err_res = _format_db_error(stmt_err, "mysql", stmt, statement_idx=idx + 1)
@@ -1992,7 +2024,7 @@ def execute_query(
                         "status": "BATCH SUCCESS (ROLLED BACK)",
                         "total_statements": len(statements),
                         "total_rows_affected": total_rows_affected,
-                        "executed_statements": executed_statements
+                        "executed_statements": executed_statements,
                     }
                 else:
                     cur.execute("COMMIT;")
@@ -2002,14 +2034,16 @@ def execute_query(
                         "status": "BATCH SUCCESS",
                         "total_statements": len(statements),
                         "total_rows_affected": total_rows_affected,
-                        "executed_statements": executed_statements
+                        "executed_statements": executed_statements,
                     }
         finally:
             conn.close()
 
 
 @mcp.tool()
-def explain_query(sql: str, analyze: bool = True, connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
+def explain_query(
+    sql: str, analyze: bool = True, connection: Optional[str] = None, server: Optional[str] = None
+) -> Dict[str, Any]:
     """Run EXPLAIN on a SQL statement to inspect execution plan and costs."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2024,7 +2058,11 @@ def explain_query(sql: str, analyze: bool = True, connection: Optional[str] = No
 
         try:
             with conn.cursor() as cur:
-                exp = f"EXPLAIN (ANALYZE, BUFFERS, COSTS, VERBOSE, FORMAT JSON) {sql}" if analyze else f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {sql}"
+                exp = (
+                    f"EXPLAIN (ANALYZE, BUFFERS, COSTS, VERBOSE, FORMAT JSON) {sql}"
+                    if analyze
+                    else f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {sql}"
+                )
                 cur.execute(exp)
                 res = cur.fetchone()
                 return {"connection": info["name"], "plan": res[list(res.keys())[0]]}
@@ -2075,7 +2113,9 @@ def get_database_stats(connection: Optional[str] = None, server: Optional[str] =
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS db_size_mb FROM information_schema.tables WHERE table_schema = DATABASE();")
+                    cur.execute(
+                        "SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS db_size_mb FROM information_schema.tables WHERE table_schema = DATABASE();"
+                    )
                     size_res = cur.fetchone() or {}
                     cur.execute("SELECT VERSION() as version;")
                     ver_res = cur.fetchone() or {}
@@ -2084,8 +2124,8 @@ def get_database_stats(connection: Optional[str] = None, server: Optional[str] =
                         "stats": {
                             "database": info["database"],
                             "sizeMb": size_res.get("db_size_mb", 0),
-                            "version": ver_res.get("version")
-                        }
+                            "version": ver_res.get("version"),
+                        },
                     }
             finally:
                 conn.close()
@@ -2111,9 +2151,12 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
             conn.close()
         else:
             conn = pymysql.connect(
-                host=info["host"], port=info["port"], user=info["user"],
-                password=info["password"], database=info["database"],
-                connect_timeout=3
+                host=info["host"],
+                port=info["port"],
+                user=info["user"],
+                password=info["password"],
+                database=info["database"],
+                connect_timeout=3,
             )
             conn.close()
 
@@ -2127,7 +2170,7 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
         return {
             "success": True,
             "message": f"Connection '{name}' ({info['engine']}) successfully connected and registered.",
-            "isActive": _ACTIVE_CONNECTION == name
+            "isActive": _ACTIVE_CONNECTION == name,
         }
     except Exception as e:
         return _format_db_error(e)
@@ -2137,8 +2180,15 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
 # DBA & DATABASE MANAGEMENT TOOLS
 # ==========================================
 
+
 @mcp.tool()
-def create_database(database: str, server: Optional[str] = None, connection: Optional[str] = None, encoding: Optional[str] = None, template: Optional[str] = None) -> Dict[str, Any]:
+def create_database(
+    database: str,
+    server: Optional[str] = None,
+    connection: Optional[str] = None,
+    encoding: Optional[str] = None,
+    template: Optional[str] = None,
+) -> Dict[str, Any]:
     """Create a new database on the active (or specified) PostgreSQL or MySQL server instance."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2161,7 +2211,12 @@ def create_database(database: str, server: Optional[str] = None, connection: Opt
             u = urlparse(info["url"])
             new_url = f"{u.scheme}://{u.netloc}/{database}"
             _RAW_CONFIG[database] = new_url
-            return {"success": True, "message": f"Database '{database}' successfully created on PostgreSQL server ({info['host']}:{info['port']}).", "database": database, "engine": "postgres"}
+            return {
+                "success": True,
+                "message": f"Database '{database}' successfully created on PostgreSQL server ({info['host']}:{info['port']}).",
+                "database": database,
+                "engine": "postgres",
+            }
         else:
             conn = _get_mysql_client(info)
             db_esc = database.replace("`", "``")
@@ -2177,22 +2232,41 @@ def create_database(database: str, server: Optional[str] = None, connection: Opt
             u = urlparse(info["url"])
             new_url = f"{u.scheme}://{u.netloc}/{database}"
             _RAW_CONFIG[database] = new_url
-            return {"success": True, "message": f"Database '{database}' successfully created on MySQL server ({info['host']}:{info['port']}).", "database": database, "engine": "mysql"}
+            return {
+                "success": True,
+                "message": f"Database '{database}' successfully created on MySQL server ({info['host']}:{info['port']}).",
+                "database": database,
+                "engine": "mysql",
+            }
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
         return _format_db_error(e, engine)
 
 
 @mcp.tool()
-def drop_database(database: str, confirmName: str, force: bool = False, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def drop_database(
+    database: str, confirmName: str, force: bool = False, server: Optional[str] = None, connection: Optional[str] = None
+) -> Dict[str, Any]:
     """Safely drop a database. Requires exact 'confirmName' matching the database name. Supports 'force' to kill active connections."""
     global _ACTIVE_CONNECTION
-    protected = {"postgres", "template0", "template1", "mysql", "information_schema", "performance_schema", "sys", "cloudsqladmin"}
+    protected = {
+        "postgres",
+        "template0",
+        "template1",
+        "mysql",
+        "information_schema",
+        "performance_schema",
+        "sys",
+        "cloudsqladmin",
+    }
     if database.lower() in protected:
         return {"error": True, "message": f"Forbidden: Cannot drop protected system database '{database}'."}
 
     if confirmName != database:
-        return {"error": True, "message": f"Safety Confirmation Failed: 'confirmName' ({confirmName}) does not match 'database' ({database}). You must pass confirmName='{database}' to explicitly confirm deletion."}
+        return {
+            "error": True,
+            "message": f"Safety Confirmation Failed: 'confirmName' ({confirmName}) does not match 'database' ({database}). You must pass confirmName='{database}' to explicitly confirm deletion.",
+        }
 
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2211,14 +2285,21 @@ def drop_database(database: str, confirmName: str, force: bool = False, server: 
             try:
                 with admin_conn.cursor() as cur:
                     if force:
-                        cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();", (database,))
+                        cur.execute(
+                            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();",
+                            (database,),
+                        )
                         cur.execute(f'DROP DATABASE IF EXISTS "{db_esc}" WITH (FORCE);')
                     else:
                         cur.execute(f'DROP DATABASE "{db_esc}";')
             finally:
                 admin_conn.close()
 
-            return {"success": True, "message": f"Database '{database}' successfully dropped on PostgreSQL server ({info['host']}:{info['port']}).", "activeConnectionNow": _ACTIVE_CONNECTION}
+            return {
+                "success": True,
+                "message": f"Database '{database}' successfully dropped on PostgreSQL server ({info['host']}:{info['port']}).",
+                "activeConnectionNow": _ACTIVE_CONNECTION,
+            }
         else:
             conn = _get_mysql_client(info)
             db_esc = database.replace("`", "``")
@@ -2228,14 +2309,20 @@ def drop_database(database: str, confirmName: str, force: bool = False, server: 
             finally:
                 conn.close()
 
-            return {"success": True, "message": f"Database '{database}' successfully dropped on MySQL server ({info['host']}:{info['port']}).", "activeConnectionNow": _ACTIVE_CONNECTION}
+            return {
+                "success": True,
+                "message": f"Database '{database}' successfully dropped on MySQL server ({info['host']}:{info['port']}).",
+                "activeConnectionNow": _ACTIVE_CONNECTION,
+            }
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
         return _format_db_error(e, engine)
 
 
 @mcp.tool()
-def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def clone_database(
+    sourceDatabase: str, targetDatabase: str, server: Optional[str] = None, connection: Optional[str] = None
+) -> Dict[str, Any]:
     """Instantly clone an entire database (schema, tables, indexes, data). Uses native template cloning in PostgreSQL."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2250,7 +2337,10 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
                         cur.execute(f'ALTER DATABASE "{src_esc}" WITH ALLOW_CONNECTIONS = false;')
                     except Exception:
                         pass
-                    cur.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();", (sourceDatabase,))
+                    cur.execute(
+                        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();",
+                        (sourceDatabase,),
+                    )
                     cur.execute(f'CREATE DATABASE "{tgt_esc}" WITH TEMPLATE "{src_esc}";')
             finally:
                 try:
@@ -2263,7 +2353,12 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
             u = urlparse(info["url"])
             new_url = f"{u.scheme}://{u.netloc}/{targetDatabase}"
             _RAW_CONFIG[targetDatabase] = new_url
-            return {"success": True, "message": f"Database '{sourceDatabase}' cloned to '{targetDatabase}' successfully via native template cloning.", "source": sourceDatabase, "target": targetDatabase}
+            return {
+                "success": True,
+                "message": f"Database '{sourceDatabase}' cloned to '{targetDatabase}' successfully via native template cloning.",
+                "source": sourceDatabase,
+                "target": targetDatabase,
+            }
         else:
             conn = _get_mysql_client(info)
             src_esc = sourceDatabase.replace("`", "``")
@@ -2271,7 +2366,9 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
             try:
                 with conn.cursor() as cur:
                     cur.execute(f"CREATE DATABASE IF NOT EXISTS `{tgt_esc}`;")
-                    cur.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = %s;", (sourceDatabase,))
+                    cur.execute(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema = %s;", (sourceDatabase,)
+                    )
                     tables = [r.get("table_name", next(iter(r.values()))) for r in cur.fetchall()]
                     for t in tables:
                         t_esc = str(t).replace("`", "``")
@@ -2283,14 +2380,21 @@ def clone_database(sourceDatabase: str, targetDatabase: str, server: Optional[st
             u = urlparse(info["url"])
             new_url = f"{u.scheme}://{u.netloc}/{targetDatabase}"
             _RAW_CONFIG[targetDatabase] = new_url
-            return {"success": True, "message": f"Database '{sourceDatabase}' cloned to '{targetDatabase}' successfully ({len(tables)} tables copied).", "source": sourceDatabase, "target": targetDatabase}
+            return {
+                "success": True,
+                "message": f"Database '{sourceDatabase}' cloned to '{targetDatabase}' successfully ({len(tables)} tables copied).",
+                "source": sourceDatabase,
+                "target": targetDatabase,
+            }
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
         return _format_db_error(e, engine)
 
 
 @mcp.tool()
-def terminate_connections(database: str, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def terminate_connections(
+    database: str, server: Optional[str] = None, connection: Optional[str] = None
+) -> Dict[str, Any]:
     """Kill active client connections or hanging locks on a specific database."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2299,7 +2403,10 @@ def terminate_connections(database: str, server: Optional[str] = None, connectio
             admin_conn.autocommit = True
             try:
                 with admin_conn.cursor() as cur:
-                    cur.execute("SELECT pid, usename, client_addr, application_name, pg_terminate_backend(pid) as terminated FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();", (database,))
+                    cur.execute(
+                        "SELECT pid, usename, client_addr, application_name, pg_terminate_backend(pid) as terminated FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();",
+                        (database,),
+                    )
                     res = cur.fetchall()
                     return {"database": database, "terminatedCount": len(res), "sessions": res}
             finally:
@@ -2308,7 +2415,10 @@ def terminate_connections(database: str, server: Optional[str] = None, connectio
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE FROM information_schema.processlist WHERE DB = %s;", (database,))
+                    cur.execute(
+                        "SELECT ID, USER, HOST, DB, COMMAND, TIME, STATE FROM information_schema.processlist WHERE DB = %s;",
+                        (database,),
+                    )
                     processes = cur.fetchall()
                     killed = 0
                     for p in processes:
@@ -2326,7 +2436,9 @@ def terminate_connections(database: str, server: Optional[str] = None, connectio
 
 
 @mcp.tool()
-def list_active_queries(database: Optional[str] = None, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def list_active_queries(
+    database: Optional[str] = None, server: Optional[str] = None, connection: Optional[str] = None
+) -> Dict[str, Any]:
     """Inspect currently executing queries, lock waits, and execution durations."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2352,7 +2464,9 @@ def list_active_queries(database: Optional[str] = None, server: Optional[str] = 
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT ID as pid, USER as usename, HOST as client_addr, DB as datname, COMMAND as state, TIME as duration_seconds, INFO as query FROM information_schema.processlist WHERE COMMAND <> 'Sleep' ORDER BY TIME DESC;")
+                    cur.execute(
+                        "SELECT ID as pid, USER as usename, HOST as client_addr, DB as datname, COMMAND as state, TIME as duration_seconds, INFO as query FROM information_schema.processlist WHERE COMMAND <> 'Sleep' ORDER BY TIME DESC;"
+                    )
                     rows = cur.fetchall()
                     return {"activeQueryCount": len(rows), "queries": rows}
             finally:
@@ -2363,7 +2477,13 @@ def list_active_queries(database: Optional[str] = None, server: Optional[str] = 
 
 
 @mcp.tool()
-def dump_database(database: Optional[str] = None, outputPath: Optional[str] = None, schemaOnly: bool = False, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def dump_database(
+    database: Optional[str] = None,
+    outputPath: Optional[str] = None,
+    schemaOnly: bool = False,
+    server: Optional[str] = None,
+    connection: Optional[str] = None,
+) -> Dict[str, Any]:
     """Export an SQL dump snapshot of the database using native pg_dump or mysqldump."""
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2373,16 +2493,23 @@ def dump_database(database: Optional[str] = None, outputPath: Optional[str] = No
         backup_dir.mkdir(parents=True, exist_ok=True)
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        out_file = Path(outputPath) if outputPath else backup_dir / f"{target_db}_{'schema_' if schemaOnly else ''}{ts}.sql"
+        out_file = (
+            Path(outputPath) if outputPath else backup_dir / f"{target_db}_{'schema_' if schemaOnly else ''}{ts}.sql"
+        )
 
         if info["engine"] == "postgres":
             cmd = [
                 "pg_dump",
-                "-h", str(info["host"]),
-                "-p", str(info["port"]),
-                "-U", str(info["user"]),
-                "-d", target_db,
-                "-f", str(out_file),
+                "-h",
+                str(info["host"]),
+                "-p",
+                str(info["port"]),
+                "-U",
+                str(info["user"]),
+                "-d",
+                target_db,
+                "-f",
+                str(out_file),
             ]
             if schemaOnly:
                 cmd.append("--schema-only")
@@ -2401,17 +2528,21 @@ def dump_database(database: Optional[str] = None, outputPath: Optional[str] = No
                 "message": f"PostgreSQL database '{target_db}' successfully dumped to '{out_file}'.",
                 "outputPath": str(out_file),
                 "sizeKb": size_kb,
-                "schemaOnly": schemaOnly
+                "schemaOnly": schemaOnly,
             }
         else:
             cmd = [
                 "mysqldump",
-                "-h", str(info["host"]),
-                "-P", str(info["port"]),
-                "-u", str(info["user"]),
+                "-h",
+                str(info["host"]),
+                "-P",
+                str(info["port"]),
+                "-u",
+                str(info["user"]),
                 f"-p{info['password']}",
                 target_db,
-                "-r", str(out_file),
+                "-r",
+                str(out_file),
             ]
             if schemaOnly:
                 cmd.append("--no-data")
@@ -2426,7 +2557,7 @@ def dump_database(database: Optional[str] = None, outputPath: Optional[str] = No
                 "message": f"MySQL database '{target_db}' successfully dumped to '{out_file}'.",
                 "outputPath": str(out_file),
                 "sizeKb": size_kb,
-                "schemaOnly": schemaOnly
+                "schemaOnly": schemaOnly,
             }
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
@@ -2434,7 +2565,9 @@ def dump_database(database: Optional[str] = None, outputPath: Optional[str] = No
 
 
 @mcp.tool()
-def restore_database(database: str, dumpFilePath: str, server: Optional[str] = None, connection: Optional[str] = None) -> Dict[str, Any]:
+def restore_database(
+    database: str, dumpFilePath: str, server: Optional[str] = None, connection: Optional[str] = None
+) -> Dict[str, Any]:
     """Restore a database from a .sql dump file using native psql or mysql."""
     fpath = Path(dumpFilePath)
     if not fpath.exists():
@@ -2445,11 +2578,16 @@ def restore_database(database: str, dumpFilePath: str, server: Optional[str] = N
         if info["engine"] == "postgres":
             cmd = [
                 "psql",
-                "-h", str(info["host"]),
-                "-p", str(info["port"]),
-                "-U", str(info["user"]),
-                "-d", database,
-                "-f", str(fpath),
+                "-h",
+                str(info["host"]),
+                "-p",
+                str(info["port"]),
+                "-U",
+                str(info["user"]),
+                "-d",
+                database,
+                "-f",
+                str(fpath),
             ]
             env = os.environ.copy()
             if info["password"]:
@@ -2461,14 +2599,17 @@ def restore_database(database: str, dumpFilePath: str, server: Optional[str] = N
 
             return {
                 "success": True,
-                "message": f"PostgreSQL database '{database}' successfully restored from '{dumpFilePath}'."
+                "message": f"PostgreSQL database '{database}' successfully restored from '{dumpFilePath}'.",
             }
         else:
             cmd = [
                 "mysql",
-                "-h", str(info["host"]),
-                "-P", str(info["port"]),
-                "-u", str(info["user"]),
+                "-h",
+                str(info["host"]),
+                "-P",
+                str(info["port"]),
+                "-u",
+                str(info["user"]),
             ]
             if info.get("password"):
                 cmd.append(f"-p{info['password']}")
@@ -2483,7 +2624,7 @@ def restore_database(database: str, dumpFilePath: str, server: Optional[str] = N
             return {
                 "success": True,
                 "message": f"MySQL database '{database}' successfully restored from '{dumpFilePath}'.",
-                "dumpFilePath": str(fpath)
+                "dumpFilePath": str(fpath),
             }
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
@@ -2494,19 +2635,17 @@ def restore_database(database: str, dumpFilePath: str, server: Optional[str] = N
 # 6. ADVANCED DATABASE INDEX & SCHEMA AUDITING TOOLS
 # ==========================================================
 
+
 @mcp.tool()
 def analyze_table_indexes(
-    tableName: str,
-    schema: Optional[str] = None,
-    connection: Optional[str] = None,
-    server: Optional[str] = None
+    tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Perform deep index analysis on a database table.
     Identifies defined indexes, primary keys, unindexed foreign keys
     (unindexed FKs cause full table scans during joins and cascaded deletes),
     and unused indexes.
-    
+
     Args:
         tableName: Name of the table.
         schema: Target schema (Postgres). If None, auto-resolved.
@@ -2524,17 +2663,21 @@ def analyze_table_indexes(
                     t = resolved["table"]
 
                     # 1. Fetch Foreign Keys
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT kcu.column_name, tc.constraint_name, ccu.table_name AS referenced_table, ccu.column_name AS referenced_column
                     FROM information_schema.table_constraints tc
                     JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
                     JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
                     WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s AND tc.table_name = %s
-                    """, (s, t))
+                    """,
+                        (s, t),
+                    )
                     fks = cur.fetchall()
 
                     # 2. Fetch Indexes with sizes and scan counts
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT
                         i.relname AS index_name,
                         pg_get_indexdef(i.oid) AS definition,
@@ -2549,7 +2692,9 @@ def analyze_table_indexes(
                     LEFT JOIN pg_stat_user_indexes s ON s.indexrelid = i.oid
                     WHERE n.nspname = %s AND t.relname = %s
                     ORDER BY i.relname
-                    """, (s, t))
+                    """,
+                        (s, t),
+                    )
                     indexes = cur.fetchall()
 
                     # Extract indexed leading columns
@@ -2566,16 +2711,17 @@ def analyze_table_indexes(
                     for fk in fks:
                         col = fk["column_name"]
                         if col not in indexed_cols:
-                            missing_fk_indexes.append({
-                                "column": col,
-                                "constraint": fk["constraint_name"],
-                                "referenced_table": fk["referenced_table"],
-                                "recommended_sql": f'CREATE INDEX idx_{t}_{col} ON "{s}"."{t}" ("{col}");'
-                            })
+                            missing_fk_indexes.append(
+                                {
+                                    "column": col,
+                                    "constraint": fk["constraint_name"],
+                                    "referenced_table": fk["referenced_table"],
+                                    "recommended_sql": f'CREATE INDEX idx_{t}_{col} ON "{s}"."{t}" ("{col}");',
+                                }
+                            )
 
                     unused_indexes = [
-                        idx["index_name"] for idx in indexes
-                        if not idx["is_primary"] and idx["index_scans"] == 0
+                        idx["index_name"] for idx in indexes if not idx["is_primary"] and idx["index_scans"] == 0
                     ]
 
                     return {
@@ -2587,7 +2733,7 @@ def analyze_table_indexes(
                         "indexes": indexes,
                         "missing_fk_indexes": missing_fk_indexes,
                         "unused_indexes": unused_indexes,
-                        "status": "warning" if missing_fk_indexes else "healthy"
+                        "status": "warning" if missing_fk_indexes else "healthy",
                     }
             finally:
                 conn.close()
@@ -2598,15 +2744,19 @@ def analyze_table_indexes(
                     cur.execute(f"SHOW INDEX FROM `{tableName}`;")
                     raw_indexes = cur.fetchall()
 
-                    cur.execute("""
+                    cur.execute(
+                        """
                     SELECT COLUMN_NAME, CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
                     FROM information_schema.KEY_COLUMN_USAGE
                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND REFERENCED_TABLE_NAME IS NOT NULL
-                    """, (tableName,))
+                    """,
+                        (tableName,),
+                    )
                     fks = cur.fetchall()
 
                     indexed_leading_cols = {
-                        idx["Column_name"] for idx in raw_indexes
+                        idx["Column_name"]
+                        for idx in raw_indexes
                         if idx.get("Seq_in_index") == 1 and "Column_name" in idx
                     }
 
@@ -2614,12 +2764,15 @@ def analyze_table_indexes(
                     for fk in fks:
                         col = fk.get("COLUMN_NAME") or fk.get("column_name")
                         if col and col not in indexed_leading_cols:
-                            missing_fk.append({
-                                "column": col,
-                                "constraint": fk.get("CONSTRAINT_NAME") or fk.get("constraint_name"),
-                                "referenced_table": fk.get("REFERENCED_TABLE_NAME") or fk.get("referenced_table_name"),
-                                "recommended_sql": f"CREATE INDEX `idx_{tableName}_{col}` ON `{tableName}` (`{col}`);"
-                            })
+                            missing_fk.append(
+                                {
+                                    "column": col,
+                                    "constraint": fk.get("CONSTRAINT_NAME") or fk.get("constraint_name"),
+                                    "referenced_table": fk.get("REFERENCED_TABLE_NAME")
+                                    or fk.get("referenced_table_name"),
+                                    "recommended_sql": f"CREATE INDEX `idx_{tableName}_{col}` ON `{tableName}` (`{col}`);",
+                                }
+                            )
 
                     return {
                         "connection": info["name"],
@@ -2628,7 +2781,7 @@ def analyze_table_indexes(
                         "total_indexes": len(raw_indexes),
                         "indexes": raw_indexes,
                         "missing_fk_indexes": missing_fk,
-                        "status": "warning" if missing_fk else "healthy"
+                        "status": "warning" if missing_fk else "healthy",
                     }
             finally:
                 conn.close()
@@ -2643,12 +2796,12 @@ def compare_schemas(
     target_connection: Optional[str] = None,
     schema: Optional[str] = "public",
     source_server: Optional[str] = None,
-    target_server: Optional[str] = None
+    target_server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Compare table structures, missing tables, missing columns, and data type discrepancies between two database connections.
     Ideal for detecting environment drift (e.g. dev vs staging vs prod).
-    
+
     Args:
         source_connection: Baseline source connection or server name.
         target_connection: Target connection or server name to compare against.
@@ -2661,10 +2814,11 @@ def compare_schemas(
     if not src_name or not tgt_name:
         return {
             "error": True,
-            "message": "Both source_connection (or source_server) and target_connection (or target_server) must be specified."
+            "message": "Both source_connection (or source_server) and target_connection (or target_server) must be specified.",
         }
 
     try:
+
         def _fetch_table_cols(conn_name: str) -> Dict[str, Dict[str, str]]:
             inf = _get_connection(conn_name)
             tbl_map: Dict[str, Dict[str, str]] = {}
@@ -2672,15 +2826,20 @@ def compare_schemas(
                 cn = _get_pg_client(inf)
                 try:
                     with cn.cursor() as cur:
-                        cur.execute("""
+                        cur.execute(
+                            """
                         SELECT table_name, column_name, data_type, is_nullable
                         FROM information_schema.columns
                         WHERE table_schema = %s
                         ORDER BY table_name, ordinal_position
-                        """, (schema or "public",))
+                        """,
+                            (schema or "public",),
+                        )
                         for r in cur.fetchall():
                             tbl = r["table_name"]
-                            tbl_map.setdefault(tbl, {})[r["column_name"]] = f"{r['data_type']} ({'NULL' if r['is_nullable'] == 'YES' else 'NOT NULL'})"
+                            tbl_map.setdefault(tbl, {})[r["column_name"]] = (
+                                f"{r['data_type']} ({'NULL' if r['is_nullable'] == 'YES' else 'NOT NULL'})"
+                            )
                 finally:
                     cn.close()
             else:
@@ -2698,7 +2857,9 @@ def compare_schemas(
                             c_name = r.get("COLUMN_NAME") or r.get("column_name")
                             c_type = r.get("COLUMN_TYPE") or r.get("column_type")
                             null_s = r.get("IS_NULLABLE") or r.get("is_nullable")
-                            tbl_map.setdefault(t_name, {})[c_name] = f"{c_type} ({'NULL' if null_s == 'YES' else 'NOT NULL'})"
+                            tbl_map.setdefault(t_name, {})[c_name] = (
+                                f"{c_type} ({'NULL' if null_s == 'YES' else 'NOT NULL'})"
+                            )
                 finally:
                     cn.close()
             return tbl_map
@@ -2725,21 +2886,19 @@ def compare_schemas(
             extra_cols = sorted(list(t_col_set - s_col_set))
             type_mismatches = []
 
-            for c in (s_col_set & t_col_set):
+            for c in s_col_set & t_col_set:
                 if s_cols[c] != t_cols[c]:
-                    type_mismatches.append({
-                        "column": c,
-                        "source_type": s_cols[c],
-                        "target_type": t_cols[c]
-                    })
+                    type_mismatches.append({"column": c, "source_type": s_cols[c], "target_type": t_cols[c]})
 
             if missing_cols or extra_cols or type_mismatches:
-                discrepancies.append({
-                    "table": tbl,
-                    "missing_columns_in_target": missing_cols,
-                    "extra_columns_in_target": extra_cols,
-                    "type_mismatches": type_mismatches
-                })
+                discrepancies.append(
+                    {
+                        "table": tbl,
+                        "missing_columns_in_target": missing_cols,
+                        "extra_columns_in_target": extra_cols,
+                        "type_mismatches": type_mismatches,
+                    }
+                )
 
         # Generate migration SQL to bring target up to source
         migration_sql: List[str] = []
@@ -2747,10 +2906,7 @@ def compare_schemas(
 
         for tbl in missing_in_target:
             migration_sql.append(f"-- Table '{tbl}' exists in source but not in target")
-            cols_ddl = ", ".join(
-                f"{col} {typ.split(' (')[0]}"
-                for col, typ in source_tables[tbl].items()
-            )
+            cols_ddl = ", ".join(f"{col} {typ.split(' (')[0]}" for col, typ in source_tables[tbl].items())
             migration_sql.append(f"CREATE TABLE {sch}.{tbl} ({cols_ddl});")
 
         for disc in discrepancies:
@@ -2758,18 +2914,14 @@ def compare_schemas(
             for col in disc["missing_columns_in_target"]:
                 raw_type = source_tables[tbl][col].split(" (")[0]
                 nullable = "NOT NULL" if "NOT NULL" in source_tables[tbl][col] else ""
-                migration_sql.append(
-                    f"ALTER TABLE {sch}.{tbl} ADD COLUMN {col} {raw_type} {nullable}".strip() + ";"
-                )
+                migration_sql.append(f"ALTER TABLE {sch}.{tbl} ADD COLUMN {col} {raw_type} {nullable}".strip() + ";")
             for mm in disc["type_mismatches"]:
                 src_type = mm["source_type"].split(" (")[0]
                 migration_sql.append(
                     f"-- Type mismatch on {tbl}.{mm['column']}: "
                     f"source={src_type}, target={mm['target_type'].split(' (')[0]}"
                 )
-                migration_sql.append(
-                    f"ALTER TABLE {sch}.{tbl} ALTER COLUMN {mm['column']} TYPE {src_type};"
-                )
+                migration_sql.append(f"ALTER TABLE {sch}.{tbl} ALTER COLUMN {mm['column']} TYPE {src_type};")
 
         return {
             "source_connection": src_name,
@@ -2783,8 +2935,9 @@ def compare_schemas(
             "migration_sql": migration_sql,
             "migration_sql_hint": (
                 "Apply migration_sql statements to bring the target schema up to source."
-                if migration_sql else "Schemas are identical — no migration needed."
-            )
+                if migration_sql
+                else "Schemas are identical — no migration needed."
+            ),
         }
     except Exception as e:
         return _format_db_error(e)
@@ -2792,9 +2945,7 @@ def compare_schemas(
 
 @mcp.tool()
 def audit_database_health(
-    schema: Optional[str] = "public",
-    connection: Optional[str] = None,
-    server: Optional[str] = None
+    schema: Optional[str] = "public", connection: Optional[str] = None, server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Comprehensive database-wide health audit for PostgreSQL.
@@ -2851,7 +3002,7 @@ def audit_database_health(
                         "table": r["table_name"],
                         "column": r["column_name"],
                         "references": f"{r['references_table']}.{r['references_column']}",
-                        "fix": f"CREATE INDEX ON {r['table_schema']}.{r['table_name']}({r['column_name']});"
+                        "fix": f"CREATE INDEX ON {r['table_schema']}.{r['table_name']}({r['column_name']});",
                     }
                     for r in cur.fetchall()
                 ]
@@ -2877,7 +3028,7 @@ def audit_database_health(
                         "index": r["index_name"],
                         "scans": r["idx_scan"],
                         "size": r["index_size"],
-                        "fix": f"DROP INDEX CONCURRENTLY {r['schemaname']}.{r['index_name']};"
+                        "fix": f"DROP INDEX CONCURRENTLY {r['schemaname']}.{r['index_name']};",
                     }
                     for r in cur.fetchall()
                 ]
@@ -2912,7 +3063,7 @@ def audit_database_health(
                         "size": r["table_size"],
                         "last_autovacuum": str(r["last_autovacuum"]) if r["last_autovacuum"] else None,
                         "last_vacuum": str(r["last_vacuum"]) if r["last_vacuum"] else None,
-                        "fix": f"VACUUM ANALYZE {r['schemaname']}.{r['table_name']};"
+                        "fix": f"VACUUM ANALYZE {r['schemaname']}.{r['table_name']};",
                     }
                     for r in cur.fetchall()
                 ]
@@ -2929,23 +3080,22 @@ def audit_database_health(
                     "summary": {
                         "unindexed_foreign_keys": len(unindexed_fks),
                         "unused_indexes": len(unused_indexes),
-                        "bloated_tables": len(bloated_tables)
+                        "bloated_tables": len(bloated_tables),
                     },
                     "unindexed_foreign_keys": unindexed_fks,
                     "unused_indexes": unused_indexes,
                     "bloated_tables": bloated_tables,
                     "hint": (
                         "Each finding includes a 'fix' field with the recommended SQL statement."
-                        if overall == "warnings_found" else
-                        "No health issues detected in the audited schema."
-                    )
+                        if overall == "warnings_found"
+                        else "No health issues detected in the audited schema."
+                    ),
                 }
         finally:
             conn.close()
     except Exception as e:
         engine = info.get("engine", "unknown") if "info" in locals() else "unknown"
         return _format_db_error(e, engine)
-
 
 
 def _clean_mermaid_type(data_type: str) -> str:
@@ -2964,7 +3114,7 @@ def _clean_mermaid_type(data_type: str) -> str:
         return "uuid"
     if "json" in dt:
         return "json"
-    clean = re.sub(r'[^a-zA-Z0-9_]', '_', dt)
+    clean = re.sub(r"[^a-zA-Z0-9_]", "_", dt)
     return clean or "string"
 
 
@@ -2988,13 +3138,13 @@ def generate_erd(
     tables: Optional[List[str]] = None,
     include_columns: bool = True,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate an Entity-Relationship Diagram (ERD) in GitHub/Mermaid markdown syntax.
     Extracts all tables, columns, primary keys, and foreign key relationships directly
     from database catalog metadata.
-    
+
     Args:
         schema: Target schema (PostgreSQL) or database (MySQL). If None, uses active/public schema.
         tables: Optional list of table names to filter ERD scope (e.g. ['materials', 'props_inventory']).
@@ -3013,7 +3163,8 @@ def generate_erd(
             try:
                 with conn.cursor() as cur:
                     target_schema = schema.strip() if schema else "public"
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT 
                             tc.table_schema, 
                             tc.table_name, 
@@ -3028,10 +3179,13 @@ def generate_erd(
                         JOIN information_schema.constraint_column_usage ccu
                           ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
                         WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = %s
-                    """, (target_schema,))
+                    """,
+                        (target_schema,),
+                    )
                     fks = cur.fetchall()
 
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT c.table_schema, c.table_name, c.column_name, c.data_type,
                                CASE WHEN pk.column_name IS NOT NULL THEN TRUE ELSE FALSE END as is_pk
                         FROM information_schema.columns c
@@ -3043,7 +3197,9 @@ def generate_erd(
                         ) pk ON pk.table_schema = c.table_schema AND pk.table_name = c.table_name AND pk.column_name = c.column_name
                         WHERE c.table_schema = %s
                         ORDER BY c.table_name, c.ordinal_position;
-                    """, (target_schema, target_schema))
+                    """,
+                        (target_schema, target_schema),
+                    )
                     all_cols = cur.fetchall()
             finally:
                 conn.close()
@@ -3052,7 +3208,8 @@ def generate_erd(
             try:
                 with conn.cursor() as cur:
                     target_schema = schema.strip() if schema else info["database"]
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT 
                             TABLE_SCHEMA as table_schema,
                             TABLE_NAME as table_name,
@@ -3063,16 +3220,21 @@ def generate_erd(
                             CONSTRAINT_NAME as constraint_name
                         FROM information_schema.KEY_COLUMN_USAGE
                         WHERE REFERENCED_TABLE_NAME IS NOT NULL AND TABLE_SCHEMA = %s
-                    """, (target_schema,))
+                    """,
+                        (target_schema,),
+                    )
                     fks = cur.fetchall()
 
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT c.TABLE_SCHEMA as table_schema, c.TABLE_NAME as table_name, c.COLUMN_NAME as column_name, c.DATA_TYPE as data_type,
                                CASE WHEN c.COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END as is_pk
                         FROM information_schema.COLUMNS c
                         WHERE c.TABLE_SCHEMA = %s
                         ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
-                    """, (target_schema,))
+                    """,
+                        (target_schema,),
+                    )
                     all_cols = cur.fetchall()
             finally:
                 conn.close()
@@ -3130,7 +3292,7 @@ def generate_erd(
             "tables_count": len(table_cols_map),
             "foreign_keys_count": len(filtered_fks),
             "mermaid": mermaid_str,
-            "markdown": f"```mermaid\n{mermaid_str}\n```"
+            "markdown": f"```mermaid\n{mermaid_str}\n```",
         }
     except Exception as e:
         return _format_db_error(e, info.get("engine", "unknown"))
@@ -3145,13 +3307,13 @@ def diff_data(
     schema2: Optional[str] = None,
     connection1: Optional[str] = None,
     connection2: Optional[str] = None,
-    max_differences: int = 100
+    max_differences: int = 100,
 ) -> Dict[str, Any]:
     """
     Compare row data between two tables (or across schemas/connections).
     Identifies rows only in source, rows only in target, and rows with modified values
     with column-by-column diffs.
-    
+
     Args:
         table1: Source table name (e.g. 'materials').
         table2: Target table name. If omitted, defaults to table1 (useful for comparing across schemas/connections).
@@ -3185,12 +3347,15 @@ def diff_data(
                     s1 = res1["schema"]
                     t1 = res1["table"]
                     if not key_columns:
-                        cur1.execute("""
+                        cur1.execute(
+                            """
                             SELECT kcu.column_name
                             FROM information_schema.table_constraints tc
                             JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
                             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = %s AND tc.table_name = %s
-                        """, (s1, t1))
+                        """,
+                            (s1, t1),
+                        )
                         pks1 = [r["column_name"] for r in cur1.fetchall()]
                     cur1.execute(f'SELECT * FROM "{s1}"."{t1}" LIMIT 50000;')
                     rows1 = cur1.fetchall()
@@ -3243,7 +3408,7 @@ def diff_data(
     if not resolved_keys:
         return {
             "error": True,
-            "message": f"Table '{table1}' has no primary key. Please specify 'key_columns' explicitly for comparison."
+            "message": f"Table '{table1}' has no primary key. Please specify 'key_columns' explicitly for comparison.",
         }
 
     # Index by key
@@ -3257,8 +3422,12 @@ def diff_data(
     missing_in_source_keys = keys2 - keys1
     common_keys = keys1 & keys2
 
-    missing_in_target = [{k: _serialize_db_val(v) for k, v in map1[k].items()} for k in list(missing_in_target_keys)[:max_differences]]
-    missing_in_source = [{k: _serialize_db_val(v) for k, v in map2[k].items()} for k in list(missing_in_source_keys)[:max_differences]]
+    missing_in_target = [
+        {k: _serialize_db_val(v) for k, v in map1[k].items()} for k in list(missing_in_target_keys)[:max_differences]
+    ]
+    missing_in_source = [
+        {k: _serialize_db_val(v) for k, v in map2[k].items()} for k in list(missing_in_source_keys)[:max_differences]
+    ]
 
     modified_rows = []
     identical_count = 0
@@ -3291,21 +3460,18 @@ def diff_data(
         "missing_in_source_count": len(missing_in_source_keys),
         "modified_rows_sample": modified_rows,
         "missing_in_target_sample": missing_in_target,
-        "missing_in_source_sample": missing_in_source
+        "missing_in_source_sample": missing_in_source,
     }
 
 
 @mcp.tool()
 def list_slow_queries(
-    limit: int = 20,
-    min_duration_ms: float = 100.0,
-    connection: Optional[str] = None,
-    server: Optional[str] = None
+    limit: int = 20, min_duration_ms: float = 100.0, connection: Optional[str] = None, server: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Inspect slow database queries using pg_stat_statements / pg_stat_activity (PostgreSQL)
     or performance_schema / processlist (MySQL).
-    
+
     Args:
         limit: Maximum number of slow queries to return (default: 20).
         min_duration_ms: Minimum execution time threshold in milliseconds (default: 100.0).
@@ -3330,7 +3496,8 @@ def list_slow_queries(
                         pass
 
                     if has_pg_stat:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             SELECT 
                                 query, 
                                 calls, 
@@ -3342,7 +3509,9 @@ def list_slow_queries(
                             WHERE mean_exec_time >= %s
                             ORDER BY total_exec_time DESC
                             LIMIT %s;
-                        """, (min_duration_ms, limit))
+                        """,
+                            (min_duration_ms, limit),
+                        )
                         queries = cur.fetchall()
                         return {
                             "connection": info["name"],
@@ -3356,13 +3525,14 @@ def list_slow_queries(
                                     "total_time_ms": float(q["total_time_ms"]),
                                     "mean_time_ms": float(q["mean_time_ms"]),
                                     "max_time_ms": float(q["max_time_ms"]),
-                                    "rows": q["total_rows"]
+                                    "rows": q["total_rows"],
                                 }
                                 for q in queries
-                            ]
+                            ],
                         }
                     else:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             SELECT 
                                 pid, 
                                 usename, 
@@ -3377,7 +3547,9 @@ def list_slow_queries(
                               AND query NOT ILIKE '%%pg_stat_activity%%'
                             ORDER BY query_start ASC
                             LIMIT %s;
-                        """, (limit,))
+                        """,
+                            (limit,),
+                        )
                         queries = cur.fetchall()
                         return {
                             "connection": info["name"],
@@ -3393,10 +3565,10 @@ def list_slow_queries(
                                     "application": q["application_name"],
                                     "duration_ms": float(q["duration_ms"]) if q["duration_ms"] else 0,
                                     "state": q["state"],
-                                    "query": q["query"]
+                                    "query": q["query"],
                                 }
                                 for q in queries
-                            ]
+                            ],
                         }
             finally:
                 conn.close()
@@ -3405,7 +3577,8 @@ def list_slow_queries(
             try:
                 with conn.cursor() as cur:
                     try:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             SELECT 
                                 DIGEST_TEXT AS query, 
                                 COUNT_STAR AS calls, 
@@ -3417,14 +3590,16 @@ def list_slow_queries(
                             WHERE (AVG_TIMER_WAIT / 1000000000) >= %s
                             ORDER BY SUM_TIMER_WAIT DESC
                             LIMIT %s;
-                        """, (min_duration_ms, limit))
+                        """,
+                            (min_duration_ms, limit),
+                        )
                         queries = cur.fetchall()
                         return {
                             "connection": info["name"],
                             "engine": "mysql",
                             "source": "performance_schema",
                             "queries_count": len(queries),
-                            "slow_queries": queries
+                            "slow_queries": queries,
                         }
                     except Exception:
                         cur.execute("SHOW FULL PROCESSLIST;")
@@ -3434,7 +3609,7 @@ def list_slow_queries(
                             "engine": "mysql",
                             "source": "processlist",
                             "queries_count": len(procs),
-                            "active_queries": procs
+                            "active_queries": procs,
                         }
             finally:
                 conn.close()
@@ -3443,14 +3618,11 @@ def list_slow_queries(
 
 
 @mcp.tool()
-def get_locks(
-    connection: Optional[str] = None,
-    server: Optional[str] = None
-) -> Dict[str, Any]:
+def get_locks(connection: Optional[str] = None, server: Optional[str] = None) -> Dict[str, Any]:
     """
     Inspect active database locks and query blocking dependency trees.
     Reveals hanging transactions, blocking PIDs, locked tables, and lock wait times.
-    
+
     Args:
         connection: Optional connection name or URL.
         server: Optional server or connection alias.
@@ -3506,16 +3678,19 @@ def get_locks(
                                 "blocking_pid": b["blocking_pid"],
                                 "blocking_user": b["blocking_user"],
                                 "blocked_statement": b["blocked_statement"][:200] if b["blocked_statement"] else None,
-                                "blocking_statement": b["blocking_statement"][:200] if b["blocking_statement"] else None,
-                                "blocked_duration_ms": float(b["blocked_duration_ms"]) if b["blocked_duration_ms"] else 0,
-                                "kill_command": f"SELECT pg_terminate_backend({b['blocking_pid']});"
+                                "blocking_statement": b["blocking_statement"][:200]
+                                if b["blocking_statement"]
+                                else None,
+                                "blocked_duration_ms": float(b["blocked_duration_ms"])
+                                if b["blocked_duration_ms"]
+                                else 0,
+                                "kill_command": f"SELECT pg_terminate_backend({b['blocking_pid']});",
                             }
                             for b in blockings
                         ],
                         "active_locks_summary": [
-                            {"lock_type": l["locktype"], "mode": l["mode"], "count": l["count"]}
-                            for l in lock_counts
-                        ]
+                            {"lock_type": l["locktype"], "mode": l["mode"], "count": l["count"]} for l in lock_counts
+                        ],
                     }
             finally:
                 conn.close()
@@ -3541,14 +3716,14 @@ def get_locks(
                             "connection": info["name"],
                             "engine": "mysql",
                             "blocking_count": len(blocks),
-                            "blocking_trees": blocks
+                            "blocking_trees": blocks,
                         }
                     except Exception:
                         return {
                             "connection": info["name"],
                             "engine": "mysql",
                             "blocking_count": 0,
-                            "message": "No lock contention detected."
+                            "message": "No lock contention detected.",
                         }
             finally:
                 conn.close()
@@ -3564,12 +3739,12 @@ def export_table(
     is_query: bool = False,
     schema: Optional[str] = None,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Export an entire table or SQL query result directly to a file (CSV, JSON, or TSV) on disk.
     Executes in streaming batches without loading intermediate records into LLM context.
-    
+
     Args:
         table_or_query: Table name (e.g. 'materials') or raw SQL query if is_query=True.
         output_path: Destination file path (e.g. 'exports/materials.csv').
@@ -3604,7 +3779,7 @@ def export_table(
 
                     cur.execute(sql)
                     col_names = [d[0] for d in cur.description] if cur.description else []
-                    
+
                     rows_count = 0
                     if fmt == "json":
                         with open(target_file, "w", encoding="utf-8") as f:
@@ -3643,7 +3818,7 @@ def export_table(
                     sql = table_or_query if is_query else f"SELECT * FROM `{table_or_query}`;"
                     cur.execute(sql)
                     col_names = [d[0] for d in cur.description] if cur.description else []
-                    
+
                     rows_count = 0
                     if fmt == "json":
                         with open(target_file, "w", encoding="utf-8") as f:
@@ -3681,7 +3856,7 @@ def export_table(
             "output_path": str(target_file),
             "rows_exported": rows_count,
             "columns": col_names,
-            "file_size_bytes": target_file.stat().st_size
+            "file_size_bytes": target_file.stat().st_size,
         }
     except Exception as e:
         return _format_db_error(e, info.get("engine", "unknown"), table_or_query)
@@ -3698,12 +3873,12 @@ def import_csv(
     batch_size: int = 1000,
     dry_run: bool = False,
     connection: Optional[str] = None,
-    server: Optional[str] = None
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Bulk import a CSV file directly into a database table with batching and transaction safety.
     Supports dry-run validation (checks all rows against constraints, then safely rolls back).
-    
+
     Args:
         table_name: Destination database table name.
         csv_path: Path to the source CSV file.
@@ -3737,7 +3912,7 @@ def import_csv(
             return {"status": "success", "message": "CSV contained headers but no data rows.", "rows_inserted": 0}
 
         quoted_cols = ", ".join(f'"{h.strip()}"' for h in headers)
-        
+
         if info["engine"] == "postgres":
             conn = _get_pg_client(info)
             try:
@@ -3754,11 +3929,11 @@ def import_csv(
                     insert_sql = f"INSERT INTO {full_tbl} ({quoted_cols}) VALUES ({placeholders}){conflict_clause}"
 
                     cleaned_rows = [
-                        [None if (val is None or str(val).strip() == "") else val for val in row]
-                        for row in rows
+                        [None if (val is None or str(val).strip() == "") else val for val in row] for row in rows
                     ]
 
                     from psycopg2.extras import execute_batch
+
                     execute_batch(cur, insert_sql, cleaned_rows, page_size=batch_size)
 
                     if dry_run:
@@ -3769,7 +3944,7 @@ def import_csv(
                             "table": full_tbl,
                             "rows_validated": len(cleaned_rows),
                             "columns": headers,
-                            "dry_run": True
+                            "dry_run": True,
                         }
                     else:
                         conn.commit()
@@ -3779,7 +3954,7 @@ def import_csv(
                             "table": full_tbl,
                             "rows_inserted": len(cleaned_rows),
                             "columns": headers,
-                            "dry_run": False
+                            "dry_run": False,
                         }
             except Exception as e:
                 conn.rollback()
@@ -3795,14 +3970,13 @@ def import_csv(
                     if if_exists.lower() == "truncate" and not dry_run:
                         cur.execute(f"TRUNCATE TABLE `{t}`;")
 
-                    mysql_cols = ", ".join(f'`{h.strip()}`' for h in headers)
+                    mysql_cols = ", ".join(f"`{h.strip()}`" for h in headers)
                     placeholders = ", ".join(["%s"] * len(headers))
                     verb = "INSERT IGNORE INTO" if on_conflict.lower() == "ignore" else "INSERT INTO"
                     insert_sql = f"{verb} `{t}` ({mysql_cols}) VALUES ({placeholders})"
 
                     cleaned_rows = [
-                        [None if (val is None or str(val).strip() == "") else val for val in row]
-                        for row in rows
+                        [None if (val is None or str(val).strip() == "") else val for val in row] for row in rows
                     ]
 
                     cur.executemany(insert_sql, cleaned_rows)
@@ -3815,7 +3989,7 @@ def import_csv(
                             "table": t,
                             "rows_validated": len(cleaned_rows),
                             "columns": headers,
-                            "dry_run": True
+                            "dry_run": True,
                         }
                     else:
                         conn.commit()
@@ -3825,7 +3999,7 @@ def import_csv(
                             "table": t,
                             "rows_inserted": len(cleaned_rows),
                             "columns": headers,
-                            "dry_run": False
+                            "dry_run": False,
                         }
             except Exception as e:
                 conn.rollback()

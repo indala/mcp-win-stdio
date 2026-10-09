@@ -25,7 +25,9 @@ def get_git_prerequisites_status() -> dict:
 
     if gh_bin:
         try:
-            res = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+            res = subprocess.run(
+                ["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+            )
             out = res.stderr or res.stdout
             if "Logged in to" in out:
                 gh_logged_in = True
@@ -38,7 +40,9 @@ def get_git_prerequisites_status() -> dict:
 
     if git_bin and gh_bin:
         try:
-            helper_res = subprocess.run(["git", "config", "--get-all", "credential.helper"], capture_output=True, text=True)
+            helper_res = subprocess.run(
+                ["git", "config", "--get-all", "credential.helper"], capture_output=True, text=True
+            )
             if "gh" in helper_res.stdout:
                 cred_helper_linked = True
         except Exception:
@@ -141,7 +145,9 @@ def print_git_guide() -> None:
     print("-" * 80)
     print("  1. 'Give me a 360-degree overview of the current repo, open PRs, and recent CI runs using repo_overview.'")
     print("  2. 'Pick up issue #12, check its details, and create a local branch using issue_start_work.'")
-    print("  3. 'Stage all modified files, commit with message \"feat: new feature\", push, and open a PR with pr_quickstart.'")
+    print(
+        "  3. 'Stage all modified files, commit with message \"feat: new feature\", push, and open a PR with pr_quickstart.'"
+    )
     print("  4. 'Switch active GitHub account to my work account using gh_switch_account.'")
     print("=" * 80 + "\n")
 

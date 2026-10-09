@@ -6,10 +6,10 @@ import argparse
 import importlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Ensure Windows console uses UTF-8 without crashing on cp1252
@@ -24,16 +24,24 @@ if sys.platform == "win32":
 _repo_packages = Path(__file__).resolve().parent.parent.parent / "packages"
 if _repo_packages.is_dir():
     import pkgutil
+
     for _sub in _repo_packages.glob("*/src"):
         _s = str(_sub.resolve())
         if _s not in sys.path:
             sys.path.insert(0, _s)
     if "mcp_win_stdio" in sys.modules:
-        sys.modules["mcp_win_stdio"].__path__ = pkgutil.extend_path(sys.modules["mcp_win_stdio"].__path__, "mcp_win_stdio")
+        sys.modules["mcp_win_stdio"].__path__ = pkgutil.extend_path(
+            sys.modules["mcp_win_stdio"].__path__, "mcp_win_stdio"
+        )
 
 from mcp_win_stdio import __version__
-from mcp_win_stdio.core.config import INDALA_DIR, PLUGINS_DIR, ensure_workspace_dirs, load_config, save_config
+from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
 from mcp_win_stdio.core.discovery import BUILTIN_SERVERS, get_server_info, list_available_servers
+from mcp_win_stdio.core.environment import (
+    check_and_prompt_path_setup,
+    get_candidate_script_dirs,
+    is_in_path,
+)
 from mcp_win_stdio.core.installer import (
     generate_claude_cli_command,
     generate_claude_desktop_snippet,
@@ -51,14 +59,6 @@ from mcp_win_stdio.core.updater import (
     format_update_banner,
     get_cached_or_latest_version,
 )
-from mcp_win_stdio.core.environment import (
-    add_dir_to_user_path,
-    check_and_prompt_path_setup,
-    get_candidate_script_dirs,
-    is_in_path,
-)
-
-
 
 
 def print_dashboard() -> None:
@@ -77,13 +77,15 @@ def print_dashboard() -> None:
     # Check if Python Scripts directory is missing from PATH and prompt user
     check_and_prompt_path_setup()
 
-    print(f"\n" + "=" * 76)
+    print("\n" + "=" * 76)
 
     print(f"   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v{__version__})")
     print("=" * 76)
+    desktop_status = str(desktop_cfg) if desktop_cfg else r"Not detected (%APPDATA%\Claude)"
+    cli_status = str(cli_cfg) if cli_cfg else "Not detected (~/.claude.json)"
     print(f" Single-Source Hub:      {INDALA_DIR}")
-    print(f" Claude Desktop Config:  {desktop_cfg or 'Not detected (%APPDATA%\\Claude)'}")
-    print(f" Claude Code CLI Config: {cli_cfg or 'Not detected (~/.claude.json)'}")
+    print(f" Claude Desktop Config:  {desktop_status}")
+    print(f" Claude Code CLI Config: {cli_status}")
     print("-" * 76)
 
     print(f"{'SERVER':<12} {'STATUS':<16} {'TOOLS':<8} {'DESCRIPTION'}")
@@ -109,7 +111,6 @@ def print_dashboard() -> None:
     print("   mws run <server>           -> Launch MCP server over stdio")
     print("   mws list                   -> List all servers and custom plugins")
     print("=" * 76 + "\n")
-
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -190,10 +191,25 @@ def cmd_install(args: argparse.Namespace) -> None:
             print("  [5] db        -> pip install mcp-win-stdio-db (PostgreSQL & MySQL DBA manager)")
             print("  [6] git       -> pip install mcp-win-stdio-git (Local Git + GitHub CLI)")
             print("  [7] ssh       -> pip install mcp-win-stdio-ssh (Multi-host SSH, PTY, SFTP, Tunnels)")
-            print("  [8] all       -> pip install \"mcp-win-stdio[all]\" (All 7 servers)")
-            print("  [9] Exit")
-            choice = input("\nEnter choice (1-9) [default: 8]: ").strip() or "8"
-            mapping = {"1": "excel", "2": "word", "3": "explorer", "4": "tsc", "5": "db", "6": "git", "7": "ssh", "8": "all"}
+            print("  [8] rag       -> pip install mcp-win-stdio-rag (Playwright crawler, graph trees, hybrid search)")
+            print(
+                "  [9] excel-db  -> pip install mcp-win-stdio-excel-db (Zero-context streaming, cross-joins, diff auditor)"
+            )
+            print('  [10] all      -> pip install "mcp-win-stdio[all]" (All 9 servers)')
+            print("  [11] Exit")
+            choice = input("\nEnter choice (1-11) [default: 10]: ").strip() or "10"
+            mapping = {
+                "1": "excel",
+                "2": "word",
+                "3": "explorer",
+                "4": "tsc",
+                "5": "db",
+                "6": "git",
+                "7": "ssh",
+                "8": "rag",
+                "9": "excel-db",
+                "10": "all",
+            }
             if choice not in mapping:
                 print("Installation cancelled.")
                 return
@@ -201,7 +217,7 @@ def cmd_install(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    selected_servers = ["excel", "word", "explorer", "tsc", "db", "git", "ssh"] if target == "all" else [target]
+    selected_servers = list(BUILTIN_SERVERS.keys()) if target == "all" else [target]
 
     if target == "all":
         print("\n==> 🚀 Installing full suite via 'pip install \"mcp-win-stdio[all]\"'...")
@@ -231,8 +247,12 @@ def cmd_install(args: argparse.Namespace) -> None:
         if not name_check or not email_check:
             print("\n[WARN] Git author identity is not configured.")
             if sys.stdin.isatty():
-                u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (name_check or "Developer")
-                u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (email_check or "developer@example.com")
+                u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (
+                    name_check or "Developer"
+                )
+                u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (
+                    email_check or "developer@example.com"
+                )
                 subprocess.run(["git", "config", "--global", "user.name", u_name])
                 subprocess.run(["git", "config", "--global", "user.email", u_email])
                 print(f"[OK] Configured Git author: {u_name} <{u_email}>")
@@ -249,7 +269,6 @@ def cmd_install(args: argparse.Namespace) -> None:
     check_and_prompt_path_setup()
 
     print("\n✅ Installation complete! Run 'mws list' to verify status or 'mws setup <server>' to configure Claude.\n")
-
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
@@ -271,8 +290,12 @@ def cmd_setup(args: argparse.Namespace) -> None:
             print("  [5] db        (31 tools: Polyglot PostgreSQL & MySQL DBA manager, ERDs, diffs, locks, imports)")
             print("  [6] git       (46 tools: Local Git branching, commits, diffs, conflicts, & GitHub PRs/issues)")
             print("  [7] ssh       (34 tools: Multi-host pooling, SFTP, interactive PTY shells, background jobs)")
-            print("  [8] rag       (8 tools: Headless Playwright crawler, codebase indexer, hybrid BM25 + vector search)")
-            print("  [9] excel-db  (9 tools: Zero-context streaming, master dataset audit diffs, transactional migrations)")
+            print(
+                "  [8] rag       (8 tools: Headless Playwright crawler, codebase indexer, hybrid BM25 + vector search)"
+            )
+            print(
+                "  [9] excel-db  (9 tools: Zero-context streaming, master dataset audit diffs, transactional migrations)"
+            )
             print("  [10] all      (Configure all 9 servers)")
             print("  [11] Exit")
             choice = input("\nEnter choice (1-11) [default: 10]: ").strip() or "10"
@@ -303,7 +326,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
             print(f"\n[ERROR] Unknown server: '{srv_name}'. Run 'mws list' to see available servers.")
             continue
 
-        print(f"\n" + "=" * 70)
+        print("\n" + "=" * 70)
         print(f"  Configuration Setup for: {srv['title']}")
         print("=" * 70)
 
@@ -313,7 +336,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
             req_pip = srv.get("required_pip", [])
             print(f"\n[INFO] '{srv_name}' requires the following Python packages: {', '.join(req_pip)}")
             if sys.stdin.isatty():
-                do_install = input(f"Would you like to install them now via pip? [Y/n]: ").strip().lower()
+                do_install = input("Would you like to install them now via pip? [Y/n]: ").strip().lower()
                 if do_install not in ("n", "no"):
                     ok, msg = install_pip_dependencies(req_pip)
                     if ok:
@@ -327,7 +350,10 @@ def cmd_setup(args: argparse.Namespace) -> None:
         if srv_name == "tsc":
             default_dir = os.getcwd()
             if sys.stdin.isatty():
-                chosen_dir = input(f"\nEnter TypeScript project directory to watch [default: {default_dir}]: ").strip() or default_dir
+                chosen_dir = (
+                    input(f"\nEnter TypeScript project directory to watch [default: {default_dir}]: ").strip()
+                    or default_dir
+                )
             else:
                 chosen_dir = default_dir
             env_vars["TSC_WATCH_DIR"] = os.path.abspath(chosen_dir)
@@ -359,8 +385,12 @@ def cmd_setup(args: argparse.Namespace) -> None:
             if not name_check or not email_check:
                 print("\n[WARN] Git author identity is not configured.")
                 if sys.stdin.isatty():
-                    u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (name_check or "Developer")
-                    u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (email_check or "developer@example.com")
+                    u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (
+                        name_check or "Developer"
+                    )
+                    u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (
+                        email_check or "developer@example.com"
+                    )
                     subprocess.run(["git", "config", "--global", "user.name", u_name])
                     subprocess.run(["git", "config", "--global", "user.email", u_email])
                     print(f"[OK] Configured Git author: {u_name} <{u_email}>")
@@ -386,7 +416,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
                 if res.returncode == 0:
                     print("[OK] Playwright Chromium browser is installed and ready.")
                 else:
-                    print("[WARN] Could not install Playwright Chromium automatically. Run 'playwright install chromium' manually.")
+                    print(
+                        "[WARN] Could not install Playwright Chromium automatically. Run 'playwright install chromium' manually."
+                    )
             except Exception as e:
                 print(f"[WARN] Failed to run playwright install: {e}")
 
@@ -398,7 +430,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
         print("\n" + "-" * 70)
         print("📋 Claude Desktop Configuration:")
         print("File: %APPDATA%\\Claude\\claude_desktop_config.json")
-        print("Add this snippet inside your \"mcpServers\" object:\n")
+        print('Add this snippet inside your "mcpServers" object:\n')
         print(snippet_json)
 
         print("\n" + "-" * 70)
@@ -409,7 +441,9 @@ def cmd_setup(args: argparse.Namespace) -> None:
 
         # 3. Optional Safe Auto-Write
         if sys.stdin.isatty():
-            auto_apply = input("\n👉 Would you like mws to safely write this configuration for you? [y/N]: ").strip().lower()
+            auto_apply = (
+                input("\n👉 Would you like mws to safely write this configuration for you? [y/N]: ").strip().lower()
+            )
             if auto_apply in ("y", "yes"):
                 if client in ("all", "desktop"):
                     ok, msg = safe_apply_to_desktop(srv_name, env_vars if env_vars else None)
@@ -433,7 +467,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     target = args.server.lower()
     client = args.client.lower()
 
-    servers_to_remove = ["excel", "word", "explorer", "tsc", "db", "git", "ssh"] if target == "all" else [target]
+    servers_to_remove = list(BUILTIN_SERVERS.keys()) if target == "all" else [target]
 
     for srv_name in servers_to_remove:
         print(f"\nRemoving '{srv_name}'...")
@@ -474,7 +508,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     if res.returncode == 0:
         print("\n✅ Update completed successfully!\n")
     else:
-        print("\n[WARN] Update process completed with return code: {res.returncode}\n")
+        print(f"\n[WARN] Update process completed with return code: {res.returncode}\n")
 
 
 def cmd_uninstall(args: argparse.Namespace) -> None:
@@ -517,7 +551,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    known_servers = ["excel", "word", "explorer", "tsc", "db", "git", "ssh", "rag", "excel-db"]
+    known_servers = list(BUILTIN_SERVERS.keys())
 
     if target == "self":
         print("\n==> 🧹 Uninstalling mws CLI core package (mcp-win-stdio)...")
@@ -559,14 +593,14 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     print("\n--- 3. Single-Source Hub & CLI Status ---")
     print(f"🔒 Single-source hub directory PRESERVED: {INDALA_DIR}")
     print("   (Your custom plugins, logs, and configs in ~/.mcp-win-stdio are kept safe.)")
-    print(f"⚙️  mws CLI PRESERVED (You can continue to use 'mws' to install servers or manage plugins.)")
+    print("⚙️  mws CLI PRESERVED (You can continue to use 'mws' to install servers or manage plugins.)")
     print("=" * 76)
     print("✅ Uninstallation complete!\n")
 
 
 def cmd_fix_path(args: argparse.Namespace) -> None:
     """Check and automatically configure Python Scripts / bin directories in Windows User PATH."""
-    print(f"\n=== 🧭 Windows PATH Environment Manager ===")
+    print("\n=== 🧭 Windows PATH Environment Manager ===")
     candidate_dirs = get_candidate_script_dirs()
     print("Detected Python executable script & binary directories:")
     for d in candidate_dirs:
@@ -586,7 +620,6 @@ def cmd_fix_path(args: argparse.Namespace) -> None:
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-
     """Run an MCP server over stdio."""
     server_name = args.server.lower()
     srv = get_server_info(server_name)
@@ -635,11 +668,10 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(f"[OK] Scripts Directory: {d} (in PATH)")
     for d in missing_dirs:
         print(f"[WARN] Scripts Directory: {d} (NOT in PATH)")
-        print(f"       👉 Run 'mws fix-path' to add it to your Windows User PATH automatically.")
+        print("       👉 Run 'mws fix-path' to add it to your Windows User PATH automatically.")
 
     if not candidate_dirs:
-        print(f"[INFO] Scripts Directory: No standard scripts directory detected.")
-
+        print("[INFO] Scripts Directory: No standard scripts directory detected.")
 
     # 2. Python Dependencies
     deps = [
@@ -672,6 +704,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("\n--- Microsoft Office COM Automation ---")
     try:
         import win32com.client
+
         excel_app = win32com.client.DispatchEx("Excel.Application")
         excel_ver = excel_app.Version
         excel_app.Quit()
@@ -681,6 +714,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     try:
         import win32com.client
+
         word_app = win32com.client.Dispatch("Word.Application")
         word_app.Visible = False
         word_ver = word_app.Version
@@ -720,22 +754,26 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         if name and email:
             print(f"[OK] Git Identity: {name} <{email}>")
         else:
-            print(f"[WARN] Git Identity: Not configured (missing user.name or user.email)")
-            print(f"       👉 Run: git config --global user.name \"Your Name\"")
-            print(f"       👉 Run: git config --global user.email \"you@example.com\"")
+            print("[WARN] Git Identity: Not configured (missing user.name or user.email)")
+            print('       👉 Run: git config --global user.name "Your Name"')
+            print('       👉 Run: git config --global user.email "you@example.com"')
     else:
-        print(f"[FAIL] Git CLI: Not found on PATH")
-        print(f"       👉 Install Git: winget install --id Git.Git -e")
+        print("[FAIL] Git CLI: Not found on PATH")
+        print("       👉 Install Git: winget install --id Git.Git -e")
 
     gh_bin = shutil.which("gh")
     if gh_bin:
         try:
-            ver_line = subprocess.run(["gh", "--version"], capture_output=True, text=True, check=True).stdout.splitlines()[0]
+            ver_line = subprocess.run(
+                ["gh", "--version"], capture_output=True, text=True, check=True
+            ).stdout.splitlines()[0]
             print(f"[OK] GitHub CLI: {ver_line} ({gh_bin})")
         except Exception:
             print(f"[OK] GitHub CLI: Found at {gh_bin}")
 
-        auth_res = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        auth_res = subprocess.run(
+            ["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
         auth_out = auth_res.stderr or auth_res.stdout
         if "Logged in to" in auth_out:
             first_account = [ln.strip() for ln in auth_out.splitlines() if "Logged in to" in ln]
@@ -743,14 +781,16 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             account_str = account_str.replace("✓", "").replace("âœ“", "").strip()
             print(f"[OK] GitHub Auth: Logged in ({account_str})")
         else:
-            print(f"[INFO] GitHub Auth: Not logged in (Run 'gh auth login' to connect)")
+            print("[INFO] GitHub Auth: Not logged in (Run 'gh auth login' to connect)")
     else:
-        print(f"[INFO] GitHub CLI: Not installed (optional: winget install --id GitHub.cli -e)")
+        print("[INFO] GitHub CLI: Not installed (optional: winget install --id GitHub.cli -e)")
 
     # 7. SSH Environment & Hosts
     print("\n--- SSH Environment & Hosts ---")
     ssh_bin = shutil.which("ssh")
-    print(f"[{'OK' if ssh_bin else 'INFO'}] OpenSSH Client: {ssh_bin or 'Not found on PATH (Paramiko built-in client active)'}")
+    print(
+        f"[{'OK' if ssh_bin else 'INFO'}] OpenSSH Client: {ssh_bin or 'Not found on PATH (Paramiko built-in client active)'}"
+    )
     ssh_dir = Path.home() / ".ssh"
     if ssh_dir.is_dir():
         keys = [f.name for f in ssh_dir.iterdir() if f.is_file() and not f.name.endswith(".pub") and "id_" in f.name]
@@ -759,10 +799,13 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(f"[INFO] SSH Config Directory: {ssh_dir} (empty/not yet created)")
 
     try:
-        from mcp_win_stdio.ssh.connection import get_all_registered_hosts, get_active_host_name
+        from mcp_win_stdio.ssh.connection import get_active_host_name, get_all_registered_hosts
+
         ssh_hosts = get_all_registered_hosts()
         active_ssh = get_active_host_name()
-        print(f"[OK] Registered SSH Hosts: {len(ssh_hosts)} host{'s' if len(ssh_hosts) != 1 else ''} (Active: {active_ssh or 'None'})")
+        print(
+            f"[OK] Registered SSH Hosts: {len(ssh_hosts)} host{'s' if len(ssh_hosts) != 1 else ''} (Active: {active_ssh or 'None'})"
+        )
     except Exception:
         pass
 
@@ -770,8 +813,11 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("\n--- Documentation Crawler & Browser Engine ---")
     try:
         import playwright
+
         ms_playwright_dir = Path.home() / "AppData" / "Local" / "ms-playwright"
-        chrome_shells = list(ms_playwright_dir.glob("**/chrome-headless-shell.exe")) if ms_playwright_dir.exists() else []
+        chrome_shells = (
+            list(ms_playwright_dir.glob("**/chrome-headless-shell.exe")) if ms_playwright_dir.exists() else []
+        )
         chrome_bins = list(ms_playwright_dir.glob("**/chrome.exe")) if ms_playwright_dir.exists() else []
         if chrome_shells or chrome_bins:
             chosen = chrome_shells[0] if chrome_shells else chrome_bins[0]
@@ -789,13 +835,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if desktop_cfg and desktop_cfg.exists():
         print(f"[OK] Claude Desktop: {desktop_cfg}")
     else:
-        print(f"[INFO] Claude Desktop config: {desktop_cfg or 'Not found in %APPDATA%\\Claude'}")
+        desktop_str = str(desktop_cfg) if desktop_cfg else r"Not found in %APPDATA%\Claude"
+        print(f"[INFO] Claude Desktop config: {desktop_str}")
 
     cli_cfg = get_claude_cli_config_path()
     if cli_cfg and cli_cfg.exists():
         print(f"[OK] Claude Code CLI: {cli_cfg}")
     else:
-        print(f"[INFO] Claude Code CLI config: {cli_cfg or 'Not found in ~/.claude.json'}")
+        cli_str = str(cli_cfg) if cli_cfg else "Not found in ~/.claude.json"
+        print(f"[INFO] Claude Code CLI config: {cli_str}")
 
     # 8. PyPI Version & Update Status
     print("\n--- PyPI Version & Update Status ---")
@@ -803,7 +851,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     if update_info:
         cur, latest = update_info
         print(f"[WARN] New version available on PyPI: v{cur} ➔ v{latest}")
-        print(f"       👉 Run 'mws update' or 'pip install --upgrade mcp-win-stdio' to upgrade.")
+        print("       👉 Run 'mws update' or 'pip install --upgrade mcp-win-stdio' to upgrade.")
     else:
         latest = get_cached_or_latest_version(force=True)
         print(f"[OK] mcp-win-stdio is up to date: v{__version__} (PyPI: v{latest or __version__})")
@@ -813,6 +861,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
 ALL_BUILTIN_SERVERS = ["rag", "excel-db", "excel", "db", "explorer", "git", "ssh", "tsc", "word"]
 
+
 def get_server_agents_guide(servers: List[str]) -> str:
     """Generate tailored AGENTS.md markdown guide for specific active servers."""
     lines = [
@@ -821,7 +870,7 @@ def get_server_agents_guide(servers: List[str]) -> str:
         "This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite.",
         "",
         "## 🛠️ Active Tools & Recommended Selection",
-        ""
+        "",
     ]
     guide_map = {
         "db": "* **Database Operations:** Use `db` MCP (`read_query`, `execute_query`, `describe_table`).",
@@ -832,7 +881,7 @@ def get_server_agents_guide(servers: List[str]) -> str:
         "git": "* **Git & PRs:** Use `git` MCP for status, diffs, commits, and GitHub API interactions.",
         "ssh": "* **Remote Shells:** Use `ssh` MCP for multi-host pooling and SFTP.",
         "tsc": "* **TypeScript:** Use `tsc` MCP for 0ms compiler diagnostic checks.",
-        "word": "* **Word Documents:** Use `word` MCP for typography, layout, and document generation."
+        "word": "* **Word Documents:** Use `word` MCP for typography, layout, and document generation.",
     }
     for s in servers:
         s_norm = s.lower().strip()
@@ -858,9 +907,7 @@ def _build_server_entry(s_name: str, is_vscode: bool, cwd: Path) -> Dict[str, An
     # 3. Local SQLite database auto-detection
     elif s_name in ("db", "excel-db"):
         try:
-            sqlite_candidates = [
-                f for f in cwd.glob("*.db") if f.is_file()
-            ] + [
+            sqlite_candidates = [f for f in cwd.glob("*.db") if f.is_file()] + [
                 f for f in cwd.glob("*.sqlite*") if f.is_file()
             ]
             if sqlite_candidates:
@@ -876,7 +923,9 @@ def _build_server_entry(s_name: str, is_vscode: bool, cwd: Path) -> Dict[str, An
     return entry
 
 
-def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, overwrite: bool = False, clean_deprecated_vscode: bool = True) -> Dict[str, Any]:
+def setup_project_mcp(
+    servers: List[str], target_dir: Optional[Path] = None, overwrite: bool = False, clean_deprecated_vscode: bool = True
+) -> Dict[str, Any]:
     """
     Write or update root .mcp.json and AGENTS.md in target directory with smart client environment variables.
     Handles migration and cleanup from deprecated .vscode/mcp.json (deprecated in VS Code 1.106+).
@@ -953,7 +1002,7 @@ def setup_project_mcp(servers: List[str], target_dir: Optional[Path] = None, ove
         "cwd": cwd,
         "servers": list(existing_servers.keys()),
         "migrated_from_legacy_vscode": migrated_from_legacy,
-        "config_file": str(root_file)
+        "config_file": str(root_file),
     }
 
 
@@ -1036,10 +1085,7 @@ def _get_active_python_server_entries(servers: List[str], cwd: Path) -> Dict[str
     for s in servers:
         s_norm = s.lower().strip()
         mod_name = s_norm.replace("-", "_")
-        entry: Dict[str, Any] = {
-            "command": py_exe,
-            "args": ["-m", f"mcp_win_stdio.{mod_name}"]
-        }
+        entry: Dict[str, Any] = {"command": py_exe, "args": ["-m", f"mcp_win_stdio.{mod_name}"]}
         env: Dict[str, str] = {}
         if s_norm == "tsc":
             env["TSC_WATCH_DIR"] = str(cwd)
@@ -1105,7 +1151,7 @@ def init_antigravity(servers: List[str], cwd: Path) -> Dict[str, Any]:
         "status": "Configured",
         "primary_config": str(gemini_cfg_file),
         "files_updated": updated_files,
-        "servers_count": len(servers)
+        "servers_count": len(servers),
     }
 
 
@@ -1165,7 +1211,7 @@ def init_claude(servers: List[str], cwd: Path) -> Dict[str, Any]:
         "status": "Configured",
         "primary_config": str(claude_cfg),
         "files_updated": updated_files,
-        "servers_count": len(servers)
+        "servers_count": len(servers),
     }
 
 
@@ -1174,7 +1220,13 @@ def init_copilot(servers: List[str], cwd: Path) -> Dict[str, Any]:
     updated_files = []
     code_dir = Path(os.environ.get("APPDATA", "")) / "Code"
     copilot_home = Path.home() / ".copilot"
-    detected = code_dir.exists() or copilot_home.exists() or bool(shutil.which("code")) or bool(shutil.which("code.cmd")) or bool(shutil.which("gh"))
+    detected = (
+        code_dir.exists()
+        or copilot_home.exists()
+        or bool(shutil.which("code"))
+        or bool(shutil.which("code.cmd"))
+        or bool(shutil.which("gh"))
+    )
 
     copilot_home.mkdir(parents=True, exist_ok=True)
     copilot_cfg = copilot_home / "mcp-config.json"
@@ -1210,7 +1262,7 @@ def init_copilot(servers: List[str], cwd: Path) -> Dict[str, Any]:
         "status": "Configured",
         "primary_config": str(copilot_cfg),
         "files_updated": updated_files,
-        "servers_count": len(servers)
+        "servers_count": len(servers),
     }
 
 
@@ -1240,7 +1292,7 @@ def init_cursor(servers: List[str], cwd: Path) -> Dict[str, Any]:
         "status": "Configured",
         "primary_config": str(target_cfg),
         "files_updated": updated_files,
-        "servers_count": len(servers)
+        "servers_count": len(servers),
     }
 
 
@@ -1265,7 +1317,7 @@ def init_windsurf(servers: List[str], cwd: Path) -> Dict[str, Any]:
         "status": "Configured",
         "primary_config": str(target_cfg),
         "files_updated": updated_files,
-        "servers_count": len(servers)
+        "servers_count": len(servers),
     }
 
 
@@ -1409,27 +1461,53 @@ def main() -> None:
 
     # guide
     sub_guide = subparsers.add_parser("guide", help="View usage guide, tool specs, and LLM prompts")
-    sub_guide.add_argument("server", nargs="?", default="all", help="Server name ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_guide.add_argument(
+        "server",
+        nargs="?",
+        default="all",
+        help="Server name ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+    )
     sub_guide.set_defaults(func=cmd_guide)
 
     # install
     sub_install = subparsers.add_parser("install", help="Install standalone MCP server package(s) from PyPI")
-    sub_install.add_argument("server", nargs="?", default=None, help="Server package to install ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_install.add_argument(
+        "server",
+        nargs="?",
+        default=None,
+        help="Server package to install ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+    )
     sub_install.set_defaults(func=cmd_install)
 
-    # update
-    sub_update = subparsers.add_parser("update", help="Check PyPI and upgrade mcp-win-stdio suite or specific server")
-    sub_update.add_argument("server", nargs="?", default="all", help="Server or 'all' to update ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    # update / upgrade
+    sub_update = subparsers.add_parser(
+        "update", aliases=["upgrade"], help="Check PyPI and upgrade mcp-win-stdio suite or specific server"
+    )
+    sub_update.add_argument(
+        "server",
+        nargs="?",
+        default="all",
+        help="Server or 'all' to update ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+    )
     sub_update.set_defaults(func=cmd_update)
 
     # setup
     sub_setup = subparsers.add_parser("setup", help="Configure server(s) into Claude Desktop and CLI")
-    sub_setup.add_argument("server", nargs="?", default=None, help="Server to configure ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_setup.add_argument(
+        "server",
+        nargs="?",
+        default=None,
+        help="Server to configure ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+    )
     sub_setup.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_setup.set_defaults(func=cmd_setup)
 
     # setup-project / add-project / add
-    sub_setup_proj = subparsers.add_parser("setup-project", aliases=["add-project", "add"], help="Add specific MCP server(s) to current project (.mcp.json, AGENTS.md)")
+    sub_setup_proj = subparsers.add_parser(
+        "setup-project",
+        aliases=["add-project", "add"],
+        help="Add specific MCP server(s) to current project (.mcp.json, AGENTS.md)",
+    )
     sub_setup_proj.add_argument("servers", nargs="+", help="Server name(s) to add (e.g. 'excel', 'db', 'tsc')")
     sub_setup_proj.set_defaults(func=cmd_setup_project)
 
@@ -1440,13 +1518,23 @@ def main() -> None:
 
     # remove
     sub_remove = subparsers.add_parser("remove", help="Remove server(s) from Claude Desktop and CLI")
-    sub_remove.add_argument("server", help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_remove.add_argument(
+        "server",
+        help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+    )
     sub_remove.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
     sub_remove.set_defaults(func=cmd_remove)
 
     # uninstall
-    sub_uninstall = subparsers.add_parser("uninstall", help="Uninstall MCP server(s) & clean Claude configs while preserving ~/.mcp-win-stdio")
-    sub_uninstall.add_argument("server", nargs="?", default=None, help="Server to uninstall ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'all')")
+    sub_uninstall = subparsers.add_parser(
+        "uninstall", help="Uninstall MCP server(s) & clean Claude configs while preserving ~/.mcp-win-stdio"
+    )
+    sub_uninstall.add_argument(
+        "server",
+        nargs="?",
+        default=None,
+        help="Server to uninstall ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+    )
     sub_uninstall.set_defaults(func=cmd_uninstall)
 
     # run
@@ -1459,24 +1547,73 @@ def main() -> None:
     sub_doctor.set_defaults(func=cmd_doctor)
 
     # init-project / init
-    sub_init = subparsers.add_parser("init-project", aliases=["init"], help="Initialize MCP configuration for specific AI client (antigravity, claude, copilot, all) or project (.mcp.json, AGENTS.md)")
-    sub_init.add_argument("targets", nargs="*", default=[], help="Target AI client ('antigravity', 'claude', 'copilot', 'cursor', 'windsurf', 'all') or server names ('excel', 'db'). If omitted or 'all', auto-detects all installed clients.")
+    sub_init = subparsers.add_parser(
+        "init-project",
+        aliases=["init"],
+        help="Initialize MCP configuration for specific AI client (antigravity, claude, copilot, all) or project (.mcp.json, AGENTS.md)",
+    )
+    sub_init.add_argument(
+        "targets",
+        nargs="*",
+        default=[],
+        help="Target AI client ('antigravity', 'claude', 'copilot', 'cursor', 'windsurf', 'all') or server names ('excel', 'db'). If omitted or 'all', auto-detects all installed clients.",
+    )
     sub_init.set_defaults(func=cmd_init_project)
 
     # fix-path / path
-    sub_path = subparsers.add_parser("fix-path", aliases=["path"], help="Check and configure Python Scripts directory in Windows User PATH")
-    sub_path.add_argument("--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH")
+    sub_path = subparsers.add_parser(
+        "fix-path", aliases=["path"], help="Check and configure Python Scripts directory in Windows User PATH"
+    )
+    sub_path.add_argument(
+        "--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH"
+    )
     sub_path.set_defaults(func=cmd_fix_path)
 
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
-    known_srvs = {"git", "github", "db", "database", "excel", "word", "explorer", "workspace-explorer", "tsc", "rag", "excel-db", "antigravity", "claude", "copilot", "cursor", "windsurf", "all"}
-    known_cmds = {"guide", "run", "setup", "setup-project", "add", "add-project", "remove-project", "doctor", "remove", "install", "update", "uninstall", "fix-path", "path", "init", "init-project"}
+    known_srvs = {
+        "git",
+        "github",
+        "db",
+        "database",
+        "excel",
+        "word",
+        "explorer",
+        "workspace-explorer",
+        "tsc",
+        "rag",
+        "excel-db",
+        "excel_db",
+        "ssh",
+        "antigravity",
+        "claude",
+        "copilot",
+        "cursor",
+        "windsurf",
+        "all",
+    }
+    known_cmds = {
+        "guide",
+        "run",
+        "setup",
+        "setup-project",
+        "add",
+        "add-project",
+        "remove-project",
+        "doctor",
+        "remove",
+        "install",
+        "update",
+        "upgrade",
+        "uninstall",
+        "fix-path",
+        "path",
+        "init",
+        "init-project",
+    }
     if len(sys.argv) >= 3 and sys.argv[1].lower() in known_srvs and sys.argv[2].lower() in known_cmds:
         srv_token = sys.argv[1].lower()
         cmd_token = sys.argv[2].lower()
         sys.argv = [sys.argv[0], cmd_token, srv_token] + sys.argv[3:]
-
-
 
     args = parser.parse_args()
     if not args.command:

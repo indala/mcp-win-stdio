@@ -5,27 +5,27 @@ Extracts comprehensive content, headers, footers, advanced page geometry, exact 
 multi-column layouts (IEEE/Journal), paragraph spacing/indentation, typography, tables, outline, images, and metadata.
 """
 
-import os
-import sys
 import json
+import os
 import re
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP
 import docx
-from docx.enum.section import WD_ORIENT, WD_SECTION
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
-from docx.shared import Inches, Pt, Cm, RGBColor
+from docx.enum.section import WD_ORIENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import nsmap
+from docx.shared import Inches, Pt, RGBColor
 
 # Register namespaces
-nsmap['wp'] = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
-nsmap['a'] = 'http://schemas.openxmlformats.org/drawingml/2006/main'
-nsmap['pic'] = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
-nsmap['r'] = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
-nsmap['v'] = 'urn:schemas-microsoft-com:vml'
+nsmap["wp"] = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+nsmap["a"] = "http://schemas.openxmlformats.org/drawingml/2006/main"
+nsmap["pic"] = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+nsmap["r"] = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+nsmap["v"] = "urn:schemas-microsoft-com:vml"
 
 mcp = FastMCP("word-mcp")
 
@@ -36,6 +36,7 @@ EMU_PER_PT = 12700.0
 TWIPS_PER_INCH = 1440.0
 TWIPS_PER_CM = 567.0
 TWIPS_PER_PT = 20.0
+
 
 def identify_paper_size(width_in: float, height_in: float) -> str:
     w, h = sorted([round(width_in, 2), round(height_in, 2)])
@@ -55,15 +56,17 @@ def identify_paper_size(width_in: float, height_in: float) -> str:
         return "B5 JIS (7.17 x 10.12 in / 182 x 257 mm)"
     return f"Custom ({width_in:.2f} x {height_in:.2f} in)"
 
+
 def load_document(file_path: str) -> docx.Document:
-    clean_path = os.path.abspath(file_path.strip('"\''))
+    clean_path = os.path.abspath(file_path.strip("\"'"))
     if not os.path.exists(clean_path):
         raise FileNotFoundError(f"File not found: {clean_path}")
-    
+
     if clean_path.lower().endswith(".doc") and not clean_path.lower().endswith(".docx"):
         try:
-            import win32com.client
             import pythoncom
+            import win32com.client
+
             pythoncom.CoInitialize()
             word = None
             doc = None
@@ -98,13 +101,13 @@ def load_document(file_path: str) -> docx.Document:
 def extract_run_formatting(run, paragraph_style=None) -> Dict[str, Any]:
     """Extract font name, size (pt), color (hex/theme), highlight, and bold/italic."""
     font_name = run.font.name
-    if not font_name and paragraph_style and hasattr(paragraph_style, 'font'):
+    if not font_name and paragraph_style and hasattr(paragraph_style, "font"):
         font_name = paragraph_style.font.name
 
     font_size = None
     if run.font.size:
         font_size = run.font.size.pt
-    elif paragraph_style and hasattr(paragraph_style, 'font') and paragraph_style.font.size:
+    elif paragraph_style and hasattr(paragraph_style, "font") and paragraph_style.font.size:
         font_size = paragraph_style.font.size.pt
 
     color_hex = None
@@ -118,16 +121,22 @@ def extract_run_formatting(run, paragraph_style=None) -> Dict[str, Any]:
         if not color_hex:
             color_el = rPr[0].xpath('.//*[local-name()="color"]')
             if color_el:
-                val = color_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') or color_el[0].get('val')
-                if val and val != 'auto':
+                val = color_el[0].get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") or color_el[
+                    0
+                ].get("val")
+                if val and val != "auto":
                     color_hex = f"#{val}"
-                theme = color_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}themeColor') or color_el[0].get('themeColor')
+                theme = color_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}themeColor"
+                ) or color_el[0].get("themeColor")
                 if theme and not color_hex:
                     color_hex = f"theme:{theme}"
         if not font_size:
             sz_el = rPr[0].xpath('.//*[local-name()="sz"]')
             if sz_el:
-                val = sz_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') or sz_el[0].get('val')
+                val = sz_el[0].get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val") or sz_el[0].get(
+                    "val"
+                )
                 if val:
                     try:
                         font_size = int(val) / 2.0
@@ -136,7 +145,9 @@ def extract_run_formatting(run, paragraph_style=None) -> Dict[str, Any]:
         if not font_name:
             rFonts_el = rPr[0].xpath('.//*[local-name()="rFonts"]')
             if rFonts_el:
-                font_name = rFonts_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii') or rFonts_el[0].get('ascii')
+                font_name = rFonts_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ascii"
+                ) or rFonts_el[0].get("ascii")
 
     return {
         "font_family": font_name or "Default / Body Font",
@@ -145,8 +156,9 @@ def extract_run_formatting(run, paragraph_style=None) -> Dict[str, Any]:
         "highlight": highlight,
         "bold": bool(run.bold),
         "italic": bool(run.italic),
-        "underline": bool(run.underline)
+        "underline": bool(run.underline),
     }
+
 
 def extract_drawing_info(element, location: str, part=None) -> List[Dict[str, Any]]:
     images = []
@@ -159,41 +171,41 @@ def extract_drawing_info(element, location: str, part=None) -> List[Dict[str, An
         anchors = d.xpath('.//*[local-name()="anchor"]')
         inlines = d.xpath('.//*[local-name()="inline"]')
 
-        for item in (anchors + inlines):
+        for item in anchors + inlines:
             is_anchor = item in anchors
             placement_type = "FLOATING_ANCHOR" if is_anchor else "INLINE"
 
             ext = item.xpath('.//*[local-name()="extent"]')
-            cx = int(ext[0].get('cx', 0)) if ext else 0
-            cy = int(ext[0].get('cy', 0)) if ext else 0
+            cx = int(ext[0].get("cx", 0)) if ext else 0
+            cy = int(ext[0].get("cy", 0)) if ext else 0
 
             doc_pr = item.xpath('.//*[local-name()="docPr"]')
-            name = doc_pr[0].get('name', '') if doc_pr else ''
-            descr = doc_pr[0].get('descr', '') if doc_pr else ''
-            title = doc_pr[0].get('title', '') if doc_pr else ''
+            name = doc_pr[0].get("name", "") if doc_pr else ""
+            descr = doc_pr[0].get("descr", "") if doc_pr else ""
+            title = doc_pr[0].get("title", "") if doc_pr else ""
 
             blips = item.xpath('.//*[local-name()="blip"]')
-            r_id = ''
+            r_id = ""
             if blips:
                 for attr_name, attr_val in blips[0].attrib.items():
-                    if attr_name.endswith('embed'):
+                    if attr_name.endswith("embed"):
                         r_id = attr_val
                         break
 
-            target_file = ''
-            content_type = ''
+            target_file = ""
+            content_type = ""
             file_size_bytes = None
 
-            if r_id and part and hasattr(part, 'rels'):
+            if r_id and part and hasattr(part, "rels"):
                 try:
                     rel = part.rels.get(r_id)
                     if rel:
                         target_file = os.path.basename(rel.target_ref)
-                        if hasattr(part, 'related_parts'):
+                        if hasattr(part, "related_parts"):
                             related_part = part.related_parts.get(r_id)
                             if related_part:
-                                content_type = getattr(related_part, 'content_type', '')
-                                blob = getattr(related_part, 'blob', None)
+                                content_type = getattr(related_part, "content_type", "")
+                                blob = getattr(related_part, "blob", None)
                                 if blob:
                                     file_size_bytes = len(blob)
                 except Exception:
@@ -204,7 +216,7 @@ def extract_drawing_info(element, location: str, part=None) -> List[Dict[str, An
             h_offset_in = None
             pos_h = item.xpath('.//*[local-name()="positionH"]')
             if pos_h:
-                h_rel_from = pos_h[0].get('relativeFrom', '')
+                h_rel_from = pos_h[0].get("relativeFrom", "")
                 align_el = pos_h[0].xpath('.//*[local-name()="align"]')
                 if align_el and align_el[0].text:
                     h_align = align_el[0].text.strip()
@@ -220,7 +232,7 @@ def extract_drawing_info(element, location: str, part=None) -> List[Dict[str, An
             v_offset_in = None
             pos_v = item.xpath('.//*[local-name()="positionV"]')
             if pos_v:
-                v_rel_from = pos_v[0].get('relativeFrom', '')
+                v_rel_from = pos_v[0].get("relativeFrom", "")
                 align_el = pos_v[0].xpath('.//*[local-name()="align"]')
                 if align_el and align_el[0].text:
                     v_align = align_el[0].text.strip()
@@ -231,33 +243,35 @@ def extract_drawing_info(element, location: str, part=None) -> List[Dict[str, An
                     except:
                         pass
 
-            images.append({
-                "location": location,
-                "placement_type": placement_type,
-                "image_name": name or "Unnamed Image",
-                "alt_text": descr or title or None,
-                "dimensions": {
-                    "width_inches": round(cx / EMU_PER_INCH, 2),
-                    "height_inches": round(cy / EMU_PER_INCH, 2),
-                    "width_cm": round(cx / EMU_PER_CM, 2),
-                    "height_cm": round(cy / EMU_PER_CM, 2),
-                    "width_pt": round(cx / EMU_PER_PT, 1),
-                    "height_pt": round(cy / EMU_PER_PT, 1)
-                },
-                "positioning": {
-                    "horizontal_alignment": h_align or ("offset" if h_offset_in is not None else "inline"),
-                    "horizontal_relative_from": h_rel_from or None,
-                    "horizontal_offset_inches": h_offset_in,
-                    "vertical_alignment": v_align or ("offset" if v_offset_in is not None else "inline"),
-                    "vertical_relative_from": v_rel_from or None,
-                    "vertical_offset_inches": v_offset_in
-                },
-                "embedded_file": {
-                    "target_filename": target_file or None,
-                    "content_type": content_type or None,
-                    "file_size_bytes": file_size_bytes
+            images.append(
+                {
+                    "location": location,
+                    "placement_type": placement_type,
+                    "image_name": name or "Unnamed Image",
+                    "alt_text": descr or title or None,
+                    "dimensions": {
+                        "width_inches": round(cx / EMU_PER_INCH, 2),
+                        "height_inches": round(cy / EMU_PER_INCH, 2),
+                        "width_cm": round(cx / EMU_PER_CM, 2),
+                        "height_cm": round(cy / EMU_PER_CM, 2),
+                        "width_pt": round(cx / EMU_PER_PT, 1),
+                        "height_pt": round(cy / EMU_PER_PT, 1),
+                    },
+                    "positioning": {
+                        "horizontal_alignment": h_align or ("offset" if h_offset_in is not None else "inline"),
+                        "horizontal_relative_from": h_rel_from or None,
+                        "horizontal_offset_inches": h_offset_in,
+                        "vertical_alignment": v_align or ("offset" if v_offset_in is not None else "inline"),
+                        "vertical_relative_from": v_rel_from or None,
+                        "vertical_offset_inches": v_offset_in,
+                    },
+                    "embedded_file": {
+                        "target_filename": target_file or None,
+                        "content_type": content_type or None,
+                        "file_size_bytes": file_size_bytes,
+                    },
                 }
-            })
+            )
 
     return images
 
@@ -267,7 +281,7 @@ def get_document_layout(file_path: str) -> Dict[str, Any]:
     """
     Extract comprehensive page layout geometry, exact margins across multiple units (in, cm, mm, pt, twips),
     multi-column layout (IEEE/Journal), printable area, section break types, and header/footer distances.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
     """
@@ -299,13 +313,18 @@ def get_document_layout(file_path: str) -> Dict[str, Any]:
 
             # Section Type & Flow
             type_el = sectPr.xpath('.//*[local-name()="type"]')
-            sec_type_raw = type_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') or type_el[0].get('val') if type_el else 'nextPage'
+            sec_type_raw = (
+                type_el[0].get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val")
+                or type_el[0].get("val")
+                if type_el
+                else "nextPage"
+            )
             sec_type_map = {
-                'nextPage': 'NEW_PAGE (Starts on Next Page)',
-                'continuous': 'CONTINUOUS (Continuous Section Break)',
-                'evenPage': 'EVEN_PAGE (Starts on Next Even Page)',
-                'oddPage': 'ODD_PAGE (Starts on Next Odd Page)',
-                'nextColumn': 'NEXT_COLUMN (Starts on Next Column)'
+                "nextPage": "NEW_PAGE (Starts on Next Page)",
+                "continuous": "CONTINUOUS (Continuous Section Break)",
+                "evenPage": "EVEN_PAGE (Starts on Next Even Page)",
+                "oddPage": "ODD_PAGE (Starts on Next Odd Page)",
+                "nextColumn": "NEXT_COLUMN (Starts on Next Column)",
             }
             sec_type_readable = sec_type_map.get(sec_type_raw, sec_type_raw)
 
@@ -318,22 +337,30 @@ def get_document_layout(file_path: str) -> Dict[str, Any]:
             col_width_in = printable_w_in
 
             if cols_el:
-                num_attr = cols_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}num') or cols_el[0].get('num')
+                num_attr = cols_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}num"
+                ) or cols_el[0].get("num")
                 if num_attr:
                     try:
                         num_cols = int(num_attr)
                     except:
                         num_cols = 1
-                space_attr = cols_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}space') or cols_el[0].get('space')
+                space_attr = cols_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}space"
+                ) or cols_el[0].get("space")
                 if space_attr:
                     try:
                         col_space_in = round(int(space_attr) / TWIPS_PER_INCH, 2)
                     except:
                         pass
-                sep_attr = cols_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sep') or cols_el[0].get('sep')
-                line_sep = bool(sep_attr and sep_attr in ['1', 'true', 'on'])
-                eq_attr = cols_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}equalWidth') or cols_el[0].get('equalWidth')
-                equal_width = not (eq_attr in ['0', 'false', 'off'])
+                sep_attr = cols_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}sep"
+                ) or cols_el[0].get("sep")
+                line_sep = bool(sep_attr and sep_attr in ["1", "true", "on"])
+                eq_attr = cols_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}equalWidth"
+                ) or cols_el[0].get("equalWidth")
+                equal_width = eq_attr not in ["0", "false", "off"]
 
                 if num_cols > 1:
                     spacing_total = (col_space_in or 0.25) * (num_cols - 1)
@@ -342,93 +369,100 @@ def get_document_layout(file_path: str) -> Dict[str, Any]:
             # Page Numbering
             pgNum_el = sectPr.xpath('.//*[local-name()="pgNumType"]')
             pg_start = None
-            pg_format = 'decimal (1, 2, 3...)'
+            pg_format = "decimal (1, 2, 3...)"
             if pgNum_el:
-                start_attr = pgNum_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}start') or pgNum_el[0].get('start')
+                start_attr = pgNum_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}start"
+                ) or pgNum_el[0].get("start")
                 if start_attr:
                     try:
                         pg_start = int(start_attr)
                     except:
                         pass
-                fmt_attr = pgNum_el[0].get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fmt') or pgNum_el[0].get('fmt')
+                fmt_attr = pgNum_el[0].get(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}fmt"
+                ) or pgNum_el[0].get("fmt")
                 if fmt_attr:
                     pg_format = fmt_attr
 
-            sections_info.append({
-                "section_number": idx,
-                "section_break_type": sec_type_readable,
-                "orientation": orientation_str,
-                "paper_size": paper_size,
-                "page_dimensions": {
-                    "inches": {"width": round(w_in, 2), "height": round(h_in, 2)},
-                    "centimeters": {"width": round(w_in * 2.54, 2), "height": round(h_in * 2.54, 2)},
-                    "millimeters": {"width": round(w_in * 25.4, 1), "height": round(h_in * 25.4, 1)},
-                    "points": {"width": round(w_in * 72.0, 1), "height": round(h_in * 72.0, 1)}
-                },
-                "printable_area": {
-                    "inches": {"width": printable_w_in, "height": printable_h_in},
-                    "centimeters": {"width": round(printable_w_in * 2.54, 2), "height": round(printable_h_in * 2.54, 2)},
-                    "points": {"width": round(printable_w_in * 72.0, 1), "height": round(printable_h_in * 72.0, 1)}
-                },
-                "margins": {
-                    "inches": {
-                        "top": round(top_in, 2),
-                        "bottom": round(bot_in, 2),
-                        "left": round(left_in, 2),
-                        "right": round(right_in, 2),
-                        "gutter": round(gutter_in, 2)
+            sections_info.append(
+                {
+                    "section_number": idx,
+                    "section_break_type": sec_type_readable,
+                    "orientation": orientation_str,
+                    "paper_size": paper_size,
+                    "page_dimensions": {
+                        "inches": {"width": round(w_in, 2), "height": round(h_in, 2)},
+                        "centimeters": {"width": round(w_in * 2.54, 2), "height": round(h_in * 2.54, 2)},
+                        "millimeters": {"width": round(w_in * 25.4, 1), "height": round(h_in * 25.4, 1)},
+                        "points": {"width": round(w_in * 72.0, 1), "height": round(h_in * 72.0, 1)},
                     },
-                    "centimeters": {
-                        "top": round(top_in * 2.54, 2),
-                        "bottom": round(bot_in * 2.54, 2),
-                        "left": round(left_in * 2.54, 2),
-                        "right": round(right_in * 2.54, 2),
-                        "gutter": round(gutter_in * 2.54, 2)
+                    "printable_area": {
+                        "inches": {"width": printable_w_in, "height": printable_h_in},
+                        "centimeters": {
+                            "width": round(printable_w_in * 2.54, 2),
+                            "height": round(printable_h_in * 2.54, 2),
+                        },
+                        "points": {"width": round(printable_w_in * 72.0, 1), "height": round(printable_h_in * 72.0, 1)},
                     },
-                    "millimeters": {
-                        "top": round(top_in * 25.4, 1),
-                        "bottom": round(bot_in * 25.4, 1),
-                        "left": round(left_in * 25.4, 1),
-                        "right": round(right_in * 25.4, 1),
-                        "gutter": round(gutter_in * 25.4, 1)
+                    "margins": {
+                        "inches": {
+                            "top": round(top_in, 2),
+                            "bottom": round(bot_in, 2),
+                            "left": round(left_in, 2),
+                            "right": round(right_in, 2),
+                            "gutter": round(gutter_in, 2),
+                        },
+                        "centimeters": {
+                            "top": round(top_in * 2.54, 2),
+                            "bottom": round(bot_in * 2.54, 2),
+                            "left": round(left_in * 2.54, 2),
+                            "right": round(right_in * 2.54, 2),
+                            "gutter": round(gutter_in * 2.54, 2),
+                        },
+                        "millimeters": {
+                            "top": round(top_in * 25.4, 1),
+                            "bottom": round(bot_in * 25.4, 1),
+                            "left": round(left_in * 25.4, 1),
+                            "right": round(right_in * 25.4, 1),
+                            "gutter": round(gutter_in * 25.4, 1),
+                        },
+                        "points": {
+                            "top": round(top_in * 72.0, 1),
+                            "bottom": round(bot_in * 72.0, 1),
+                            "left": round(left_in * 72.0, 1),
+                            "right": round(right_in * 72.0, 1),
+                            "gutter": round(gutter_in * 72.0, 1),
+                        },
                     },
-                    "points": {
-                        "top": round(top_in * 72.0, 1),
-                        "bottom": round(bot_in * 72.0, 1),
-                        "left": round(left_in * 72.0, 1),
-                        "right": round(right_in * 72.0, 1),
-                        "gutter": round(gutter_in * 72.0, 1)
-                    }
-                },
-                "multi_column_layout": {
-                    "is_multi_column": num_cols > 1,
-                    "column_count": num_cols,
-                    "column_width_inches": col_width_in,
-                    "column_width_cm": round(col_width_in * 2.54, 2),
-                    "column_spacing_inches": col_space_in or (0.25 if num_cols > 1 else 0.0),
-                    "column_spacing_cm": round((col_space_in or (0.25 if num_cols > 1 else 0.0)) * 2.54, 2),
-                    "equal_width_columns": equal_width,
-                    "line_separator_between_columns": line_sep
-                },
-                "header_footer_geometry": {
-                    "header_distance_from_top_edge_inches": round(header_dist_in, 2),
-                    "header_distance_from_top_edge_cm": round(header_dist_in * 2.54, 2),
-                    "footer_distance_from_bottom_edge_inches": round(footer_dist_in, 2),
-                    "footer_distance_from_bottom_edge_cm": round(footer_dist_in * 2.54, 2),
-                    "different_first_page": section.different_first_page_header_footer,
-                    "different_odd_and_even_pages": getattr(doc.settings, 'odd_and_even_pages_header_footer', False) if hasattr(doc, 'settings') else False
-                },
-                "page_numbering": {
-                    "starts_at": pg_start or "Continue from previous section",
-                    "number_format": pg_format
+                    "multi_column_layout": {
+                        "is_multi_column": num_cols > 1,
+                        "column_count": num_cols,
+                        "column_width_inches": col_width_in,
+                        "column_width_cm": round(col_width_in * 2.54, 2),
+                        "column_spacing_inches": col_space_in or (0.25 if num_cols > 1 else 0.0),
+                        "column_spacing_cm": round((col_space_in or (0.25 if num_cols > 1 else 0.0)) * 2.54, 2),
+                        "equal_width_columns": equal_width,
+                        "line_separator_between_columns": line_sep,
+                    },
+                    "header_footer_geometry": {
+                        "header_distance_from_top_edge_inches": round(header_dist_in, 2),
+                        "header_distance_from_top_edge_cm": round(header_dist_in * 2.54, 2),
+                        "footer_distance_from_bottom_edge_inches": round(footer_dist_in, 2),
+                        "footer_distance_from_bottom_edge_cm": round(footer_dist_in * 2.54, 2),
+                        "different_first_page": section.different_first_page_header_footer,
+                        "different_odd_and_even_pages": getattr(doc.settings, "odd_and_even_pages_header_footer", False)
+                        if hasattr(doc, "settings")
+                        else False,
+                    },
+                    "page_numbering": {
+                        "starts_at": pg_start or "Continue from previous section",
+                        "number_format": pg_format,
+                    },
                 }
-            })
+            )
 
-        return {
-            "file_path": os.path.abspath(file_path),
-            "total_sections": len(doc.sections),
-            "sections": sections_info
-        }
+        return {"file_path": os.path.abspath(file_path), "total_sections": len(doc.sections), "sections": sections_info}
     except Exception as e:
         return {"error": str(e)}
 
@@ -437,7 +471,7 @@ def get_document_layout(file_path: str) -> Dict[str, Any]:
 def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 40) -> Dict[str, Any]:
     """
     Extract detailed paragraph spacing (line spacing, space before/after in pt), indentation (first-line indent, left/right margins in inches), and alignment.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
         max_paragraphs: Number of paragraphs to analyze (default: 40, max: 100).
@@ -462,7 +496,7 @@ def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 
                 line_spacing_desc = "Single (1.0 / Default)"
             elif isinstance(line_spacing, float):
                 line_spacing_desc = f"{line_spacing:.2f}x Line Spacing"
-            elif hasattr(line_spacing, 'pt'):
+            elif hasattr(line_spacing, "pt"):
                 line_spacing_desc = f"Exact {line_spacing.pt:.1f} pt"
             else:
                 line_spacing_desc = str(line_spacing)
@@ -476,31 +510,33 @@ def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 
             left_indent_in = round(pf.left_indent.inches, 2) if pf.left_indent else 0.0
             right_indent_in = round(pf.right_indent.inches, 2) if pf.right_indent else 0.0
 
-            paragraphs_info.append({
-                "paragraph_index": idx + 1,
-                "style": p.style.name if p.style else "Normal",
-                "alignment": align,
-                "text_preview": text[:70] + ("..." if len(text) > 70 else ""),
-                "spacing": {
-                    "line_spacing": line_spacing_desc,
-                    "line_spacing_rule": line_spacing_rule,
-                    "space_before_pt": space_before_pt,
-                    "space_after_pt": space_after_pt
-                },
-                "indentation": {
-                    "first_line_indent_inches": first_line_in,
-                    "first_line_indent_cm": round(first_line_in * 2.54, 2),
-                    "left_indent_inches": left_indent_in,
-                    "left_indent_cm": round(left_indent_in * 2.54, 2),
-                    "right_indent_inches": right_indent_in,
-                    "is_hanging_indent": first_line_in < 0
-                },
-                "pagination_controls": {
-                    "keep_with_next": bool(pf.keep_with_next),
-                    "page_break_before": bool(pf.page_break_before),
-                    "widow_control": bool(pf.widow_control)
+            paragraphs_info.append(
+                {
+                    "paragraph_index": idx + 1,
+                    "style": p.style.name if p.style else "Normal",
+                    "alignment": align,
+                    "text_preview": text[:70] + ("..." if len(text) > 70 else ""),
+                    "spacing": {
+                        "line_spacing": line_spacing_desc,
+                        "line_spacing_rule": line_spacing_rule,
+                        "space_before_pt": space_before_pt,
+                        "space_after_pt": space_after_pt,
+                    },
+                    "indentation": {
+                        "first_line_indent_inches": first_line_in,
+                        "first_line_indent_cm": round(first_line_in * 2.54, 2),
+                        "left_indent_inches": left_indent_in,
+                        "left_indent_cm": round(left_indent_in * 2.54, 2),
+                        "right_indent_inches": right_indent_in,
+                        "is_hanging_indent": first_line_in < 0,
+                    },
+                    "pagination_controls": {
+                        "keep_with_next": bool(pf.keep_with_next),
+                        "page_break_before": bool(pf.page_break_before),
+                        "widow_control": bool(pf.widow_control),
+                    },
                 }
-            })
+            )
 
         has_more = len(doc.paragraphs) > safe_max
         res: Dict[str, Any] = {
@@ -508,10 +544,12 @@ def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 
             "total_paragraphs": len(doc.paragraphs),
             "analyzed_paragraphs_count": len(paragraphs_info),
             "has_more": has_more,
-            "paragraphs": paragraphs_info
+            "paragraphs": paragraphs_info,
         }
         if has_more:
-            res["notice"] = f"... [TRUNCATED: Showing first {safe_max} paragraphs. Increase max_paragraphs (up to 100) to see more] ..."
+            res["notice"] = (
+                f"... [TRUNCATED: Showing first {safe_max} paragraphs. Increase max_paragraphs (up to 100) to see more] ..."
+            )
         return res
     except Exception as e:
         return {"error": str(e)}
@@ -521,7 +559,7 @@ def get_paragraph_spacing_and_indentation(file_path: str, max_paragraphs: int = 
 def get_document_typography(file_path: str, max_paragraphs: int = 40) -> Dict[str, Any]:
     """
     Extract all typography details (font families, font sizes, colors, headings, styles, and alignments) across the Word document.
-    
+
     Args:
         file_path: Path to the .docx or .doc file.
         max_paragraphs: Maximum paragraph styles to detail (default: 40, max: 100).
@@ -529,7 +567,7 @@ def get_document_typography(file_path: str, max_paragraphs: int = 40) -> Dict[st
     try:
         doc = load_document(file_path)
         safe_max = min(max(1, max_paragraphs), 100)
-        
+
         distinct_fonts = set()
         distinct_sizes = set()
         distinct_colors = set()
@@ -550,19 +588,18 @@ def get_document_typography(file_path: str, max_paragraphs: int = 40) -> Dict[st
                     distinct_fonts.add(fmt["font_family"])
                     distinct_sizes.add(str(fmt["font_size_pt"]))
                     distinct_colors.add(fmt["font_color"])
-                    runs_data.append({
-                        "text": r.text,
-                        "formatting": fmt
-                    })
+                    runs_data.append({"text": r.text, "formatting": fmt})
 
             if runs_data and len(styles_summary) < safe_max:
-                styles_summary.append({
-                    "paragraph_index": p_idx + 1,
-                    "style": style_name,
-                    "alignment": align,
-                    "text_preview": text[:80] + ("..." if len(text) > 80 else ""),
-                    "runs": runs_data
-                })
+                styles_summary.append(
+                    {
+                        "paragraph_index": p_idx + 1,
+                        "style": style_name,
+                        "alignment": align,
+                        "text_preview": text[:80] + ("..." if len(text) > 80 else ""),
+                        "runs": runs_data,
+                    }
+                )
 
         headers_typography = []
         for s_idx, sec in enumerate(doc.sections, 1):
@@ -574,22 +611,24 @@ def get_document_typography(file_path: str, max_paragraphs: int = 40) -> Dict[st
                             distinct_fonts.add(r_fmt["font_family"])
                             distinct_sizes.add(str(r_fmt["font_size_pt"]))
                             distinct_colors.add(r_fmt["font_color"])
-                        headers_typography.append({
-                            "location": f"Section {s_idx} Header P#{p_idx+1}",
-                            "text": p.text.strip(),
-                            "formatting": runs
-                        })
+                        headers_typography.append(
+                            {
+                                "location": f"Section {s_idx} Header P#{p_idx + 1}",
+                                "text": p.text.strip(),
+                                "formatting": runs,
+                            }
+                        )
 
         return {
             "file_path": os.path.abspath(file_path),
             "summary": {
                 "font_families_used": sorted(list(distinct_fonts)),
                 "font_sizes_used_pt": sorted(list(distinct_sizes)),
-                "colors_used": sorted(list(distinct_colors))
+                "colors_used": sorted(list(distinct_colors)),
             },
             "header_typography": headers_typography,
             "paragraphs_typography": styles_summary,
-            "has_more": len(doc.paragraphs) > safe_max
+            "has_more": len(doc.paragraphs) > safe_max,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -599,7 +638,7 @@ def get_document_typography(file_path: str, max_paragraphs: int = 40) -> Dict[st
 def get_document_images(file_path: str, max_images: int = 50) -> Dict[str, Any]:
     """
     Extract all images and graphics from headers, footers, body paragraphs, and tables along with exact placement, alignment, dimensions, and coordinates.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
         max_images: Maximum images to detail (default: 50, max: 100).
@@ -611,20 +650,44 @@ def get_document_images(file_path: str, max_images: int = 50) -> Dict[str, Any]:
 
         for s_idx, sec in enumerate(doc.sections, 1):
             if sec.header:
-                all_images.extend(extract_drawing_info(sec.header._element, f"Section {s_idx} Primary Header", sec.header.part))
+                all_images.extend(
+                    extract_drawing_info(sec.header._element, f"Section {s_idx} Primary Header", sec.header.part)
+                )
             if sec.footer:
-                all_images.extend(extract_drawing_info(sec.footer._element, f"Section {s_idx} Primary Footer", sec.footer.part))
+                all_images.extend(
+                    extract_drawing_info(sec.footer._element, f"Section {s_idx} Primary Footer", sec.footer.part)
+                )
 
             if sec.different_first_page_header_footer:
                 if sec.first_page_header:
-                    all_images.extend(extract_drawing_info(sec.first_page_header._element, f"Section {s_idx} First Page Header", sec.first_page_header.part))
+                    all_images.extend(
+                        extract_drawing_info(
+                            sec.first_page_header._element,
+                            f"Section {s_idx} First Page Header",
+                            sec.first_page_header.part,
+                        )
+                    )
                 if sec.first_page_footer:
-                    all_images.extend(extract_drawing_info(sec.first_page_footer._element, f"Section {s_idx} First Page Footer", sec.first_page_footer.part))
+                    all_images.extend(
+                        extract_drawing_info(
+                            sec.first_page_footer._element,
+                            f"Section {s_idx} First Page Footer",
+                            sec.first_page_footer.part,
+                        )
+                    )
 
-            if getattr(sec, 'even_page_header', None):
-                all_images.extend(extract_drawing_info(sec.even_page_header._element, f"Section {s_idx} Even Page Header", sec.even_page_header.part))
-            if getattr(sec, 'even_page_footer', None):
-                all_images.extend(extract_drawing_info(sec.even_page_footer._element, f"Section {s_idx} Even Page Footer", sec.even_page_footer.part))
+            if getattr(sec, "even_page_header", None):
+                all_images.extend(
+                    extract_drawing_info(
+                        sec.even_page_header._element, f"Section {s_idx} Even Page Header", sec.even_page_header.part
+                    )
+                )
+            if getattr(sec, "even_page_footer", None):
+                all_images.extend(
+                    extract_drawing_info(
+                        sec.even_page_footer._element, f"Section {s_idx} Even Page Footer", sec.even_page_footer.part
+                    )
+                )
 
         for p_idx, p in enumerate(doc.paragraphs):
             p_images = extract_drawing_info(p._element, f"Body Paragraph #{p_idx + 1}", doc.part)
@@ -633,7 +696,9 @@ def get_document_images(file_path: str, max_images: int = 50) -> Dict[str, Any]:
         for t_idx, table in enumerate(doc.tables, 1):
             for r_idx, row in enumerate(table.rows):
                 for c_idx, cell in enumerate(row.cells):
-                    cell_images = extract_drawing_info(cell._tc, f"Table {t_idx}, Cell ({r_idx + 1}, {c_idx + 1})", doc.part)
+                    cell_images = extract_drawing_info(
+                        cell._tc, f"Table {t_idx}, Cell ({r_idx + 1}, {c_idx + 1})", doc.part
+                    )
                     all_images.extend(cell_images)
 
         has_more = len(all_images) > safe_max
@@ -645,12 +710,16 @@ def get_document_images(file_path: str, max_images: int = 50) -> Dict[str, Any]:
             "returned_images_count": len(displayed_images),
             "header_images_count": sum(1 for img in all_images if "Header" in img["location"]),
             "footer_images_count": sum(1 for img in all_images if "Footer" in img["location"]),
-            "body_images_count": sum(1 for img in all_images if "Body" in img["location"] or "Table" in img["location"]),
+            "body_images_count": sum(
+                1 for img in all_images if "Body" in img["location"] or "Table" in img["location"]
+            ),
             "has_more": has_more,
-            "images": displayed_images
+            "images": displayed_images,
         }
         if has_more:
-            res["notice"] = f"... [TRUNCATED: Showing first {safe_max} images. Increase max_images (up to 100) to see more] ..."
+            res["notice"] = (
+                f"... [TRUNCATED: Showing first {safe_max} images. Increase max_images (up to 100) to see more] ..."
+            )
         return res
     except Exception as e:
         return {"error": str(e)}
@@ -660,7 +729,7 @@ def get_document_images(file_path: str, max_images: int = 50) -> Dict[str, Any]:
 def get_headers_and_footers(file_path: str) -> Dict[str, Any]:
     """
     Extract all headers and footers from each section of a Word document, including text, typography (fonts, sizes, colors), tables, and images.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
     """
@@ -669,51 +738,69 @@ def get_headers_and_footers(file_path: str) -> Dict[str, Any]:
         sections_hf = []
 
         for idx, section in enumerate(doc.sections, 1):
+
             def extract_hf_data(hf_obj, loc_name):
                 if not hf_obj:
                     return None
-                
+
                 paras_info = []
                 for p in hf_obj.paragraphs:
                     if p.text.strip():
-                        runs = [{"text": r.text, "formatting": extract_run_formatting(r, p.style)} for r in p.runs if r.text.strip()]
-                        paras_info.append({
-                            "text": p.text.strip(),
-                            "alignment": str(p.alignment).split(".")[-1] if p.alignment else "LEFT",
-                            "runs": runs
-                        })
+                        runs = [
+                            {"text": r.text, "formatting": extract_run_formatting(r, p.style)}
+                            for r in p.runs
+                            if r.text.strip()
+                        ]
+                        paras_info.append(
+                            {
+                                "text": p.text.strip(),
+                                "alignment": str(p.alignment).split(".")[-1] if p.alignment else "LEFT",
+                                "runs": runs,
+                            }
+                        )
 
                 images = extract_drawing_info(hf_obj._element, loc_name, hf_obj.part)
-                return {
-                    "paragraphs": paras_info,
-                    "image_count": len(images),
-                    "images": images
-                }
+                return {"paragraphs": paras_info, "image_count": len(images), "images": images}
 
             primary_h = extract_hf_data(section.header, f"Section {idx} Primary Header")
             primary_f = extract_hf_data(section.footer, f"Section {idx} Primary Footer")
 
-            first_h = extract_hf_data(section.first_page_header, f"Section {idx} First Page Header") if section.different_first_page_header_footer else None
-            first_f = extract_hf_data(section.first_page_footer, f"Section {idx} First Page Footer") if section.different_first_page_header_footer else None
+            first_h = (
+                extract_hf_data(section.first_page_header, f"Section {idx} First Page Header")
+                if section.different_first_page_header_footer
+                else None
+            )
+            first_f = (
+                extract_hf_data(section.first_page_footer, f"Section {idx} First Page Footer")
+                if section.different_first_page_header_footer
+                else None
+            )
 
-            even_h = extract_hf_data(getattr(section, 'even_page_header', None), f"Section {idx} Even Page Header") if getattr(section, 'even_page_header', None) else None
-            even_f = extract_hf_data(getattr(section, 'even_page_footer', None), f"Section {idx} Even Page Footer") if getattr(section, 'even_page_footer', None) else None
+            even_h = (
+                extract_hf_data(getattr(section, "even_page_header", None), f"Section {idx} Even Page Header")
+                if getattr(section, "even_page_header", None)
+                else None
+            )
+            even_f = (
+                extract_hf_data(getattr(section, "even_page_footer", None), f"Section {idx} Even Page Footer")
+                if getattr(section, "even_page_footer", None)
+                else None
+            )
 
-            sections_hf.append({
-                "section_number": idx,
-                "different_first_page": section.different_first_page_header_footer,
-                "primary_header": primary_h,
-                "primary_footer": primary_f,
-                "first_page_header": first_h,
-                "first_page_footer": first_f,
-                "even_page_header": even_h,
-                "even_page_footer": even_f
-            })
+            sections_hf.append(
+                {
+                    "section_number": idx,
+                    "different_first_page": section.different_first_page_header_footer,
+                    "primary_header": primary_h,
+                    "primary_footer": primary_f,
+                    "first_page_header": first_h,
+                    "first_page_footer": first_f,
+                    "even_page_header": even_h,
+                    "even_page_footer": even_f,
+                }
+            )
 
-        return {
-            "file_path": os.path.abspath(file_path),
-            "sections": sections_hf
-        }
+        return {"file_path": os.path.abspath(file_path), "sections": sections_hf}
     except Exception as e:
         return {"error": str(e)}
 
@@ -722,7 +809,7 @@ def get_headers_and_footers(file_path: str) -> Dict[str, Any]:
 def get_document_tables(file_path: str, format: str = "markdown", max_tables: int = 10, max_rows: int = 30) -> Any:
     """
     Extract tables from a Word document as structured JSON or readable Markdown with safe limits.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
         format: Output format ('markdown' or 'json'). Default is 'markdown'.
@@ -741,14 +828,16 @@ def get_document_tables(file_path: str, format: str = "markdown", max_tables: in
                 row_cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
                 table_rows.append(row_cells)
 
-            tables_data.append({
-                "table_index": t_idx,
-                "total_rows": len(table.rows),
-                "returned_rows": len(table_rows),
-                "total_columns": len(table.columns),
-                "rows_truncated": len(table.rows) > safe_max_rows,
-                "rows": table_rows
-            })
+            tables_data.append(
+                {
+                    "table_index": t_idx,
+                    "total_rows": len(table.rows),
+                    "returned_rows": len(table_rows),
+                    "total_columns": len(table.columns),
+                    "rows_truncated": len(table.rows) > safe_max_rows,
+                    "rows": table_rows,
+                }
+            )
 
         has_more_tables = len(doc.tables) > safe_max_tables
 
@@ -758,13 +847,18 @@ def get_document_tables(file_path: str, format: str = "markdown", max_tables: in
                 "total_tables": len(doc.tables),
                 "returned_tables": len(tables_data),
                 "has_more_tables": has_more_tables,
-                "tables": tables_data
+                "tables": tables_data,
             }
             if has_more_tables:
-                res_dict["notice"] = f"... [TRUNCATED: Showing {len(tables_data)} of {len(doc.tables)} tables. Increase max_tables to view more] ..."
+                res_dict["notice"] = (
+                    f"... [TRUNCATED: Showing {len(tables_data)} of {len(doc.tables)} tables. Increase max_tables to view more] ..."
+                )
             return res_dict
 
-        md_lines = [f"# Tables in {os.path.basename(file_path)}", f"Total Tables: {len(doc.tables)} (Showing {len(tables_data)})\n"]
+        md_lines = [
+            f"# Tables in {os.path.basename(file_path)}",
+            f"Total Tables: {len(doc.tables)} (Showing {len(tables_data)})\n",
+        ]
         for t in tables_data:
             md_lines.append(f"### Table {t['table_index']} ({t['total_rows']} rows x {t['total_columns']} cols)")
             rows = t["rows"]
@@ -777,13 +871,17 @@ def get_document_tables(file_path: str, format: str = "markdown", max_tables: in
             md_lines.append("| " + " | ".join(["---"] * len(header)) + " |")
             for r in rows[1:]:
                 cells = r + [""] * (len(header) - len(r))
-                md_lines.append("| " + " | ".join(cells[:len(header)]) + " |")
+                md_lines.append("| " + " | ".join(cells[: len(header)]) + " |")
             if t["rows_truncated"]:
-                md_lines.append(f"\n*... [{t['total_rows'] - len(rows)} rows truncated. Increase max_rows to inspect more] ...*\n")
+                md_lines.append(
+                    f"\n*... [{t['total_rows'] - len(rows)} rows truncated. Increase max_rows to inspect more] ...*\n"
+                )
             md_lines.append("\n")
 
         if has_more_tables:
-            md_lines.append(f"\n*... [TRUNCATED: {len(doc.tables) - safe_max_tables} additional tables omitted to protect context window] ...*\n")
+            md_lines.append(
+                f"\n*... [TRUNCATED: {len(doc.tables) - safe_max_tables} additional tables omitted to protect context window] ...*\n"
+            )
 
         return "\n".join(md_lines)
     except Exception as e:
@@ -796,7 +894,7 @@ def get_document_tables(file_path: str, format: str = "markdown", max_tables: in
 def get_document_outline(file_path: str, max_headings: int = 100) -> Dict[str, Any]:
     """
     Extract the heading hierarchy and table of contents tree (H1, H2, H3, H4) with paragraph positions.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
         max_headings: Maximum headings to extract (default: 100, max: 200).
@@ -824,12 +922,7 @@ def get_document_outline(file_path: str, max_headings: int = 100) -> Dict[str, A
                 level = 1
 
             if level is not None:
-                headings.append({
-                    "paragraph_index": p_idx,
-                    "level": level,
-                    "style": style_name,
-                    "text": text
-                })
+                headings.append({"paragraph_index": p_idx, "level": level, "style": style_name, "text": text})
 
         has_more = len(headings) > safe_max
         displayed = headings[:safe_max]
@@ -839,10 +932,12 @@ def get_document_outline(file_path: str, max_headings: int = 100) -> Dict[str, A
             "total_headings": len(headings),
             "returned_headings": len(displayed),
             "has_more": has_more,
-            "outline": displayed
+            "outline": displayed,
         }
         if has_more:
-            res["notice"] = f"... [TRUNCATED: Showing first {safe_max} headings of {len(headings)}. Increase max_headings to see more] ..."
+            res["notice"] = (
+                f"... [TRUNCATED: Showing first {safe_max} headings of {len(headings)}. Increase max_headings to see more] ..."
+            )
         return res
     except Exception as e:
         return {"error": str(e)}
@@ -852,7 +947,7 @@ def get_document_outline(file_path: str, max_headings: int = 100) -> Dict[str, A
 def get_document_metadata(file_path: str) -> Dict[str, Any]:
     """
     Retrieve document properties, author, title, revision, word count, and timestamp metadata.
-    
+
     Args:
         file_path: Absolute or relative path to the .docx or .doc file.
     """
@@ -886,8 +981,8 @@ def get_document_metadata(file_path: str) -> Dict[str, Any]:
                 "total_paragraphs": total_paras,
                 "total_tables": len(doc.tables),
                 "total_sections": len(doc.sections),
-                "estimated_word_count": total_words
-            }
+                "estimated_word_count": total_words,
+            },
         }
         return meta
     except Exception as e:
@@ -901,12 +996,12 @@ def read_word_document(
     include_headers_footers: bool = True,
     output_format: str = "markdown",
     max_paragraphs: int = 80,
-    max_chars: int = 25000
+    max_chars: int = 25000,
 ) -> str:
     """
     Read and extract the content of a Word document formatted as Markdown or structured JSON.
     Includes token-safe truncation for large documents to prevent LLM context bloating.
-    
+
     Args:
         file_path: Path to the .docx or .doc file.
         include_tables: Whether to include table contents (default: True).
@@ -926,17 +1021,16 @@ def read_word_document(
                     runs = []
                     for r in p.runs:
                         if r.text:
-                            runs.append({
-                                "text": r.text,
-                                "formatting": extract_run_formatting(r, p.style)
-                            })
-                    paragraphs_data.append({
-                        "index": p_idx,
-                        "style": p.style.name if p.style else "",
-                        "alignment": str(p.alignment).split(".")[-1] if p.alignment else "LEFT",
-                        "text": p.text.strip(),
-                        "runs": runs
-                    })
+                            runs.append({"text": r.text, "formatting": extract_run_formatting(r, p.style)})
+                    paragraphs_data.append(
+                        {
+                            "index": p_idx,
+                            "style": p.style.name if p.style else "",
+                            "alignment": str(p.alignment).split(".")[-1] if p.alignment else "LEFT",
+                            "text": p.text.strip(),
+                            "runs": runs,
+                        }
+                    )
 
             has_more = len(paragraphs_data) > safe_max_paras
             display_paras = paragraphs_data[:safe_max_paras]
@@ -948,7 +1042,9 @@ def read_word_document(
                 "paragraphs": display_paras,
             }
             if has_more:
-                result["notice"] = f"... [TRUNCATED: Showing first {safe_max_paras} paragraphs of {len(paragraphs_data)} to protect context window] ..."
+                result["notice"] = (
+                    f"... [TRUNCATED: Showing first {safe_max_paras} paragraphs of {len(paragraphs_data)} to protect context window] ..."
+                )
             if include_tables:
                 tables_res = []
                 for t in doc.tables[:10]:
@@ -1017,7 +1113,7 @@ def read_word_document(
                     md.append("| " + " | ".join(["---"] * len(header)) + " |")
                     for r in rows[1:25]:
                         cells = r + [""] * (len(header) - len(r))
-                        md.append("| " + " | ".join(cells[:len(header)]) + " |")
+                        md.append("| " + " | ".join(cells[: len(header)]) + " |")
                     if len(rows) > 25:
                         md.append(f"\n*... [{len(rows) - 25} table rows truncated] ...*\n")
                 md.append("\n")
@@ -1041,14 +1137,11 @@ def read_word_document(
 
 @mcp.tool()
 def search_word_document(
-    file_path: str,
-    search_term: str,
-    match_case: bool = False,
-    max_matches: int = 50
+    file_path: str, search_term: str, match_case: bool = False, max_matches: int = 50
 ) -> Dict[str, Any]:
     """
     Search for a text term or pattern across paragraphs, headers, footers, and table cells in a Word document.
-    
+
     Args:
         file_path: Path to the .docx or .doc file.
         search_term: String or pattern to search for.
@@ -1064,11 +1157,13 @@ def search_word_document(
 
         for p_idx, p in enumerate(doc.paragraphs):
             if pattern.search(p.text):
-                matches.append({
-                    "location": f"Paragraph #{p_idx + 1}",
-                    "style": p.style.name if p.style else "",
-                    "text": p.text.strip()
-                })
+                matches.append(
+                    {
+                        "location": f"Paragraph #{p_idx + 1}",
+                        "style": p.style.name if p.style else "",
+                        "text": p.text.strip(),
+                    }
+                )
                 if len(matches) >= safe_max:
                     break
 
@@ -1088,10 +1183,12 @@ def search_word_document(
                 for r_idx, row in enumerate(table.rows):
                     for c_idx, cell in enumerate(row.cells):
                         if pattern.search(cell.text):
-                            matches.append({
-                                "location": f"Table {t_idx}, Row {r_idx + 1}, Col {c_idx + 1}",
-                                "text": cell.text.strip()
-                            })
+                            matches.append(
+                                {
+                                    "location": f"Table {t_idx}, Row {r_idx + 1}, Col {c_idx + 1}",
+                                    "text": cell.text.strip(),
+                                }
+                            )
                             if len(matches) >= safe_max:
                                 break
                     if len(matches) >= safe_max:
@@ -1104,10 +1201,12 @@ def search_word_document(
             "search_term": search_term,
             "total_matches": len(matches),
             "limit_reached": len(matches) >= safe_max,
-            "matches": matches
+            "matches": matches,
         }
         if len(matches) >= safe_max:
-            result_dict["notice"] = f"... [TRUNCATED: Showing first {safe_max} matches. Narrow your search term for more specific results] ..."
+            result_dict["notice"] = (
+                f"... [TRUNCATED: Showing first {safe_max} matches. Narrow your search term for more specific results] ..."
+            )
 
         return result_dict
     except Exception as e:
@@ -1116,15 +1215,11 @@ def search_word_document(
 
 @mcp.tool()
 def edit_paragraph(
-    file_path: str,
-    paragraph_index: int,
-    new_text: str,
-    output_path: Optional[str] = None,
-    overwrite: bool = False
+    file_path: str, paragraph_index: int, new_text: str, output_path: Optional[str] = None, overwrite: bool = False
 ) -> Dict[str, Any]:
     """
     Safely edit the text of a specific paragraph (1-indexed) in a Word document, preserving its style and formatting.
-    
+
     Args:
         file_path: Path to the .docx file.
         paragraph_index: 1-based index of the paragraph to edit.
@@ -1151,9 +1246,7 @@ def edit_paragraph(
 
         save_dest = output_path if output_path else file_path
         if not output_path and not overwrite:
-            return {
-                "error": "Overwriting the original file requires 'overwrite=True' or specifying an 'output_path'."
-            }
+            return {"error": "Overwriting the original file requires 'overwrite=True' or specifying an 'output_path'."}
 
         doc.save(save_dest)
         return {
@@ -1161,7 +1254,7 @@ def edit_paragraph(
             "file_path": os.path.abspath(save_dest),
             "paragraph_index": paragraph_index,
             "old_text_preview": old_text[:100] + ("..." if len(old_text) > 100 else ""),
-            "new_text_preview": new_text[:100] + ("..." if len(new_text) > 100 else "")
+            "new_text_preview": new_text[:100] + ("..." if len(new_text) > 100 else ""),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1174,11 +1267,11 @@ def insert_table(
     rows: List[List[str]],
     style: str = "Table Grid",
     output_path: Optional[str] = None,
-    overwrite: bool = False
+    overwrite: bool = False,
 ) -> Dict[str, Any]:
     """
     Insert a structured table into a Word document.
-    
+
     Args:
         file_path: Path to the target .docx file.
         headers: Column header names.
@@ -1215,9 +1308,7 @@ def insert_table(
 
         save_dest = output_path if output_path else file_path
         if not output_path and not overwrite:
-            return {
-                "error": "Overwriting the original file requires 'overwrite=True' or specifying an 'output_path'."
-            }
+            return {"error": "Overwriting the original file requires 'overwrite=True' or specifying an 'output_path'."}
 
         doc.save(save_dest)
         return {
@@ -1225,7 +1316,7 @@ def insert_table(
             "file_path": os.path.abspath(save_dest),
             "columns": num_cols,
             "rows_inserted": len(rows),
-            "table_index": len(doc.tables)
+            "table_index": len(doc.tables),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1235,7 +1326,7 @@ def insert_table(
 def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[str, Any]:
     """
     Extract author comments, tracked insertions, and tracked deletions from a Word document (.docx).
-    
+
     Args:
         file_path: Path to the .docx or .doc file.
         max_items: Maximum items to extract per category (default: 50, max: 100).
@@ -1250,6 +1341,7 @@ def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[
         # 1. Search for comments in docx package parts
         try:
             import xml.etree.ElementTree as ET
+
             for part in doc.part.package.parts:
                 if "comments" in part.partname:
                     root = ET.fromstring(part.blob)
@@ -1259,12 +1351,7 @@ def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[
                         author = c_elem.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author", "")
                         date = c_elem.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}date", "")
                         text = "".join(c_elem.itertext()).strip()
-                        comments.append({
-                            "id": cid,
-                            "author": author,
-                            "date": date,
-                            "text": text[:200]
-                        })
+                        comments.append({"id": cid, "author": author, "date": date, "text": text[:200]})
                         if len(comments) >= safe_max:
                             break
         except Exception:
@@ -1277,21 +1364,13 @@ def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[
                 date = ins.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}date", "")
                 text = "".join(ins.itertext()).strip()
                 if text:
-                    insertions.append({
-                        "author": author,
-                        "date": date,
-                        "text": text[:150]
-                    })
+                    insertions.append({"author": author, "date": date, "text": text[:150]})
             for d in doc._element.xpath("//*[local-name()='del']")[:safe_max]:
                 author = d.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}author", "")
                 date = d.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}date", "")
                 text = "".join(d.itertext()).strip()
                 if text:
-                    deletions.append({
-                        "author": author,
-                        "date": date,
-                        "text": text[:150]
-                    })
+                    deletions.append({"author": author, "date": date, "text": text[:150]})
         except Exception:
             pass
 
@@ -1302,12 +1381,10 @@ def inspect_revisions_and_comments(file_path: str, max_items: int = 50) -> Dict[
             "total_deletions": len(deletions),
             "comments": comments,
             "tracked_insertions": insertions,
-            "tracked_deletions": deletions
+            "tracked_deletions": deletions,
         }
     except Exception as e:
         return {"error": str(e)}
-
-
 
 
 @mcp.tool()
@@ -1318,11 +1395,11 @@ def create_document(
     paper_size: str = "A4",
     orientation: str = "portrait",
     margin_inches: float = 1.0,
-    overwrite: bool = True
+    overwrite: bool = True,
 ) -> Dict[str, Any]:
     """
     Create a new empty Microsoft Word (.docx) document with custom page setup, margins, and metadata.
-    
+
     Args:
         file_path: Path to the new .docx file to create.
         title: Optional document title to set in core metadata and insert as Title heading.
@@ -1333,7 +1410,7 @@ def create_document(
         overwrite: Whether to overwrite if the file already exists (default: True).
     """
     try:
-        abs_path = os.path.abspath(file_path.strip('"\''))
+        abs_path = os.path.abspath(file_path.strip("\"'"))
         if os.path.exists(abs_path) and not overwrite:
             return {"error": f"File already exists: {abs_path}. Set overwrite=True to replace it."}
 
@@ -1380,7 +1457,7 @@ def create_document(
             "paper_size": paper_size,
             "orientation": orientation,
             "margin_inches": margin_inches,
-            "file_size_bytes": os.path.getsize(abs_path)
+            "file_size_bytes": os.path.getsize(abs_path),
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1400,11 +1477,11 @@ def add_paragraph(
     alignment: Optional[str] = None,
     space_before_pt: Optional[float] = None,
     space_after_pt: Optional[float] = None,
-    line_spacing: Optional[float] = None
+    line_spacing: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Append a styled paragraph to a Word document.
-    
+
     Args:
         file_path: Path to the .docx document.
         text: Paragraph text content.
@@ -1446,7 +1523,7 @@ def add_paragraph(
                 "center": WD_ALIGN_PARAGRAPH.CENTER,
                 "right": WD_ALIGN_PARAGRAPH.RIGHT,
                 "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
-                "left": WD_ALIGN_PARAGRAPH.LEFT
+                "left": WD_ALIGN_PARAGRAPH.LEFT,
             }
             if alignment.lower() in align_map:
                 p.alignment = align_map[alignment.lower()]
@@ -1459,27 +1536,23 @@ def add_paragraph(
         if line_spacing is not None:
             pf.line_spacing = line_spacing
 
-        clean_path = os.path.abspath(file_path.strip('"\''))
+        clean_path = os.path.abspath(file_path.strip("\"'"))
         doc.save(clean_path)
         return {
             "status": "success",
             "file_path": clean_path,
             "paragraph_index": len(doc.paragraphs) - 1,
-            "text_length": len(text)
+            "text_length": len(text),
         }
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-def add_heading(
-    file_path: str,
-    text: str,
-    level: int = 1
-) -> Dict[str, Any]:
+def add_heading(file_path: str, text: str, level: int = 1) -> Dict[str, Any]:
     """
     Append a heading (level 1-9) or Title (level 0) to a Word document.
-    
+
     Args:
         file_path: Path to the .docx document.
         text: Heading text content.
@@ -1489,28 +1562,19 @@ def add_heading(
         doc = load_document(file_path)
         safe_level = max(0, min(9, int(level)))
         doc.add_heading(text, level=safe_level)
-        clean_path = os.path.abspath(file_path.strip('"\''))
+        clean_path = os.path.abspath(file_path.strip("\"'"))
         doc.save(clean_path)
-        return {
-            "status": "success",
-            "file_path": clean_path,
-            "heading": text,
-            "level": safe_level
-        }
+        return {"status": "success", "file_path": clean_path, "heading": text, "level": safe_level}
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-def fill_template(
-    template_path: str,
-    output_path: str,
-    replacements: Dict[str, str]
-) -> Dict[str, Any]:
+def fill_template(template_path: str, output_path: str, replacements: Dict[str, str]) -> Dict[str, Any]:
     """
     Populate a Word document template by replacing placeholder tags (e.g. {{client_name}}, {{date}}, {{total_amount}})
     across body paragraphs, tables, headers, and footers while preserving styles.
-    
+
     Args:
         template_path: Path to the source .docx template file.
         output_path: Destination path for the populated .docx file.
@@ -1553,7 +1617,7 @@ def fill_template(
                     for p in f.paragraphs:
                         replace_in_p(p)
 
-        dest = os.path.abspath(output_path.strip('"\''))
+        dest = os.path.abspath(output_path.strip("\"'"))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         doc.save(dest)
         return {
@@ -1561,7 +1625,7 @@ def fill_template(
             "template_path": os.path.abspath(template_path),
             "output_path": dest,
             "placeholders_count": len(replacements),
-            "total_replacements_applied": total_replaced
+            "total_replacements_applied": total_replaced,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1569,15 +1633,11 @@ def fill_template(
 
 @mcp.tool()
 def replace_text(
-    file_path: str,
-    search_text: str,
-    replace_text: str,
-    match_case: bool = False,
-    output_path: Optional[str] = None
+    file_path: str, search_text: str, replace_text: str, match_case: bool = False, output_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Find and replace text across the entire Word document (paragraphs and tables).
-    
+
     Args:
         file_path: Path to the .docx document.
         search_text: Substring to find.
@@ -1607,13 +1667,13 @@ def replace_text(
                     for p in cell.paragraphs:
                         do_replace(p)
 
-        dest = os.path.abspath((output_path or file_path).strip('"\''))
+        dest = os.path.abspath((output_path or file_path).strip("\"'"))
         doc.save(dest)
         return {
             "status": "success",
             "file_path": dest,
             "search_text": search_text,
-            "occurrences_replaced": replacements_count
+            "occurrences_replaced": replacements_count,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -1625,11 +1685,11 @@ def insert_image(
     image_path: str,
     width_inches: Optional[float] = None,
     height_inches: Optional[float] = None,
-    caption: Optional[str] = None
+    caption: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Insert an image into a Word document with optional scaling and caption.
-    
+
     Args:
         file_path: Path to the target .docx document.
         image_path: Path to the image file (.png, .jpg, .jpeg, etc.).
@@ -1638,7 +1698,7 @@ def insert_image(
         caption: Optional caption text placed below the image.
     """
     try:
-        clean_img = os.path.abspath(image_path.strip('"\''))
+        clean_img = os.path.abspath(image_path.strip("\"'"))
         if not os.path.exists(clean_img):
             return {"error": f"Image file not found: {clean_img}"}
 
@@ -1651,7 +1711,7 @@ def insert_image(
             p = doc.add_paragraph(caption, style="Caption")
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-        dest = os.path.abspath(file_path.strip('"\''))
+        dest = os.path.abspath(file_path.strip("\"'"))
         doc.save(dest)
         return {
             "status": "success",
@@ -1659,31 +1719,28 @@ def insert_image(
             "image_path": clean_img,
             "width_inches": width_inches,
             "height_inches": height_inches,
-            "caption": caption
+            "caption": caption,
         }
     except Exception as e:
         return {"error": str(e)}
 
 
 @mcp.tool()
-def export_to_pdf(
-    file_path: str,
-    output_pdf_path: Optional[str] = None
-) -> Dict[str, Any]:
+def export_to_pdf(file_path: str, output_pdf_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Export a Microsoft Word document (.docx) to a high-fidelity PDF file using Windows Word COM automation.
-    
+
     Args:
         file_path: Path to the source .docx file.
         output_pdf_path: Optional destination path for the .pdf file (defaults to same name with .pdf extension).
     """
     try:
-        abs_docx = os.path.abspath(file_path.strip('"\''))
+        abs_docx = os.path.abspath(file_path.strip("\"'"))
         if not os.path.exists(abs_docx):
             return {"error": f"Source document not found: {abs_docx}"}
 
         if output_pdf_path:
-            abs_pdf = os.path.abspath(output_pdf_path.strip('"\''))
+            abs_pdf = os.path.abspath(output_pdf_path.strip("\"'"))
         else:
             abs_pdf = os.path.splitext(abs_docx)[0] + ".pdf"
 
@@ -1691,12 +1748,13 @@ def export_to_pdf(
 
         try:
             import win32com.client
+
             word = win32com.client.DispatchEx("Word.Application")
             word.Visible = False
             word.DisplayAlerts = False
             try:
                 wdoc = word.Documents.Open(abs_docx)
-                wdoc.SaveAs2(abs_pdf, FileFormat=17) # 17 = wdFormatPDF
+                wdoc.SaveAs2(abs_pdf, FileFormat=17)  # 17 = wdFormatPDF
                 wdoc.Close(False)
             finally:
                 word.Quit()
@@ -1704,16 +1762,14 @@ def export_to_pdf(
             try:
                 docx2pdf = __import__("docx2pdf")
                 docx2pdf.convert(abs_docx, abs_pdf)
-            except Exception as d2p_err:
-                return {
-                    "error": f"Failed to export PDF via Word COM: {com_err}. Ensure Microsoft Word is installed."
-                }
+            except Exception:
+                return {"error": f"Failed to export PDF via Word COM: {com_err}. Ensure Microsoft Word is installed."}
 
         return {
             "status": "success",
             "source_docx": abs_docx,
             "output_pdf": abs_pdf,
-            "pdf_size_bytes": os.path.getsize(abs_pdf)
+            "pdf_size_bytes": os.path.getsize(abs_pdf),
         }
     except Exception as e:
         return {"error": str(e)}

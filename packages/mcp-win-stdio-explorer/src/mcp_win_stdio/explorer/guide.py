@@ -64,5 +64,6 @@ in-file grep, RapidFuzz fuzzy search, and code symbol extraction.
 # ================================================================
 """
 
+
 def print_explorer_guide() -> None:
     print(EXPLORER_GUIDE.strip())

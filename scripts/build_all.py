@@ -2,11 +2,10 @@
 Build script to compile wheels and source distributions for all 8 packages.
 """
 
-import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 if sys.platform == "win32":
     try:

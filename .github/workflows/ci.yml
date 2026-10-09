@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Check out repository
@@ -30,14 +30,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql paramiko cryptography build twine pytest
+          pip install mcp rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql paramiko cryptography sqlalchemy playwright networkx numpy build twine pytest hatchling
           pip install -e .
+          pip install -e packages/mcp-win-stdio-excel -e packages/mcp-win-stdio-word -e packages/mcp-win-stdio-explorer -e packages/mcp-win-stdio-tsc -e packages/mcp-win-stdio-db -e packages/mcp-win-stdio-git -e packages/mcp-win-stdio-ssh -e packages/mcp-win-stdio-rag -e packages/mcp-win-stdio-excel-db
 
-      - name: Run CLI and Discovery Tests
-        run: python tests/test_cli.py
-
-      - name: Run Audit & Server Engine Tests
-        run: python tests/test_audit.py
+      - name: Run Test Suite
+        run: pytest
 
   build-validation:
     name: Validate Wheel & Sdist Builds
@@ -55,8 +53,9 @@ jobs:
       - name: Install build tools
         run: pip install --upgrade build twine hatchling
 
-      - name: Build all 8 packages
+      - name: Build all 10 packages
         run: python scripts/build_all.py
 
       - name: Validate distribution packages with Twine
         run: twine check dist/*
+

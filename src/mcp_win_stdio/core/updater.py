@@ -3,14 +3,10 @@ Automatic PyPI version checking and update engine for mcp-win-stdio.
 """
 
 import json
-import os
-from pathlib import Path
 import re
-import subprocess
-import sys
 import time
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
 
@@ -31,10 +27,7 @@ def parse_version(ver_str: str) -> Tuple[int, ...]:
 def fetch_latest_pypi_version(timeout: float = 1.5) -> Optional[str]:
     """Fetch latest package version from PyPI with a strict timeout."""
     try:
-        req = urllib.request.Request(
-            PYPI_URL,
-            headers={"User-Agent": "mcp-win-stdio-updater"}
-        )
+        req = urllib.request.Request(PYPI_URL, headers={"User-Agent": "mcp-win-stdio-updater"})
         with urllib.request.urlopen(req, timeout=timeout) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode("utf-8"))
@@ -105,7 +98,7 @@ def format_update_banner(current_version: str, latest_version: str) -> str:
     banner = [
         "┌" + "─" * 74 + "┐",
         f"│  ✨  UPDATE AVAILABLE: v{current_version} ➔ v{latest_version:<44}│",
-        f"│  💡  Run 'mws update' or 'pip install --upgrade mcp-win-stdio' to update!  │",
+        "│  💡  Run 'mws update' or 'pip install --upgrade mcp-win-stdio' to update!  │",
         "└" + "─" * 74 + "┘",
     ]
     return "\n".join(banner)

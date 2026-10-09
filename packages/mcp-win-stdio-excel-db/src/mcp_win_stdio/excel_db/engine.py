@@ -3,24 +3,23 @@
 Cross-Source Join Engine for executing unified SQL queries across SQL Databases and Excel Workbooks.
 """
 
-import json
 import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
 
-from mcp_win_stdio.excel_db.stream import resolve_sqlalchemy_url, stream_db_to_excel
+from mcp_win_stdio.excel_db.stream import resolve_sqlalchemy_url
 
 
 def run_cross_source_query(
     sources: List[Dict[str, Any]],
     transformation_sql: str,
     target: Optional[Dict[str, Any]] = None,
-    db_resolver_func = None
+    db_resolver_func=None,
 ) -> Dict[str, Any]:
     """
     Execute a unified SQL query joining SQL databases and Excel spreadsheets in memory.
@@ -77,7 +76,7 @@ def run_cross_source_query(
                 raise ValueError(f"Unsupported source type: '{s_type}'. Supported: 'db', 'excel', 'csv'.")
 
             # Clean column headers for SQLite
-            df.columns = [re.sub(r'[^a-zA-Z0-9_]', '_', str(col).strip()) for col in df.columns]
+            df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", str(col).strip()) for col in df.columns]
             df.to_sql(s_name, mem_conn, index=False, if_exists="replace")
             loaded_sources_info.append(f"{s_name} ({len(df)} rows, {len(df.columns)} cols)")
 
@@ -93,15 +92,10 @@ def run_cross_source_query(
                 out_path = Path(target.get("path", "unified_report.xlsx")).resolve()
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 sheet_name = target.get("sheet", "Report")
-                
+
                 with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                     result_df.to_excel(writer, sheet_name=sheet_name, index=False)
-                output_summary = {
-                    "type": "excel",
-                    "path": str(out_path),
-                    "sheet": sheet_name,
-                    "rows_written": res_rows
-                }
+                output_summary = {"type": "excel", "path": str(out_path), "sheet": sheet_name, "rows_written": res_rows}
 
             elif t_type == "db":
                 conn_id = target.get("connection")
@@ -113,11 +107,7 @@ def run_cross_source_query(
                 eng = create_engine(resolved_url)
 
                 result_df.to_sql(tbl_name, con=eng, if_exists=if_exists, index=False, chunksize=1000)
-                output_summary = {
-                    "type": "db",
-                    "table": tbl_name,
-                    "rows_inserted": res_rows
-                }
+                output_summary = {"type": "db", "table": tbl_name, "rows_inserted": res_rows}
 
         duration = (datetime.now() - t_start).total_seconds()
 
@@ -132,7 +122,7 @@ def run_cross_source_query(
             "columns": list(result_df.columns),
             "output_target": output_summary if target else "In-Memory Preview",
             "preview_sample": sample_preview,
-            "duration_seconds": round(duration, 3)
+            "duration_seconds": round(duration, 3),
         }
 
     finally:

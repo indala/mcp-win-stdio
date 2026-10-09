@@ -5,8 +5,7 @@ Discovery service for built-in MCP servers and user plugins in ~/.mcp-win-stdio/
 import importlib
 import importlib.util
 from pathlib import Path
-import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from mcp_win_stdio.core.config import PLUGINS_DIR, ensure_workspace_dirs
 

@@ -6,17 +6,15 @@ diagnostic cache for instantaneous (0ms latency) TypeScript error inspection.
 """
 
 import atexit
-from datetime import datetime, timezone
-import json
 import ntpath
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 try:
@@ -70,11 +68,24 @@ def is_home_or_root_dir(p: Union[str, os.PathLike]) -> bool:
         resolved_str = str(resolved).lower()
 
         # Check against common system environment paths
-        for env_var in ("APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "WINDIR", "SYSTEMROOT", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+        for env_var in (
+            "APPDATA",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+            "WINDIR",
+            "SYSTEMROOT",
+            "PROGRAMFILES",
+            "PROGRAMFILES(X86)",
+        ):
             val = os.environ.get(env_var)
             if val:
                 val_resolved = str(Path(val).resolve()).lower()
-                if resolved_str == val_resolved or resolved_str.startswith(val_resolved + "\\") or resolved_str.startswith(val_resolved + "/"):
+                if (
+                    resolved_str == val_resolved
+                    or resolved_str.startswith(val_resolved + "\\")
+                    or resolved_str.startswith(val_resolved + "/")
+                ):
                     return True
 
         # Check path parts directly for AppData or Windows system directories
@@ -103,6 +114,7 @@ def get_default_watch_dir() -> Optional[str]:
     # Check ~/.mcp-win-stdio/config.json
     try:
         from mcp_win_stdio.core.config import load_config
+
         cfg = load_config()
         stored_dir = cfg.get("tsc_watch_dir")
         if stored_dir:
@@ -184,11 +196,34 @@ def normalize_path(p: str) -> str:
 def find_tsconfigs(base_dir: str, max_depth: int = 4) -> List[str]:
     """Find all tsconfig.json files skipping heavy build/vendor folders."""
     ignore_dirs = {
-        "node_modules", ".git", ".next", ".nuxt", "dist", "build",
-        "out", ".output", "target", "bin", "obj", "__pycache__", ".cache",
-        "coverage", ".turbo", "appdata", ".vscode", ".gemini", ".cursor",
-        ".cargo", ".rustup", "venv", ".venv", "env", ".env", "site-packages",
-        "local settings", "application data"
+        "node_modules",
+        ".git",
+        ".next",
+        ".nuxt",
+        "dist",
+        "build",
+        "out",
+        ".output",
+        "target",
+        "bin",
+        "obj",
+        "__pycache__",
+        ".cache",
+        "coverage",
+        ".turbo",
+        "appdata",
+        ".vscode",
+        ".gemini",
+        ".cursor",
+        ".cargo",
+        ".rustup",
+        "venv",
+        ".venv",
+        "env",
+        ".env",
+        "site-packages",
+        "local settings",
+        "application data",
     }
     configs = []
     base_p = Path(base_dir)
@@ -436,6 +471,7 @@ def _cleanup_watchers():
                 except Exception:
                     pass
 
+
 atexit.register(_cleanup_watchers)
 
 # Startup initialization:
@@ -447,7 +483,6 @@ if _initial_root and os.path.isdir(_initial_root) and not is_home_or_root_dir(_i
     _tsc_status = check_tsc_available(_initial_root)
     if _tsc_status["available"]:
         start_watching_project(_initial_root, cmd_base=_tsc_status["command"])
-
 
 
 def _format_tsc_error(err: Dict[str, Any], max_msg_chars: int = 300) -> Dict[str, Any]:
@@ -475,6 +510,7 @@ def _format_tsc_error(err: Dict[str, Any], max_msg_chars: int = 300) -> Dict[str
 # MCP TOOLS
 # ==========================================
 
+
 @mcp.tool()
 def get_tsc_errors(
     project_path: Optional[str] = None,
@@ -490,7 +526,7 @@ def get_tsc_errors(
     Get active TypeScript compiler errors across watched projects (0ms latency from memory cache).
     Features automatic context window protection, pagination, error code filtering, token-safe message truncation,
     and automatic synchronization if an initial compilation pass is in progress.
-    
+
     Args:
         project_path: Optional filter by project directory substring.
         tsconfig_path: Optional filter by specific tsconfig.json file path.
@@ -581,14 +617,16 @@ def get_tsc_errors(
                     continue
                 all_errors.append(e)
 
-            projects_summary.append({
-                "tsconfig": data["relative_config"],
-                "project_dir": data["project_dir"],
-                "status": status,
-                "error_count": len(errs),
-                "compile_duration_s": data.get("compile_duration_s"),
-                "last_updated": data["last_updated"],
-            })
+            projects_summary.append(
+                {
+                    "tsconfig": data["relative_config"],
+                    "project_dir": data["project_dir"],
+                    "status": status,
+                    "error_count": len(errs),
+                    "compile_duration_s": data.get("compile_duration_s"),
+                    "last_updated": data["last_updated"],
+                }
+            )
 
         # Calculate high-level breakdown
         code_counts: Dict[str, int] = {}
@@ -626,7 +664,9 @@ def get_tsc_errors(
 
         if compiling_count > 0:
             result["is_initial_compilation_pending"] = True
-            result["status_notice"] = f"{compiling_count} project(s) still compiling initial pass. Diagnostics will update once compilation completes."
+            result["status_notice"] = (
+                f"{compiling_count} project(s) still compiling initial pass. Diagnostics will update once compilation completes."
+            )
 
         return result
 
@@ -635,7 +675,7 @@ def get_tsc_errors(
 def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[str, Any]:
     """
     [Advanced Tool] Instant actionable fix recommendations and code patterns for common TypeScript compiler errors.
-    
+
     Args:
         error_code: The TypeScript error code (e.g. 'TS2304', 'TS2322', 'TS2339', 'TS7016').
         message: Optional compiler error message for deeper context analysis.
@@ -651,13 +691,13 @@ def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[
             "common_causes": [
                 "Missing import statement for a module or type.",
                 "Using browser/node globals (e.g. 'process', 'window', 'document') without appropriate types installed (@types/node).",
-                "Typo in variable or class name."
+                "Typo in variable or class name.",
             ],
             "resolutions": [
                 "Add import statement: import { X } from './module';",
                 "If using Node globals: run 'npm install --save-dev @types/node' and add 'node' to compilerOptions.types in tsconfig.json.",
-                "If ambient library global: declare global variable: declare const X: any;"
-            ]
+                "If ambient library global: declare global variable: declare const X: any;",
+            ],
         },
         "TS2322": {
             "title": "Type 'A' is not assignable to type 'B'",
@@ -665,13 +705,13 @@ def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[
             "common_causes": [
                 "Passing a null or undefined value to a strictly typed property (strictNullChecks).",
                 "Object is missing required fields defined in an interface/type.",
-                "Incompatible primitive types (e.g. string passed where number is expected)."
+                "Incompatible primitive types (e.g. string passed where number is expected).",
             ],
             "resolutions": [
                 "Check for null/undefined: provide default fallback (val ?? defaultValue) or use optional type (B | null).",
                 "Ensure all mandatory fields of interface 'B' are populated.",
-                "Use explicit type narrowing (typeof, instanceof, in operator) before assignment."
-            ]
+                "Use explicit type narrowing (typeof, instanceof, in operator) before assignment.",
+            ],
         },
         "TS2339": {
             "title": "Property 'X' does not exist on type 'Y'",
@@ -679,37 +719,35 @@ def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[
             "common_causes": [
                 "Accessing property on union type where not all union members have property 'X'.",
                 "Accessing property on 'unknown' or 'never' type.",
-                "Missing property definition on interface or class."
+                "Missing property definition on interface or class.",
             ],
             "resolutions": [
                 "Use optional chaining: object?.X",
                 "Narrow union type using type guards: if ('X' in obj) { obj.X }",
                 "If 'unknown' type: cast or validate before access: (obj as Record<string, any>).X",
-                "Extend interface definition with optional or required field: X?: string;"
-            ]
+                "Extend interface definition with optional or required field: X?: string;",
+            ],
         },
         "TS2554": {
             "title": "Expected N arguments, but got M",
             "category": "Function Signature Mismatch",
             "common_causes": [
                 "Calling function with too few or too many arguments.",
-                "Function definition changed without updating callers."
+                "Function definition changed without updating callers.",
             ],
             "resolutions": [
                 "Provide all mandatory arguments, or make unused arguments optional in function declaration: fn(a: string, b?: number).",
-                "Use object destructuring for parameter lists: fn({ a, b = defaultVal }: Options)."
-            ]
+                "Use object destructuring for parameter lists: fn({ a, b = defaultVal }: Options).",
+            ],
         },
         "TS7016": {
             "title": "Could not find a declaration file for module 'X'",
             "category": "Missing Type Definitions",
-            "common_causes": [
-                "Third-party npm package lacks bundled TypeScript declaration (.d.ts) files."
-            ],
+            "common_causes": ["Third-party npm package lacks bundled TypeScript declaration (.d.ts) files."],
             "resolutions": [
                 "Install DefinitelyTyped types: npm install --save-dev @types/X",
-                "If no @types exists: create a ambient declaration file (e.g. 'src/declarations.d.ts') with: declare module 'X';"
-            ]
+                "If no @types exists: create a ambient declaration file (e.g. 'src/declarations.d.ts') with: declare module 'X';",
+            ],
         },
         "TS18048": {
             "title": "'X' is possibly 'undefined'",
@@ -720,9 +758,9 @@ def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[
             "resolutions": [
                 "Use optional chaining: obj?.prop",
                 "Use nullish coalescing default: const val = obj?.prop ?? fallback;",
-                "Use early guard return: if (!obj) return;"
-            ]
-        }
+                "Use early guard return: if (!obj) return;",
+            ],
+        },
     }
 
     advice = knowledge_base.get(code)
@@ -734,15 +772,17 @@ def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[
             "category": advice["category"],
             "common_causes": advice["common_causes"],
             "recommended_resolutions": advice["resolutions"],
-            "provided_message": message
+            "provided_message": message,
         }
 
     return {
         "success": True,
         "error_code": code,
         "category": "General TypeScript Error",
-        "guidance": "Check TypeScript documentation for error code " + code + ". Ensure types match interface declarations and strict null checks are satisfied.",
-        "provided_message": message
+        "guidance": "Check TypeScript documentation for error code "
+        + code
+        + ". Ensure types match interface declarations and strict null checks are satisfied.",
+        "provided_message": message,
     }
 
 
@@ -762,7 +802,7 @@ def get_error_category_breakdown() -> Dict[str, Any]:
             "property_access_errors": [],
             "nullability_and_undefined": [],
             "function_signature_mismatches": [],
-            "other": []
+            "other": [],
         }
 
         total = 0
@@ -774,7 +814,7 @@ def get_error_category_breakdown() -> Dict[str, Any]:
                     "code": c,
                     "file": e.get("relative_path") or e.get("file"),
                     "line": e.get("line"),
-                    "message": e.get("message")
+                    "message": e.get("message"),
                 }
 
                 if c in ("TS2304", "TS7016", "TS2307", "TS2686"):
@@ -795,14 +835,14 @@ def get_error_category_breakdown() -> Dict[str, Any]:
         for cat_name, items in categories.items():
             capped_cats[cat_name] = {
                 "count": len(items),
-                "sample_errors": [_format_tsc_error(it, max_msg_chars=200) for it in items[:6]]
+                "sample_errors": [_format_tsc_error(it, max_msg_chars=200) for it in items[:6]],
             }
 
         return {
             "success": True,
             "total_errors": total,
             "category_summary": {k: v["count"] for k, v in capped_cats.items()},
-            "details": capped_cats
+            "details": capped_cats,
         }
 
 
@@ -815,7 +855,7 @@ def get_file_errors(
 ) -> Dict[str, Any]:
     """
     Get TypeScript compiler errors for a specific file (.ts, .tsx, .js, .jsx) with context window protection.
-    
+
     Args:
         file_path: Relative or absolute path to the TypeScript/JavaScript file.
         limit: Max errors to return in this batch (default 30, max 100).
@@ -960,15 +1000,17 @@ def list_watched_projects() -> Dict[str, Any]:
     with CACHE_LOCK:
         projects = []
         for cfg_path, data in WATCHED_PROJECTS.items():
-            projects.append({
-                "tsconfig_path": cfg_path,
-                "relative_config": data["relative_config"],
-                "project_dir": data["project_dir"],
-                "status": data["status"],
-                "error_count": len(data.get("errors", [])),
-                "compile_duration_s": data.get("compile_duration_s"),
-                "last_updated": data["last_updated"],
-            })
+            projects.append(
+                {
+                    "tsconfig_path": cfg_path,
+                    "relative_config": data["relative_config"],
+                    "project_dir": data["project_dir"],
+                    "status": data["status"],
+                    "error_count": len(data.get("errors", [])),
+                    "compile_duration_s": data.get("compile_duration_s"),
+                    "last_updated": data["last_updated"],
+                }
+            )
 
         if not projects:
             return {
@@ -1055,12 +1097,14 @@ def watch_project(
                 p_data = WATCHED_PROJECTS[norm_cfg]
                 err_cnt = len(p_data.get("errors", []))
                 total_errors += err_cnt
-                project_details.append({
-                    "tsconfig": p_data.get("relative_config", cfg),
-                    "status": p_data.get("status"),
-                    "error_count": err_cnt,
-                    "compile_duration_s": p_data.get("compile_duration_s"),
-                })
+                project_details.append(
+                    {
+                        "tsconfig": p_data.get("relative_config", cfg),
+                        "status": p_data.get("status"),
+                        "error_count": err_cnt,
+                        "compile_duration_s": p_data.get("compile_duration_s"),
+                    }
+                )
 
     return {
         "success": True,
@@ -1074,8 +1118,8 @@ def watch_project(
         "projects": project_details,
         "message": (
             f"Verified 'tsc' ({tsc_check.get('type')}) and compiled {len(configs)} configuration(s) in {elapsed_s}s ({total_errors} errors found)."
-            if compilation_completed else
-            f"Started background watchers for {len(configs)} configuration(s). Compilation continuing in background."
+            if compilation_completed
+            else f"Started background watchers for {len(configs)} configuration(s). Compilation continuing in background."
         ),
     }
 
@@ -1150,13 +1194,15 @@ def restart_tsc_watcher(
                 p_data = WATCHED_PROJECTS[norm_cfg]
                 err_cnt = len(p_data.get("errors", []))
                 total_errors += err_cnt
-                project_summaries.append({
-                    "tsconfig": p_data.get("relative_config", cfg),
-                    "project_dir": p_data.get("project_dir"),
-                    "status": p_data.get("status"),
-                    "error_count": err_cnt,
-                    "compile_duration_s": p_data.get("compile_duration_s"),
-                })
+                project_summaries.append(
+                    {
+                        "tsconfig": p_data.get("relative_config", cfg),
+                        "project_dir": p_data.get("project_dir"),
+                        "status": p_data.get("status"),
+                        "error_count": err_cnt,
+                        "compile_duration_s": p_data.get("compile_duration_s"),
+                    }
+                )
 
     if compilation_completed:
         msg = f"Successfully restarted and recompiled {len(all_configs)} project configuration(s) in {elapsed_s}s ({total_errors} errors found)."
@@ -1176,4 +1222,3 @@ def restart_tsc_watcher(
 
 if __name__ == "__main__":
     mcp.run()
-

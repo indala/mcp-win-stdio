@@ -4,6 +4,7 @@ CLI entry point for mcp-win-stdio-db.
 
 import argparse
 import sys
+
 from mcp_win_stdio.db import __version__
 from mcp_win_stdio.db.server import mcp
 
@@ -27,6 +28,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 
     print("\n--- Native DB Dump Utilities ---")
     import shutil
+
     for util in ("pg_dump", "psql", "mysqldump", "mysql"):
         loc = shutil.which(util)
         if loc:

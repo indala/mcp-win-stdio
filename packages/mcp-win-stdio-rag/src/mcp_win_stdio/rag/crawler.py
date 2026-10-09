@@ -4,13 +4,9 @@ Playwright-powered Automated Section-Aware Documentation Crawler and Link Graph 
 Supports Single-Page API docs with Anchor ID deep-links (e.g. Zenodo, Slate, Redoc).
 """
 
-import asyncio
 import hashlib
-import json
-import re
-from pathlib import Path
-from typing import Dict, List, Set, Any, Optional, Tuple
-from urllib.parse import urlparse, urljoin
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urljoin, urlparse
 
 import networkx as nx
 from playwright.async_api import async_playwright
@@ -29,7 +25,7 @@ def normalize_canonical_url(url: str, base_url: str) -> str:
     parsed = urlparse(joined)
     scheme = "https" if parsed.scheme in ("http", "https") else parsed.scheme
     netloc = parsed.netloc.lower()
-    path = parsed.path.rstrip('/')
+    path = parsed.path.rstrip("/")
     if not path:
         path = "/"
     return f"{scheme}://{netloc}{path}"
@@ -62,7 +58,9 @@ class AsyncPlaywrightCrawler:
             except Exception as e:
                 err_text = str(e)
                 if "Executable doesn't exist" in err_text or "playwright install" in err_text:
-                    import subprocess, sys
+                    import subprocess
+                    import sys
+
                     sys.stderr.write("Playwright Chromium browser missing. Installing automatically...\n")
                     sys.stderr.flush()
                     subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
@@ -148,26 +146,23 @@ class AsyncPlaywrightCrawler:
                         "depth": depth,
                         "parent": parent_url,
                         "sections": sections_data,
-                        "sections_count": len(sections_data)
+                        "sections_count": len(sections_data),
                     }
                     self.pages_data.append(page_info)
 
                     # Enqueue child links
                     if depth < self.max_depth:
                         for href in hrefs:
-                            if not href or href.startswith(('javascript:', 'mailto:', 'tel:')) or href.startswith('#'):
+                            if not href or href.startswith(("javascript:", "mailto:", "tel:")) or href.startswith("#"):
                                 continue
                             child_norm = normalize_canonical_url(href, norm_url)
                             if self._is_same_domain(child_norm) and child_norm not in self.visited_urls:
                                 queue.append((child_norm, depth + 1, norm_url))
 
                 except Exception as e:
-                    self.pages_data.append({
-                        "url": norm_url,
-                        "title": f"Error loading {norm_url}",
-                        "error": str(e),
-                        "sections": []
-                    })
+                    self.pages_data.append(
+                        {"url": norm_url, "title": f"Error loading {norm_url}", "error": str(e), "sections": []}
+                    )
 
             await browser.close()
 
@@ -180,5 +175,5 @@ class AsyncPlaywrightCrawler:
             "total_sections_extracted": total_sections_count,
             "is_single_page_doc": is_single_page,
             "pages": self.pages_data,
-            "site_graph": tree_structure
+            "site_graph": tree_structure,
         }

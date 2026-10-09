@@ -4,13 +4,10 @@ Allows creating background local-to-remote tunnels using paramiko direct-tcpip c
 """
 
 import select
-import socket
 import socketserver
 import threading
 import time
 from typing import Any, Dict, List, Optional
-
-import paramiko
 
 from mcp_win_stdio.ssh.connection import get_cached_or_connect, resolve_host_info
 
@@ -89,9 +86,7 @@ def open_local_tunnel(
         except Exception as e:
             raise OSError(f"Failed to bind local port {local_port}: {e}")
 
-        server_thread = threading.Thread(
-            target=server.serve_forever, daemon=True, name=f"SSHTunnel-{name}"
-        )
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True, name=f"SSHTunnel-{name}")
         server_thread.start()
 
         info = {

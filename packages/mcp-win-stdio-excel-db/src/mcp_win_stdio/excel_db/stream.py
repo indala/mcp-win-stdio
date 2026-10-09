@@ -3,15 +3,12 @@
 High-Performance Bi-Directional Streaming Engine between SQL Databases and Excel Workbooks.
 """
 
-import json
 import math
-import os
 import re
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlparse, unquote
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -68,7 +65,7 @@ def stream_db_to_excel(
     sheet_name: str = "QueryResults",
     if_sheet_exists: str = "replace",
     table_style: Optional[str] = "TableStyleMedium9",
-    autofit_columns: bool = True
+    autofit_columns: bool = True,
 ) -> Dict[str, Any]:
     """Execute SQL query against database and stream directly to Excel workbook file."""
     t_start = datetime.now()
@@ -118,15 +115,17 @@ def stream_db_to_excel(
     # Apply Table Styling
     if table_style and row_count > 0 and col_count > 0:
         table_ref = f"A1:{get_column_letter(col_count)}{row_count + 1}"
-        tab_name = re.sub(r'[^a-zA-Z0-9_]', '_', f"Tab_{sheet_name}_{uuid.uuid4().hex[:6]}")
+        tab_name = re.sub(r"[^a-zA-Z0-9_]", "_", f"Tab_{sheet_name}_{uuid.uuid4().hex[:6]}")
         tab = Table(displayName=tab_name, ref=table_ref)
-        tab.tableStyleInfo = TableStyleInfo(name=table_style, showFirstColumn=False, showLastColumn=False, showRowStripes=True)
+        tab.tableStyleInfo = TableStyleInfo(
+            name=table_style, showFirstColumn=False, showLastColumn=False, showRowStripes=True
+        )
         ws.add_table(tab)
 
     # Auto-fit column widths
     if autofit_columns and col_count > 0:
         for col in ws.columns:
-            max_len = max(len(str(cell.value or '')) for cell in col)
+            max_len = max(len(str(cell.value or "")) for cell in col)
             col_letter = get_column_letter(col[0].column)
             ws.column_dimensions[col_letter].width = max(min(max_len + 3, 50), 12)
 
@@ -140,7 +139,7 @@ def stream_db_to_excel(
         "rows_streamed": row_count,
         "columns_streamed": col_count,
         "duration_seconds": round(duration, 3),
-        "llm_token_savings": "100% (Direct disk streaming)"
+        "llm_token_savings": "100% (Direct disk streaming)",
     }
 
 
@@ -150,7 +149,7 @@ def stream_excel_to_db(
     db_url_or_config: Union[str, Dict[str, Any]],
     sheet_name: Optional[Union[str, int]] = 0,
     if_table_exists: str = "append",
-    chunk_size: int = 1000
+    chunk_size: int = 1000,
 ) -> Dict[str, Any]:
     """Bulk stream an Excel worksheet into a database table with chunking."""
     t_start = datetime.now()
@@ -165,15 +164,10 @@ def stream_excel_to_db(
     total_rows, total_cols = df.shape
 
     # Clean column headers for SQL compliance
-    df.columns = [re.sub(r'[^a-zA-Z0-9_]', '_', str(c).strip()) for c in df.columns]
+    df.columns = [re.sub(r"[^a-zA-Z0-9_]", "_", str(c).strip()) for c in df.columns]
 
     df.to_sql(
-        name=target_table,
-        con=engine,
-        if_exists=if_table_exists,
-        index=False,
-        chunksize=chunk_size,
-        method="multi"
+        name=target_table, con=engine, if_exists=if_table_exists, index=False, chunksize=chunk_size, method="multi"
     )
 
     duration = (datetime.now() - t_start).total_seconds()
@@ -183,7 +177,7 @@ def stream_excel_to_db(
         "target_table": target_table,
         "rows_inserted": total_rows,
         "columns_inserted": total_cols,
-        "duration_seconds": round(duration, 3)
+        "duration_seconds": round(duration, 3),
     }
 
 
@@ -193,11 +187,11 @@ def stream_db_to_template(
     output_excel_path: str,
     db_url_or_config: Union[str, Dict[str, Any]],
     sheet_name: str = "Sheet1",
-    start_cell: str = "A2"
+    start_cell: str = "A2",
 ) -> Dict[str, Any]:
     """Inject SQL query results into a pre-styled Excel template preserving formatting and formulas."""
-    from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
-    
+    from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
+
     t_start = datetime.now()
     tpl_path = Path(template_excel_path).resolve()
     out_path = Path(output_excel_path).resolve()
@@ -234,7 +228,7 @@ def stream_db_to_template(
         "output_file": str(out_path),
         "sheet_name": sheet_name,
         "rows_injected": len(df),
-        "duration_seconds": round(duration, 3)
+        "duration_seconds": round(duration, 3),
     }
 
 
@@ -244,7 +238,7 @@ def py_template_pipeline(
     sources: List[Dict[str, Any]],
     python_script: str,
     targets: List[Dict[str, Any]],
-    db_resolver_func = None
+    db_resolver_func=None,
 ) -> Dict[str, Any]:
     """
     Execute custom Python/Pandas logic across multiple data sources to construct
@@ -259,8 +253,8 @@ def py_template_pipeline(
         targets: Placement targets mapping table names to sheets, start cells, and table styles.
         db_resolver_func: Function to resolve connection names to URLs.
     """
-    from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
     import numpy as np
+    from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
 
     t_start = datetime.now()
     tpl_path = Path(template_excel_path).resolve()
@@ -303,7 +297,7 @@ def py_template_pipeline(
         "math": math,
         "sources": loaded_sources,
         **loaded_sources,
-        "output_tables": {}
+        "output_tables": {},
     }
 
     try:
@@ -330,7 +324,9 @@ def py_template_pipeline(
     for tgt in targets:
         t_name = tgt.get("table_name_in_script")
         if t_name not in output_tables:
-            raise ValueError(f"Table '{t_name}' not generated by python_script. Available: {list(output_tables.keys())}")
+            raise ValueError(
+                f"Table '{t_name}' not generated by python_script. Available: {list(output_tables.keys())}"
+            )
 
         df_target = output_tables[t_name]
         sheet_name = tgt.get("sheet_name", "Sheet1")
@@ -377,19 +373,21 @@ def py_template_pipeline(
                     showFirstColumn=False,
                     showLastColumn=False,
                     showRowStripes=True,
-                    showColumnStripes=False
+                    showColumnStripes=False,
                 )
                 table_obj.tableStyleInfo = style_info
             ws.add_table(table_obj)
 
-        injected_summary.append({
-            "table_name": t_name,
-            "sheet_name": sheet_name,
-            "rows_written": len(df_target),
-            "columns_written": len(df_target.columns),
-            "start_cell": start_cell,
-            "end_cell": f"{end_col_letter}{end_row}"
-        })
+        injected_summary.append(
+            {
+                "table_name": t_name,
+                "sheet_name": sheet_name,
+                "rows_written": len(df_target),
+                "columns_written": len(df_target.columns),
+                "start_cell": start_cell,
+                "end_cell": f"{end_col_letter}{end_row}",
+            }
+        )
 
     wb.save(out_path)
     duration = (datetime.now() - t_start).total_seconds()
@@ -399,6 +397,5 @@ def py_template_pipeline(
         "template_excel": str(tpl_path),
         "output_excel": str(out_path),
         "tables_injected": injected_summary,
-        "duration_seconds": round(duration, 3)
+        "duration_seconds": round(duration, 3),
     }
-

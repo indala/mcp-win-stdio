@@ -7,13 +7,10 @@ service/process management, and local port forwarding tunnels.
 
 import json
 import os
-from pathlib import Path
 import re
 import shlex
-import sys
-import tempfile
 import time
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, Literal, Optional, Union
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -21,10 +18,7 @@ except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP
 
 import paramiko
-
 from mcp_win_stdio.ssh.connection import (
-    _normalize_host_param,
-    close_all_connections,
     close_connection,
     get_active_host_name,
     get_all_registered_hosts,
@@ -36,7 +30,6 @@ from mcp_win_stdio.ssh.connection import (
     set_active_host_name,
 )
 from mcp_win_stdio.ssh.pty_session import (
-    close_all_pty_sessions,
     close_pty_session,
     list_pty_sessions,
     read_pty_buffer,
@@ -54,7 +47,6 @@ from mcp_win_stdio.ssh.sftp_ops import (
     write_remote_text_file,
 )
 from mcp_win_stdio.ssh.tunnels import (
-    close_all_tunnels,
     close_tunnel,
     list_active_tunnels,
     open_local_tunnel,
@@ -66,6 +58,7 @@ mcp = FastMCP("ssh-mcp")
 # ==============================================================================
 # Helper Functions
 # ==============================================================================
+
 
 def _format_ssh_error(e: Exception, host: Optional[str] = None, command: Optional[str] = None) -> Dict[str, Any]:
     """Format SSH exception into clean, structured diagnostics with helpful advice."""
@@ -155,7 +148,7 @@ def _run_exec_channel(
 
     start_t = time.time()
     stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout, get_pty=False)
-    
+
     # Read output
     out_str = stdout.read().decode("utf-8", errors="replace")
     err_str = stderr.read().decode("utf-8", errors="replace")
@@ -183,6 +176,7 @@ def _run_exec_channel(
 # 1. Host & Connection Management Tools
 # ==============================================================================
 
+
 @mcp.tool()
 def list_hosts() -> Dict[str, Any]:
     """
@@ -196,21 +190,23 @@ def list_hosts() -> Dict[str, Any]:
 
     results = []
     for name, info in all_hosts.items():
-        is_active = (name == active_name)
+        is_active = name == active_name
         in_pool = pool_status.get(name, {})
 
-        results.append({
-            "name": name,
-            "hostname": info.get("hostname", "localhost"),
-            "user": info.get("user", "root"),
-            "port": info.get("port", 22),
-            "keyPath": info.get("key_path"),
-            "hasPassword": bool(info.get("password")),
-            "jumpHost": info.get("jump_host") or info.get("proxyjump"),
-            "source": info.get("source", "config"),
-            "isActiveDefault": is_active,
-            "poolConnection": "connected" if in_pool.get("isActive") else "idle",
-        })
+        results.append(
+            {
+                "name": name,
+                "hostname": info.get("hostname", "localhost"),
+                "user": info.get("user", "root"),
+                "port": info.get("port", 22),
+                "keyPath": info.get("key_path"),
+                "hasPassword": bool(info.get("password")),
+                "jumpHost": info.get("jump_host") or info.get("proxyjump"),
+                "source": info.get("source", "config"),
+                "isActiveDefault": is_active,
+                "poolConnection": "connected" if in_pool.get("isActive") else "idle",
+            }
+        )
 
     return {
         "activeHost": active_name,
@@ -224,7 +220,7 @@ def use_host(host: str) -> Dict[str, Any]:
     """
     Switch the active default SSH host context. All subsequent SSH, SFTP, and diagnostic tool calls
     will target this host automatically when host is not specified.
-    
+
     Args:
         host: Host alias, hostname, or user@hostname:port to switch to.
     """
@@ -241,7 +237,7 @@ def use_host(host: str) -> Dict[str, Any]:
                 "user": info.get("user"),
                 "port": info.get("port"),
                 "source": info.get("source"),
-            }
+            },
         }
     except Exception as e:
         return _format_ssh_error(e, host=host)
@@ -261,7 +257,7 @@ def add_host(
 ) -> Dict[str, Any]:
     """
     Register and persist a new SSH host configuration to ~/.mcp-win-stdio/ssh_hosts.json.
-    
+
     Args:
         name: Unique alias name for the host (e.g. 'prod-web-01', 'db-cluster', 'staging').
         hostname: IP address or domain name of the remote server.
@@ -311,7 +307,7 @@ def add_host(
 def remove_host(name: str) -> Dict[str, Any]:
     """
     Remove a saved SSH host configuration from ~/.mcp-win-stdio/ssh_hosts.json.
-    
+
     Args:
         name: Name of the host to delete.
     """
@@ -347,7 +343,7 @@ def remove_host(name: str) -> Dict[str, Any]:
 def test_host(host: Optional[str] = None) -> Dict[str, Any]:
     """
     Test SSH connectivity, authentication, latency, and retrieve remote OS info.
-    
+
     Args:
         host: Host alias, hostname, or user@hostname:port (defaults to active host).
     """
@@ -388,7 +384,7 @@ def list_active_connections() -> Dict[str, Any]:
 def disconnect_host(host: Optional[str] = None) -> Dict[str, Any]:
     """
     Close and disconnect the SSH connection for a specific host from the connection pool.
-    
+
     Args:
         host: Host name to disconnect (or active host if omitted).
     """
@@ -404,6 +400,7 @@ def disconnect_host(host: Optional[str] = None) -> Dict[str, Any]:
 # 2. Remote Command & Script Execution Tools
 # ==============================================================================
 
+
 @mcp.tool()
 def ssh_exec(
     command: str,
@@ -415,7 +412,7 @@ def ssh_exec(
     """
     Execute a non-interactive shell command on the remote SSH host.
     Returns exit code, stdout, stderr, execution duration, and structured results.
-    
+
     Args:
         command: The shell command line string to run.
         host: Target SSH host (defaults to active host).
@@ -442,7 +439,7 @@ def ssh_exec_sudo(
 ) -> Dict[str, Any]:
     """
     Execute a command with elevated sudo privileges, automatically handling the sudo password prompt if needed.
-    
+
     Args:
         command: Command to execute with sudo (e.g. 'systemctl restart nginx', 'apt update').
         sudo_password: Password for sudo prompt (if omitted, uses host password or passwordless sudo).
@@ -461,7 +458,9 @@ def ssh_exec_sudo(
 
         start_t = time.time()
         # Request PTY for sudo prompt handling
-        stdin, stdout, stderr = client.exec_command(f"sudo -S -p '[SUDO_PROMPT]' {clean_cmd}", get_pty=True, timeout=timeout)
+        stdin, stdout, stderr = client.exec_command(
+            f"sudo -S -p '[SUDO_PROMPT]' {clean_cmd}", get_pty=True, timeout=timeout
+        )
 
         if pwd:
             # Send password when prompt requested
@@ -497,7 +496,7 @@ def ssh_exec_script(
 ) -> Dict[str, Any]:
     """
     Upload and execute a multi-line script (bash, sh, python, node) on the remote server, returning execution results.
-    
+
     Args:
         script_content: Full multi-line script code.
         interpreter: Interpreter to run script with ('bash', 'sh', 'python3', 'node', 'pwsh').
@@ -526,7 +525,7 @@ def ssh_exec_script(
         # Execute
         run_cmd = f"{interpreter} {shlex.quote(remote_tmp)}"
         res = _run_exec_channel(client, run_cmd, timeout=timeout)
-        
+
         # Cleanup
         try:
             client.exec_command(f"rm -f {shlex.quote(remote_tmp)}")
@@ -549,7 +548,7 @@ def ssh_exec_background(
 ) -> Dict[str, Any]:
     """
     Launch a long-running process in the detached background (using nohup) and track its Process ID (PID).
-    
+
     Args:
         command: Long-running command (e.g. 'npm run start', 'python train.py', 'backup.sh').
         job_name: Optional label for the job.
@@ -590,7 +589,7 @@ def ssh_exec_background(
 def ssh_check_job(job_id_or_pid: Union[int, str], host: Optional[str] = None) -> Dict[str, Any]:
     """
     Check if a detached background job/PID is still running and read the latest log output.
-    
+
     Args:
         job_id_or_pid: The PID or job name to check.
         host: Target SSH host (defaults to active host).
@@ -627,7 +626,7 @@ def ssh_check_job(job_id_or_pid: Union[int, str], host: Optional[str] = None) ->
 def ssh_kill_job(pid: int, signal: str = "SIGTERM", host: Optional[str] = None) -> Dict[str, Any]:
     """
     Terminate a remote process by PID.
-    
+
     Args:
         pid: Remote process ID.
         signal: Signal name ('SIGTERM', 'SIGKILL', 'SIGHUP', 'SIGINT').
@@ -645,7 +644,9 @@ def ssh_kill_job(pid: int, signal: str = "SIGTERM", host: Optional[str] = None) 
             "host": host_info["name"],
             "pid": pid,
             "signal": signal,
-            "message": f"Sent {signal} to PID {pid}." if res["is_success"] else f"Failed to kill PID {pid}: {res['stderr']}",
+            "message": f"Sent {signal} to PID {pid}."
+            if res["is_success"]
+            else f"Failed to kill PID {pid}: {res['stderr']}",
         }
     except Exception as e:
         return _format_ssh_error(e, host=host)
@@ -655,6 +656,7 @@ def ssh_kill_job(pid: int, signal: str = "SIGTERM", host: Optional[str] = None) 
 # 3. Interactive PTY / Pseudo-Terminal Tools
 # ==============================================================================
 
+
 @mcp.tool()
 def ssh_pty_start(
     session_name: str,
@@ -663,7 +665,7 @@ def ssh_pty_start(
 ) -> Dict[str, Any]:
     """
     Start an interactive pseudo-terminal (PTY) session for stateful interactions, REPLs, and prompts.
-    
+
     Args:
         session_name: Unique identifier for this terminal session (e.g. 'wizard', 'python-repl').
         host: Target SSH host (defaults to active host).
@@ -683,7 +685,7 @@ def ssh_pty_send(
 ) -> Dict[str, Any]:
     """
     Send keystrokes, answers, or commands into an active interactive PTY session and collect output.
-    
+
     Args:
         session_name: Name of active PTY session.
         input_text: Text/command to send.
@@ -699,7 +701,7 @@ def ssh_pty_send(
 def ssh_pty_read(session_name: str, max_chars: int = 4000) -> Dict[str, Any]:
     """
     Read the output buffer of an active interactive PTY session.
-    
+
     Args:
         session_name: Name of active PTY session.
         max_chars: Maximum character limit for output.
@@ -724,7 +726,7 @@ def ssh_list_pty_sessions() -> Dict[str, Any]:
 def ssh_pty_close(session_name: str) -> Dict[str, Any]:
     """
     Close and terminate an interactive PTY session.
-    
+
     Args:
         session_name: Name of the session to terminate.
     """
@@ -735,12 +737,13 @@ def ssh_pty_close(session_name: str) -> Dict[str, Any]:
 # 4. Diagnostics & Remote Services Management
 # ==============================================================================
 
+
 @mcp.tool()
 def ssh_system_overview(host: Optional[str] = None) -> Dict[str, Any]:
     """
     Retrieve comprehensive system diagnostics: OS version, kernel, CPU count, RAM utilization,
     load averages, uptime, and disk usage (df -h).
-    
+
     Args:
         host: Target SSH host (defaults to active host).
     """
@@ -794,7 +797,9 @@ cat /etc/os-release 2>/dev/null || echo "N/A"
 
 @mcp.tool()
 def ssh_list_packages(
-    package_manager: Optional[Literal["apt", "dpkg", "rpm", "dnf", "yum", "pip", "npm", "brew", "pacman", "apk", "winget"]] = None,
+    package_manager: Optional[
+        Literal["apt", "dpkg", "rpm", "dnf", "yum", "pip", "npm", "brew", "pacman", "apk", "winget"]
+    ] = None,
     filter: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
@@ -803,7 +808,7 @@ def ssh_list_packages(
     """
     List installed software packages on the remote server across Linux/macOS/Windows package managers.
     Features automatic package manager detection, token-safe pagination, and filtering to prevent context bloat.
-    
+
     Args:
         package_manager: Package manager to query (auto-detected if None: 'dpkg'/'apt', 'rpm'/'dnf'/'yum', 'pip', 'npm', 'brew', 'pacman', 'apk', 'winget').
         filter: Optional keyword or pattern filter on package name or description.
@@ -856,7 +861,7 @@ fi
             query_cmd = "winget list 2>/dev/null"
         elif pm == "npm":
             query_cmd = "npm list -g --depth=0 --json 2>/dev/null || npm list -g --depth=0"
-        else: # pip
+        else:  # pip
             query_cmd = "pip list --format=json 2>/dev/null || pip list"
 
         stdin, stdout, stderr = client.exec_command(query_cmd, timeout=20)
@@ -881,7 +886,13 @@ fi
         if not packages and raw_out:
             for line in raw_out.splitlines():
                 line_str = line.strip()
-                if not line_str or line_str.startswith("Desired=") or line_str.startswith("|") or line_str.startswith("Name ") or line_str.startswith("---"):
+                if (
+                    not line_str
+                    or line_str.startswith("Desired=")
+                    or line_str.startswith("|")
+                    or line_str.startswith("Name ")
+                    or line_str.startswith("---")
+                ):
                     continue
 
                 parts = re.split(r"\t+|\s{2,}", line_str)
@@ -899,7 +910,11 @@ fi
                     pkg_ver = ""
                     pkg_summary = ""
 
-                if clean_filter and (clean_filter not in pkg_name.lower() and clean_filter not in pkg_summary.lower() and clean_filter not in pkg_ver.lower()):
+                if clean_filter and (
+                    clean_filter not in pkg_name.lower()
+                    and clean_filter not in pkg_summary.lower()
+                    and clean_filter not in pkg_ver.lower()
+                ):
                     continue
 
                 entry = {"name": pkg_name, "version": pkg_ver}
@@ -948,7 +963,7 @@ def ssh_list_services(
 ) -> Dict[str, Any]:
     """
     Inspect running remote services across systemd units, Docker containers, or PM2 node processes with pagination.
-    
+
     Args:
         service_type: Service framework ('systemd', 'docker', 'pm2').
         filter: Optional keyword or pattern filter.
@@ -1015,7 +1030,7 @@ def ssh_service_action(
 ) -> Dict[str, Any]:
     """
     Manage a remote daemon or container (status, start, stop, restart, reload).
-    
+
     Args:
         service_name: Name of the service unit (e.g. 'nginx', 'postgresql', 'my-container').
         action: Lifecycle action to take.
@@ -1028,7 +1043,11 @@ def ssh_service_action(
 
         s_name = shlex.quote(service_name)
         if service_type == "systemd":
-            cmd = f"sudo systemctl {action} {s_name} --no-pager" if action != "status" else f"systemctl status {s_name} --no-pager"
+            cmd = (
+                f"sudo systemctl {action} {s_name} --no-pager"
+                if action != "status"
+                else f"systemctl status {s_name} --no-pager"
+            )
         elif service_type == "docker":
             cmd = f"docker {action} {s_name}"
         else:
@@ -1057,7 +1076,7 @@ def ssh_tail_logs(
     """
     Tail remote log files (e.g. /var/log/syslog, /var/log/nginx/error.log) or systemd journal logs.
     Features safety caps on line count and character length to prevent context bloat.
-    
+
     Args:
         target: Log file path (e.g. '/var/log/syslog') or systemd service unit name if is_journal=True.
         lines: Number of trailing lines to return (default: 50, max: 200).
@@ -1099,7 +1118,7 @@ def ssh_list_processes(
 ) -> Dict[str, Any]:
     """
     List top remote processes sorted by CPU or Memory usage with token-safe limits.
-    
+
     Args:
         filter: Optional process name or command filter.
         sort_by: Sort metric ('cpu' or 'mem').
@@ -1160,6 +1179,7 @@ def ssh_list_processes(
 # 5. SFTP Remote File Operations Tools
 # ==============================================================================
 
+
 @mcp.tool()
 def sftp_list_dir(
     remote_path: str = ".",
@@ -1170,7 +1190,7 @@ def sftp_list_dir(
 ) -> Dict[str, Any]:
     """
     List contents of a remote directory with file types, sizes, permissions, timestamps, and context window protection.
-    
+
     Args:
         remote_path: Remote directory path (default: current directory '.').
         limit: Max items to return per batch (default 100, max 250).
@@ -1193,7 +1213,7 @@ def sftp_read_file(
 ) -> Dict[str, Any]:
     """
     Read text/source code from a remote file with line offset support and token safety.
-    
+
     Args:
         remote_path: Remote file path.
         max_chars: Maximum characters to return (default: 15,000).
@@ -1220,7 +1240,7 @@ def sftp_write_file(
 ) -> Dict[str, Any]:
     """
     Write or append text content to a remote file via SFTP.
-    
+
     Args:
         remote_path: Remote destination path.
         content: Text content to write.
@@ -1245,7 +1265,7 @@ def sftp_stat(
 ) -> Dict[str, Any]:
     """
     Inspect detailed file/directory metadata, size, permissions, uid/gid, and timestamps.
-    
+
     Args:
         remote_path: Remote file or directory path.
         host: Target SSH host (defaults to active host).
@@ -1264,7 +1284,7 @@ def sftp_upload(
 ) -> Dict[str, Any]:
     """
     Upload a local file or entire folder to the remote host.
-    
+
     Args:
         local_path: Local path on machine (file or folder).
         remote_path: Remote destination path.
@@ -1284,7 +1304,7 @@ def sftp_download(
 ) -> Dict[str, Any]:
     """
     Download a remote file or folder to the local machine.
-    
+
     Args:
         remote_path: Remote source path.
         local_path: Local destination path.
@@ -1304,7 +1324,7 @@ def sftp_remove(
 ) -> Dict[str, Any]:
     """
     Delete a remote file or directory.
-    
+
     Args:
         remote_path: Remote path to remove.
         recursive: If True, recursively deletes non-empty directories.
@@ -1320,6 +1340,7 @@ def sftp_remove(
 # 6. Port Forwarding & Tunnels Tools
 # ==============================================================================
 
+
 @mcp.tool()
 def ssh_tunnel_open(
     local_port: int,
@@ -1331,7 +1352,7 @@ def ssh_tunnel_open(
     """
     Establish a local-to-remote SSH port forwarding tunnel in the background.
     Allows accessing remote databases, APIs, or services via 127.0.0.1:<local_port>.
-    
+
     Args:
         local_port: Local port to bind on machine (e.g. 15432, 13306, 8080).
         remote_port: Remote target port on the server (e.g. 5432, 3306, 80).
@@ -1365,7 +1386,7 @@ def ssh_tunnel_list() -> Dict[str, Any]:
 def ssh_tunnel_close(tunnel_id_or_name: str) -> Dict[str, Any]:
     """
     Close and terminate an active SSH port forwarding tunnel.
-    
+
     Args:
         tunnel_id_or_name: Tunnel name or local port number.
     """

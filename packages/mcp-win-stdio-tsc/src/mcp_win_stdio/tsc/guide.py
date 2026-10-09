@@ -2,6 +2,7 @@
 Usage guide and Claude prompt recipes for TypeScript Watcher MCP server.
 """
 
+
 def print_guide() -> None:
     guide_text = """
 ================================================================================
@@ -73,4 +74,3 @@ Example Prompts for Claude:
 
 def print_tsc_guide() -> None:
     print_guide()
-

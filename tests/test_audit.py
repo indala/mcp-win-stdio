@@ -5,23 +5,24 @@ from pathlib import Path
 for p in Path("packages").glob("*/src"):
     sys.path.insert(0, str(p.resolve()))
 sys.path.insert(0, os.path.abspath("src"))
+import decimal
 import json
 import tempfile
-import decimal
 import uuid
-from datetime import datetime, date, time
-import pandas as pd
+from datetime import datetime
+
 import numpy as np
+import pandas as pd
 import pathspec
 import pytest
 
+
 def test_excel_clean_records():
     from mcp_win_stdio.excel.server import _df_to_clean_records
-    df = pd.DataFrame({
-        "dates": [pd.Timestamp("2026-01-01 12:00:00"), pd.NaT],
-        "nums": [10.5, np.nan],
-        "texts": ["hello", None]
-    })
+
+    df = pd.DataFrame(
+        {"dates": [pd.Timestamp("2026-01-01 12:00:00"), pd.NaT], "nums": [10.5, np.nan], "texts": ["hello", None]}
+    )
     records = _df_to_clean_records(df)
     assert len(records) == 2
     assert records[0]["dates"] == "2026-01-01T12:00:00"
@@ -32,8 +33,10 @@ def test_excel_clean_records():
     assert records[1]["texts"] is None
     print("[PASS] Excel clean records test passed.")
 
+
 def test_explorer_gitignore():
     from mcp_win_stdio.explorer.server import _matches_gitignore
+
     patterns = ["node_modules/", "dist/", "*.pyc", "temp_dir/"]
     spec = pathspec.PathSpec.from_lines("gitignore", patterns)
     assert _matches_gitignore(spec, "node_modules", is_dir=True) is True
@@ -42,14 +45,16 @@ def test_explorer_gitignore():
     assert _matches_gitignore(spec, "src/foo.py", is_dir=False) is False
     print("[PASS] Explorer gitignore test passed.")
 
+
 def test_tsc_safety():
     from mcp_win_stdio.tsc.server import (
-        find_tsconfigs,
-        is_home_or_root_dir,
-        get_default_watch_dir,
         check_tsc_available,
+        find_tsconfigs,
+        get_default_watch_dir,
+        is_home_or_root_dir,
         list_watched_projects,
     )
+
     assert is_home_or_root_dir("C:\\") is True
     assert is_home_or_root_dir(str(Path.home())) is True
     appdata = os.environ.get("APPDATA")
@@ -60,9 +65,12 @@ def test_tsc_safety():
     old_env = os.environ.pop("TSC_WATCH_DIR", None)
     old_proj = os.environ.pop("PROJECT_ROOT", None)
     from unittest.mock import patch
+
     try:
-        with patch("mcp_win_stdio.core.config.load_config", return_value={}), \
-             patch("mcp_win_stdio.tsc.server.WATCHED_PROJECTS", {}):
+        with (
+            patch("mcp_win_stdio.core.config.load_config", return_value={}),
+            patch("mcp_win_stdio.tsc.server.WATCHED_PROJECTS", {}),
+        ):
             assert get_default_watch_dir() is None
             status = list_watched_projects()
             assert status["status"] == "standby"
@@ -83,7 +91,14 @@ def test_tsc_safety():
     assert isinstance(configs, list)
 
     # Context window protection & message truncation tests
-    from mcp_win_stdio.tsc.server import _format_tsc_error, get_tsc_errors, get_file_errors, WATCHED_PROJECTS, CACHE_LOCK
+    from mcp_win_stdio.tsc.server import (
+        CACHE_LOCK,
+        WATCHED_PROJECTS,
+        _format_tsc_error,
+        get_file_errors,
+        get_tsc_errors,
+    )
+
     huge_msg = "Type '{ " + "x: string; " * 100 + "}' is not assignable to type 'number'."
     mock_err = {
         "file": "E:/project/src/App.tsx",
@@ -150,20 +165,23 @@ def test_tsc_safety():
 
     print("[PASS] TSC safety, standby mode, context protection & pagination tests passed.")
 
+
 def test_db_truncate_cell():
     import json
+
     from mcp_win_stdio.db.server import _truncate_cell
+
     d = decimal.Decimal("123.456")
     u = uuid.uuid4()
     now = datetime.now()
     mem = memoryview(b"binary_payload")
-    
+
     cleaned = {
         "decimal": _truncate_cell(d),
         "uuid": _truncate_cell(u),
         "datetime": _truncate_cell(now),
         "mem": _truncate_cell(mem),
-        "long_str": _truncate_cell("a" * 600, max_chars=100)
+        "long_str": _truncate_cell("a" * 600, max_chars=100),
     }
     # Verify strict JSON serializability
     serialized = json.dumps(cleaned)
@@ -172,21 +190,29 @@ def test_db_truncate_cell():
     assert "... [truncated 500 chars]" in serialized
     print("[PASS] DB truncate cell serialization test passed.")
 
+
 def test_excel_context_protection():
     import tempfile
+
     from mcp_win_stdio.excel.server import (
-        query_rows, preview_sheet, read_range, get_column_values, compare_column_values, export_to_csv,
-        export_to_json, profile_sheet, query_excel_sql
+        export_to_json,
+        get_column_values,
+        profile_sheet,
+        query_excel_sql,
+        query_rows,
     )
+
     # Create sample Excel workbook
     with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        df = pd.DataFrame({
-            "code": [f"MAT{i:04d}" for i in range(150)],
-            "desc": [f"Item description {i}" for i in range(150)],
-            "qty": [i * 2 for i in range(150)]
-        })
+        df = pd.DataFrame(
+            {
+                "code": [f"MAT{i:04d}" for i in range(150)],
+                "desc": [f"Item description {i}" for i in range(150)],
+                "qty": [i * 2 for i in range(150)],
+            }
+        )
         df.to_excel(tmp_path, index=False)
 
         # 1. Test query_rows capping at 100 for records and returning protection notice
@@ -241,6 +267,7 @@ def test_excel_context_protection():
         # 9. Test audit_formulas and search_and_replace_cells
         import openpyxl
         from mcp_win_stdio.excel.server import audit_formulas, search_and_replace_cells
+
         wb = openpyxl.load_workbook(tmp_path)
         ws = wb.active
         ws["D1"] = "FormulaCol"
@@ -258,22 +285,31 @@ def test_excel_context_protection():
         assert sr_dry["dry_run"] is True
         assert sr_dry["total_matches"] >= 1
 
-        sr_apply = search_and_replace_cells(tmp_path, search_val="TargetText123", replace_val="ReplacedVal", dry_run=False)
+        sr_apply = search_and_replace_cells(
+            tmp_path, search_val="TargetText123", replace_val="ReplacedVal", dry_run=False
+        )
         assert sr_apply["dry_run"] is False
         assert sr_apply["total_matches"] >= 1
 
-        print("[PASS] Excel context protection, column comparison, JSON export, SQL, formula audit, and search/replace tests passed.")
+        print(
+            "[PASS] Excel context protection, column comparison, JSON export, SQL, formula audit, and search/replace tests passed."
+        )
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 
 def test_word_tools():
-    import docx
     import tempfile
+
+    import docx
     from mcp_win_stdio.word.server import (
-        read_word_document, edit_paragraph, insert_table,
-        inspect_revisions_and_comments, get_document_layout, get_document_outline
+        edit_paragraph,
+        get_document_layout,
+        get_document_outline,
+        insert_table,
+        inspect_revisions_and_comments,
+        read_word_document,
     )
 
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
@@ -304,7 +340,7 @@ def test_word_tools():
             doc_path,
             headers=["ID", "Name", "Role"],
             rows=[["1", "Alice", "Admin"], ["2", "Bob", "User"]],
-            overwrite=True
+            overwrite=True,
         )
         assert tbl_res["status"] == "success"
         assert tbl_res["rows_inserted"] == 2
@@ -330,9 +366,7 @@ def test_word_tools():
 
 
 def test_explorer_tools():
-    from mcp_win_stdio.explorer.server import (
-        read_file, find_symbol, get_code_stats, find_duplicate_files
-    )
+    from mcp_win_stdio.explorer.server import find_duplicate_files, find_symbol, get_code_stats, read_file
 
     # 1. Test read_file capping
     res_rf = read_file("src/mcp_win_stdio/cli.py", max_lines=10)
@@ -358,15 +392,26 @@ def test_explorer_tools():
 
 def test_db_agent_friction_fixes():
     from mcp_win_stdio.db.server import (
-        _split_sql_statements,
-        _normalize_connection_param,
         _format_db_error,
-        _get_connection,
-        _ACTIVE_CONNECTION
+        _normalize_connection_param,
+        _split_sql_statements,
     )
 
     # 1. Test _normalize_connection_param (Sticky Connection Fix)
-    for null_val in [None, "", "  ", "null", "NULL", "Null", "none", "NONE", "default", "DEFAULT", "undefined", "UNDEFINED"]:
+    for null_val in [
+        None,
+        "",
+        "  ",
+        "null",
+        "NULL",
+        "Null",
+        "none",
+        "NONE",
+        "default",
+        "DEFAULT",
+        "undefined",
+        "UNDEFINED",
+    ]:
         assert _normalize_connection_param(null_val) is None, f"Failed for {null_val}"
     assert _normalize_connection_param("showreel_dev") == "showreel_dev"
     assert _normalize_connection_param("  my_database  ") == "my_database"
@@ -434,6 +479,7 @@ def test_db_agent_friction_fixes():
 
     # 4. Test LIKE parameter handling with psycopg2 / DB-API (Issue #4)
     from unittest.mock import MagicMock
+
     mock_cursor = MagicMock()
     mock_cursor.rowcount = 1
     mock_cursor.statusmessage = "SELECT 1"
@@ -456,15 +502,23 @@ def test_db_agent_friction_fixes():
     print("[PASS] LIKE query parameter handling test passed.")
 
 
-
 def test_db_pii_masking():
     """Test that _truncate_row redacts PII columns and passes safe columns through."""
-    from mcp_win_stdio.db.server import _truncate_row, PII_COLUMN_PATTERN
-    import re
+
+    from mcp_win_stdio.db.server import PII_COLUMN_PATTERN, _truncate_row
 
     # PII_COLUMN_PATTERN should match these
-    sensitive_cols = ["password", "password_hash", "api_key", "secret_token", "ssn",
-                      "credit_card_number", "auth_token", "private_key", "access_token"]
+    sensitive_cols = [
+        "password",
+        "password_hash",
+        "api_key",
+        "secret_token",
+        "ssn",
+        "credit_card_number",
+        "auth_token",
+        "private_key",
+        "access_token",
+    ]
     for col in sensitive_cols:
         assert PII_COLUMN_PATTERN.search(col), f"PII pattern should match '{col}'"
 
@@ -480,7 +534,7 @@ def test_db_pii_masking():
         "password_hash": "$2b$12$supersecretstuff",
         "api_key": "sk-abc123",
         "email": "alice@example.com",
-        "auth_token": "eyJhbGciOiJIUzI1NiJ9.xxx"
+        "auth_token": "eyJhbGciOiJIUzI1NiJ9.xxx",
     }
 
     masked = _truncate_row(row, mask_sensitive=True)
@@ -501,7 +555,7 @@ def test_db_pii_masking():
 
 def test_db_schema_tools():
     """Test compare_schemas migration_sql structure and audit_database_health non-postgres guard."""
-    from mcp_win_stdio.db.server import audit_database_health, _CONNECTION_REGISTRY
+    from mcp_win_stdio.db.server import _CONNECTION_REGISTRY, audit_database_health
 
     # audit_database_health should reject MySQL connections
     # We temporarily register a fake MySQL connection
@@ -522,7 +576,9 @@ def test_db_schema_tools():
     # Verify compare_schemas migration_sql key is always present when the module imports
     # (structural check only — no live DB needed)
     import inspect
+
     from mcp_win_stdio.db import server as db_server
+
     src = inspect.getsource(db_server.compare_schemas)
     assert "migration_sql" in src, "compare_schemas must produce migration_sql"
     print("[PASS] compare_schemas migration_sql structural check passed.")
@@ -531,13 +587,14 @@ def test_db_schema_tools():
 def test_ssh_tools():
     from mcp_win_stdio.ssh.server import (
         add_host,
-        list_hosts,
-        use_host,
-        remove_host,
         list_active_connections,
-        ssh_tunnel_list,
+        list_hosts,
+        remove_host,
         ssh_list_pty_sessions,
+        ssh_tunnel_list,
+        use_host,
     )
+
     # Test adding host
     res_add = add_host("ci-test-host", "127.0.0.1", "testuser", 2222)
     assert res_add["success"] is True
@@ -563,16 +620,18 @@ def test_ssh_tools():
     res_rm = remove_host("ci-test-host")
     assert res_rm["success"] is True
 
+
 def test_db_server_database_confusion():
     """Test that DB MCP seamlessly resolves aliases when server, connection, database, or name are used."""
     import mcp_win_stdio.db.server as db_server
     from mcp_win_stdio.db.server import (
-        _RAW_CONFIG,
         _CONNECTION_REGISTRY,
+        _RAW_CONFIG,
         _get_connection,
         _resolve_conn,
         use_database,
     )
+
     old_active = db_server._ACTIVE_CONNECTION
     old_env = os.environ.get("CONFIG_FILE")
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
@@ -647,7 +706,8 @@ def test_db_server_database_confusion():
 
 def test_schema_overview_and_compact_with_all_schemas():
     """Test that compact_schema_overview and schema_overview handle schema='all' without tuple index out of range."""
-    from mcp_win_stdio.db.server import compact_schema_overview, schema_overview, _get_connection, _resolve_conn
+    from mcp_win_stdio.db.server import _get_connection, _resolve_conn, compact_schema_overview, schema_overview
+
     try:
         _get_connection(_resolve_conn(None, None))
     except Exception:
@@ -667,13 +727,14 @@ def test_schema_overview_and_compact_with_all_schemas():
 def test_tsc_filter_improvements():
     """Test TSC substring filtering, case-insensitivity, and suggestion tools."""
     from mcp_win_stdio.tsc.server import (
-        WATCHED_PROJECTS,
         CACHE_LOCK,
-        get_tsc_errors,
-        get_file_errors,
-        suggest_error_fixes,
+        WATCHED_PROJECTS,
         get_error_category_breakdown,
+        get_file_errors,
+        get_tsc_errors,
+        suggest_error_fixes,
     )
+
     with CACHE_LOCK:
         WATCHED_PROJECTS["E:/repos/my-app/tsconfig.json"] = {
             "relative_config": "tsconfig.json",
@@ -737,11 +798,12 @@ def test_tsc_filter_improvements():
 
 def test_excel_styling_and_layout():
     import tempfile
+
     import openpyxl
     from mcp_win_stdio.excel.server import (
+        apply_conditional_formatting,
         create_workbook,
         format_cells,
-        apply_conditional_formatting,
         set_sheet_layout_and_freeze,
         update_cells,
     )
@@ -876,6 +938,7 @@ def test_excel_file_lock_instruction():
 
 def test_excel_write_range():
     import tempfile
+
     import openpyxl
     from mcp_win_stdio.excel.server import create_workbook, write_range
 
@@ -921,9 +984,13 @@ def test_excel_write_range():
 
 def test_excel_copilot_tools():
     import tempfile
+
     import openpyxl
     from mcp_win_stdio.excel.server import (
-        create_workbook, create_chart, clean_and_deduplicate_sheet, transform_sheet_data
+        clean_and_deduplicate_sheet,
+        create_chart,
+        create_workbook,
+        transform_sheet_data,
     )
 
     with tempfile.TemporaryDirectory() as td:
@@ -955,7 +1022,7 @@ def test_excel_copilot_tools():
         wb = openpyxl.load_workbook(wb_path)
         ws = wb["Data"]
         assert ws["B2"].value == "North"  # Untrimmed ' North ' became 'North'
-        assert ws["C2"].value == "Widget" # Untrimmed 'Widget ' became 'Widget'
+        assert ws["C2"].value == "Widget"  # Untrimmed 'Widget ' became 'Widget'
         wb.close()
 
         # 3. Test transform_sheet_data (Grouping and Aggregations)
@@ -984,8 +1051,8 @@ def test_excel_copilot_tools():
             file_path=wb_path,
             sheet_name="Region_Summary",
             chart_type="bar",
-            data_range="B1:B3",       # Header + 2 data rows for Sales
-            categories_range="A2:A3", # Region categories
+            data_range="B1:B3",  # Header + 2 data rows for Sales
+            categories_range="A2:A3",  # Region categories
             title="Total Sales by Region",
             target_cell="D2",
             x_axis_title="Region",
@@ -1006,6 +1073,7 @@ def test_excel_copilot_tools():
 
 def test_excel_get_cell_formatting():
     import tempfile
+
     from mcp_win_stdio.excel.server import create_workbook, format_cells, get_cell_formatting
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1050,6 +1118,7 @@ def test_excel_get_cell_formatting():
 
 def test_excel_export_transformed_workbook():
     import tempfile
+
     import openpyxl
     from mcp_win_stdio.excel.server import create_workbook, export_transformed_workbook
 
@@ -1060,7 +1129,13 @@ def test_excel_export_transformed_workbook():
 
         # Create 1,000 rows test dataset
         records = [
-            {"SKU": f"SKU_{i:04d}", "Category": "Lighting" if i % 2 == 0 else "Audio", "Price": float(10 + i), "Cost": float(5 + (i * 0.5)), "Status": "Active" if i % 5 != 0 else "Discontinued"}
+            {
+                "SKU": f"SKU_{i:04d}",
+                "Category": "Lighting" if i % 2 == 0 else "Audio",
+                "Price": float(10 + i),
+                "Cost": float(5 + (i * 0.5)),
+                "Status": "Active" if i % 5 != 0 else "Discontinued",
+            }
             for i in range(1, 1001)
         ]
         create_workbook(src_path, records, sheet_name="RawData")

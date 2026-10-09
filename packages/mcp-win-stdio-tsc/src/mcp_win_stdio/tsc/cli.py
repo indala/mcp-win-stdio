@@ -6,7 +6,6 @@ import argparse
 import os
 import shutil
 import sys
-from pathlib import Path
 
 from mcp_win_stdio.tsc import __version__
 from mcp_win_stdio.tsc.guide import print_guide

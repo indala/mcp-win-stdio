@@ -71,6 +71,14 @@ all = [
     "mcp-win-stdio-rag>=0.2.5",
     "mcp-win-stdio-excel-db>=0.2.5",
 ]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.9.0",
+    "build>=1.2.0",
+    "twine>=5.0.0",
+    "hatchling>=1.25.0",
+]
+
 
 [project.scripts]
 mcp-win-stdio = "mcp_win_stdio.cli:main"
@@ -79,19 +87,26 @@ mws = "mcp_win_stdio.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_win_stdio"]
-exclude = [
-    "src/mcp_win_stdio/excel",
-    "src/mcp_win_stdio/word",
-    "src/mcp_win_stdio/explorer",
-    "src/mcp_win_stdio/tsc",
-    "src/mcp_win_stdio/db",
-    "src/mcp_win_stdio/git",
-    "src/mcp_win_stdio/ssh",
-    "src/mcp_win_stdio/rag",
-    "src/mcp_win_stdio/excel_db",
-]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [
+    ".git",
+    ".pytest_cache",
+    ".agents",
+    "build",
+    "dist",
+    "scratch",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501", "E402", "E722", "F841", "W293", "W291", "E741", "F401"]
 
 

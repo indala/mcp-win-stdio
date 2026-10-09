@@ -2,6 +2,7 @@
 Usage guide and prompt recipes for Database MCP server (mcp-win-stdio.db).
 """
 
+
 def print_db_guide() -> None:
     guide_text = """
 ================================================================================

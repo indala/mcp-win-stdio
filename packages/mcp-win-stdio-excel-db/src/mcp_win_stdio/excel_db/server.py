@@ -14,22 +14,13 @@ try:
 except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP
 
-from mcp_win_stdio.excel_db.stream import (
-    stream_db_to_excel,
-    stream_excel_to_db,
-    stream_db_to_template,
-    py_template_pipeline as run_py_template_pipeline,
-    resolve_sqlalchemy_url
-)
+from mcp_win_stdio.excel_db.auditor import compare_master_datasets as audit_compare_masters
+from mcp_win_stdio.excel_db.auditor import reconcile_db_vs_excel as audit_reconcile
 from mcp_win_stdio.excel_db.engine import run_cross_source_query
-from mcp_win_stdio.excel_db.auditor import (
-    reconcile_db_vs_excel as audit_reconcile,
-    compare_master_datasets as audit_compare_masters
-)
-from mcp_win_stdio.excel_db.migrator import (
-    generate_master_migration_plan as gen_migration_plan,
-    sync_master_to_db as execute_sync
-)
+from mcp_win_stdio.excel_db.migrator import generate_master_migration_plan as gen_migration_plan
+from mcp_win_stdio.excel_db.migrator import sync_master_to_db as execute_sync
+from mcp_win_stdio.excel_db.stream import py_template_pipeline as run_py_template_pipeline
+from mcp_win_stdio.excel_db.stream import stream_db_to_excel, stream_db_to_template, stream_excel_to_db
 
 mcp = FastMCP("excel-db-mcp")
 
@@ -60,7 +51,7 @@ def _get_db_config(conn_name_or_url: Optional[str] = None) -> str:
     # 3. Check ~/.gemini/config/mcp-servers/database-mcp/connections.json
     cfg_paths = [
         Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json",
-        Path.home() / ".mcp-win-stdio" / "db_connections.json"
+        Path.home() / ".mcp-win-stdio" / "db_connections.json",
     ]
     for cp in cfg_paths:
         if cp.exists():
@@ -90,11 +81,11 @@ def db_to_excel_stream(
     sheet_name: str = "QueryResults",
     if_sheet_exists: str = "replace",
     table_style: Optional[str] = "TableStyleMedium9",
-    autofit_columns: bool = True
+    autofit_columns: bool = True,
 ) -> Dict[str, Any]:
     """
     Stream database query results directly to an Excel file without loading intermediate rows into LLM context.
-    
+
     Args:
         sql_query: SQL SELECT query to execute on the database.
         target_excel_path: Path to the target .xlsx file.
@@ -112,7 +103,7 @@ def db_to_excel_stream(
         sheet_name=sheet_name,
         if_sheet_exists=if_sheet_exists,
         table_style=table_style,
-        autofit_columns=autofit_columns
+        autofit_columns=autofit_columns,
     )
     return res
 
@@ -124,7 +115,7 @@ def excel_to_db_upsert(
     connection_name_or_url: Optional[str] = None,
     sheet_name: Optional[Union[str, int]] = 0,
     if_table_exists: str = "append",
-    chunk_size: int = 1000
+    chunk_size: int = 1000,
 ) -> Dict[str, Any]:
     """
     Bulk stream an Excel worksheet directly into a database table with chunking.
@@ -144,15 +135,13 @@ def excel_to_db_upsert(
         db_url_or_config=db_conn,
         sheet_name=sheet_name,
         if_table_exists=if_table_exists,
-        chunk_size=chunk_size
+        chunk_size=chunk_size,
     )
     return res
 
 
 @mcp.tool()
-def query_unified_sources(
-    pipeline_spec_json: Union[Dict[str, Any], str]
-) -> Dict[str, Any]:
+def query_unified_sources(pipeline_spec_json: Union[Dict[str, Any], str]) -> Dict[str, Any]:
     """
     Execute a unified cross-source SQL query joining SQL Database tables and Excel spreadsheets in memory.
 
@@ -168,10 +157,7 @@ def query_unified_sources(
         raise ValueError("Missing 'transformation_sql' in pipeline spec.")
 
     res = run_cross_source_query(
-        sources=sources,
-        transformation_sql=transformation_sql,
-        target=target,
-        db_resolver_func=_get_db_config
+        sources=sources, transformation_sql=transformation_sql, target=target, db_resolver_func=_get_db_config
     )
     return res
 
@@ -184,7 +170,7 @@ def reconcile_db_vs_excel(
     connection_name_or_url: Optional[str] = None,
     sheet_name: Optional[Union[str, int]] = 0,
     compare_columns: Optional[List[str]] = None,
-    output_report_path: Optional[str] = None
+    output_report_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Compare a database query against an Excel spreadsheet, detecting missing records and field-level mismatches.
@@ -197,7 +183,7 @@ def reconcile_db_vs_excel(
         db_url_or_config=db_conn,
         sheet_name=sheet_name,
         compare_columns=compare_columns,
-        output_report_path=output_report_path
+        output_report_path=output_report_path,
     )
     return res
 
@@ -218,7 +204,7 @@ def compare_master_datasets(
     tolerance: Optional[float] = None,
     ignore_whitespace_case: bool = True,
     output_report_path: Optional[str] = None,
-    output_audit_path: Optional[str] = None
+    output_audit_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Deterministically compare two master datasets (Excel vs Excel, DB vs Excel, or DB vs DB).
@@ -282,7 +268,7 @@ def compare_master_datasets(
         numeric_tolerance=effective_tol,
         ignore_whitespace_case=ignore_whitespace_case,
         output_report_path=out_path,
-        db_resolver_func=_get_db_config
+        db_resolver_func=_get_db_config,
     )
     return res
 
@@ -298,7 +284,7 @@ def generate_master_migration_plan(
     output_sql_path: Optional[str] = None,
     on_conflict_action: str = "update",
     fk_lookups_json: Optional[Union[Dict[str, Any], str]] = None,
-    price_history_table: Optional[str] = None
+    price_history_table: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Generate atomic, transactional PostgreSQL/MySQL migration SQL from an Excel master.
@@ -332,7 +318,7 @@ def generate_master_migration_plan(
         on_conflict_action=on_conflict_action,
         fk_lookups=fk_lookups,
         price_history_table=price_history_table,
-        db_resolver_func=_get_db_config
+        db_resolver_func=_get_db_config,
     )
     return res
 
@@ -347,7 +333,7 @@ def sync_master_to_db(
     sheet_name: Optional[Union[str, int]] = 0,
     fk_lookups_json: Optional[Union[Dict[str, Any], str]] = None,
     dry_run: bool = True,
-    chunk_size: int = 500
+    chunk_size: int = 500,
 ) -> Dict[str, Any]:
     """
     Execute master data synchronization against live database with transactional safety.
@@ -377,16 +363,14 @@ def sync_master_to_db(
         fk_lookups=fk_lookups,
         dry_run=dry_run,
         chunk_size=chunk_size,
-        db_resolver_func=_get_db_config
+        db_resolver_func=_get_db_config,
     )
     return res
 
 
 @mcp.tool()
 def py_template_pipeline(
-    template_excel_path: str,
-    output_excel_path: str,
-    pipeline_spec_json: Union[Dict[str, Any], str]
+    template_excel_path: str, output_excel_path: str, pipeline_spec_json: Union[Dict[str, Any], str]
 ) -> Dict[str, Any]:
     """
     Execute custom Python/Pandas logic across multiple data sources to construct
@@ -409,7 +393,7 @@ def py_template_pipeline(
         sources=sources,
         python_script=python_script,
         targets=targets,
-        db_resolver_func=_get_db_config
+        db_resolver_func=_get_db_config,
     )
     return res
 
@@ -421,7 +405,7 @@ def db_to_excel_template(
     output_excel_path: str,
     connection_name_or_url: Optional[str] = None,
     sheet_name: str = "Sheet1",
-    start_cell: str = "A2"
+    start_cell: str = "A2",
 ) -> Dict[str, Any]:
     """
     Inject database query results into a pre-styled Excel template preserving logos, charts, and formulas.
@@ -441,7 +425,6 @@ def db_to_excel_template(
         output_excel_path=output_excel_path,
         db_url_or_config=db_conn,
         sheet_name=sheet_name,
-        start_cell=start_cell
+        start_cell=start_cell,
     )
     return res
-

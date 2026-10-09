@@ -9,40 +9,33 @@ from pathlib import Path
 for p in Path("packages").glob("*/src"):
     sys.path.insert(0, str(p.resolve()))
 sys.path.insert(0, os.path.abspath("src"))
-import shutil
 import subprocess
 import tempfile
 
 from mcp_win_stdio.git.server import (
-    is_git_installed,
-    is_gh_installed,
-    get_git_missing_guidance,
-    get_gh_missing_guidance,
-    _truncate_output,
     _filter_git_output,
-    resolve_repo_path,
-    find_git_root,
-    use_repo,
-    list_repos,
-    add_repo,
+    _truncate_output,
+    get_gh_missing_guidance,
+    get_git_missing_guidance,
+    gh_auth_status,
+    git_branch,
+    git_commit,
+    git_conflict_resolve,
+    git_diff,
+    git_grep,
     git_init,
+    git_log,
     git_remote,
     git_restore,
-    repo_overview,
     git_status,
-    git_commit,
-    git_log,
-    git_diff,
-    git_branch,
     git_tag,
-    git_grep,
-    git_config,
-    git_conflict_resolve,
-    gh_auth_status,
-    gh_pr_checks,
-    gh_release_create,
+    is_gh_installed,
+    is_git_installed,
+    list_repos,
     remove_repo,
     rename_alias,
+    repo_overview,
+    use_repo,
 )
 
 
@@ -94,7 +87,9 @@ def test_alias_resolution_and_init():
         assert status_res["clean"] is True
 
         # Test git_remote
-        rem_add = git_remote(action="add", name="origin", url="https://github.com/test/repo.git", repo_path="test_alias")
+        rem_add = git_remote(
+            action="add", name="origin", url="https://github.com/test/repo.git", repo_path="test_alias"
+        )
         assert rem_add["success"] is True
 
         rem_list = git_remote(action="list", repo_path="test_alias")
@@ -132,11 +127,7 @@ def test_local_git_operations():
         assert "sample.py" in status_res2["untracked"]
 
         # 4. Commit with include_untracked
-        commit_res = git_commit(
-            message="initial commit",
-            include_untracked=True,
-            repo_path=str(repo_dir)
-        )
+        commit_res = git_commit(message="initial commit", include_untracked=True, repo_path=str(repo_dir))
         assert commit_res["success"] is True
 
         # 5. Log verification
@@ -156,7 +147,9 @@ def test_local_git_operations():
         assert "feature/test-branch" in names
 
         # 7. Modify file and check git diff with pagination
-        test_file.write_text("print('hello world modified')\n" + "\n".join([f"# line {i}" for i in range(100)]), encoding="utf-8")
+        test_file.write_text(
+            "print('hello world modified')\n" + "\n".join([f"# line {i}" for i in range(100)]), encoding="utf-8"
+        )
         diff_res = git_diff(offset_lines=0, max_lines=20, repo_path=str(repo_dir))
         assert diff_res["success"] is True
         assert diff_res["returned_lines"] == 20

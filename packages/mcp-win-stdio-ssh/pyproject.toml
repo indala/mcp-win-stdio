@@ -30,7 +30,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp-win-stdio>=0.2.4",
+    "mcp-win-stdio>=0.2.5",
     "mcp>=1.2.0",
     "paramiko>=3.0.0",
     "cryptography>=3.3.0",

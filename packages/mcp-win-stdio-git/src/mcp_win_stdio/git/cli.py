@@ -3,8 +3,6 @@ CLI entry point for mcp-win-stdio-git.
 """
 
 import argparse
-import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -18,7 +16,7 @@ if sys.platform == "win32":
         pass
 
 from mcp_win_stdio.git import __version__
-from mcp_win_stdio.git.server import mcp, is_git_installed, is_gh_installed
+from mcp_win_stdio.git.server import mcp
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -46,12 +44,12 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         if name and email:
             print(f"[OK] Git Identity: {name} <{email}>")
         else:
-            print(f"[WARN] Git Identity: Not configured (missing user.name or user.email)")
-            print(f"       -> Run: git config --global user.name \"Your Name\"")
-            print(f"       -> Run: git config --global user.email \"you@example.com\"")
+            print("[WARN] Git Identity: Not configured (missing user.name or user.email)")
+            print('       -> Run: git config --global user.name "Your Name"')
+            print('       -> Run: git config --global user.email "you@example.com"')
     else:
-        print(f"[FAIL] Git CLI: Not found on PATH")
-        print(f"       -> Install Git: winget install --id Git.Git -e")
+        print("[FAIL] Git CLI: Not found on PATH")
+        print("       -> Install Git: winget install --id Git.Git -e")
         if sys.stdin.isatty():
             install = input("       Would you like to install Git now via winget? [Y/n]: ").strip().lower()
             if install not in ("n", "no"):
@@ -61,13 +59,17 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     gh_bin = shutil.which("gh")
     if gh_bin:
         try:
-            ver_line = subprocess.run(["gh", "--version"], capture_output=True, text=True, check=True).stdout.splitlines()[0]
+            ver_line = subprocess.run(
+                ["gh", "--version"], capture_output=True, text=True, check=True
+            ).stdout.splitlines()[0]
             print(f"[OK] GitHub CLI: {ver_line} ({gh_bin})")
         except Exception:
             print(f"[OK] GitHub CLI: Found at {gh_bin}")
 
         # GitHub Auth status
-        auth_res = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        auth_res = subprocess.run(
+            ["gh", "auth", "status"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
         auth_out = auth_res.stderr or auth_res.stdout
         if "Logged in to" in auth_out:
             first_account = [ln.strip() for ln in auth_out.splitlines() if "Logged in to" in ln]
@@ -76,22 +78,24 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             print(f"[OK] GitHub Auth: Logged in ({account_str})")
 
             # Check Git credential helper integration
-            helper_res = subprocess.run(["git", "config", "--get-all", "credential.helper"], capture_output=True, text=True).stdout
+            helper_res = subprocess.run(
+                ["git", "config", "--get-all", "credential.helper"], capture_output=True, text=True
+            ).stdout
             if "gh" in helper_res:
-                print(f"[OK] Git Credential Helper: Linked to gh (account switching active)")
+                print("[OK] Git Credential Helper: Linked to gh (account switching active)")
             else:
-                print(f"[WARN] Git Credential Helper: Not linked to GitHub CLI.")
-                print(f"       -> Run: gh auth setup-git")
-                print(f"       (Required for git commands & account switching to use gh authentication)")
+                print("[WARN] Git Credential Helper: Not linked to GitHub CLI.")
+                print("       -> Run: gh auth setup-git")
+                print("       (Required for git commands & account switching to use gh authentication)")
         else:
-            print(f"[INFO] GitHub Auth: Not logged in")
-            print(f"       -> Step 1: gh auth login")
-            print(f"       -> Step 2: gh auth setup-git  (essential for git commands & account switching)")
+            print("[INFO] GitHub Auth: Not logged in")
+            print("       -> Step 1: gh auth login")
+            print("       -> Step 2: gh auth setup-git  (essential for git commands & account switching)")
     else:
-        print(f"[INFO] GitHub CLI: Not found on PATH (enables PR, Issue, and Actions tools)")
-        print(f"       -> Step 1: winget install --id GitHub.cli -e")
-        print(f"       -> Step 2: gh auth login")
-        print(f"       -> Step 3: gh auth setup-git  (essential for git commands & account switching)")
+        print("[INFO] GitHub CLI: Not found on PATH (enables PR, Issue, and Actions tools)")
+        print("       -> Step 1: winget install --id GitHub.cli -e")
+        print("       -> Step 2: gh auth login")
+        print("       -> Step 3: gh auth setup-git  (essential for git commands & account switching)")
         if sys.stdin.isatty():
             install = input("       Would you like to install GitHub CLI now via winget? [y/N]: ").strip().lower()
             if install in ("y", "yes"):
@@ -103,6 +107,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
 def cmd_guide(args: argparse.Namespace) -> None:
     """Print Git MCP guide and prompt recipes."""
     from mcp_win_stdio.git.guide import print_git_guide
+
     print_git_guide()
 
 

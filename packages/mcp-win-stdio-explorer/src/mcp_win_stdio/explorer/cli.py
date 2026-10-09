@@ -5,10 +5,10 @@ CLI entry point for mcp-win-stdio-explorer.
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from mcp_win_stdio.explorer import __version__
 from mcp_win_stdio.explorer.guide import print_guide
@@ -108,7 +108,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
                 del data["mcpServers"]["explorer"]
                 with open(desktop_cfg, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
-                print(f"[OK] Removed 'explorer' from Claude Desktop.")
+                print("[OK] Removed 'explorer' from Claude Desktop.")
         except Exception as e:
             print(f"[ERROR] Claude Desktop: {e}")
 

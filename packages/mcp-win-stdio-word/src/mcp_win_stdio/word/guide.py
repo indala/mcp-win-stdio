@@ -2,6 +2,7 @@
 Usage guide and Claude prompt recipes for Word MCP server.
 """
 
+
 def print_guide() -> None:
     guide_text = """
 ================================================================================

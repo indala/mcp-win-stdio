@@ -29,7 +29,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp-win-stdio>=0.2.4",
+    "mcp-win-stdio>=0.2.5",
     "mcp>=1.2.0",
     "psycopg2-binary>=2.9.0",
     "pymysql>=1.1.0",

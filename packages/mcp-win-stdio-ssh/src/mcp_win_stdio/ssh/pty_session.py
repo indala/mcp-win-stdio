@@ -4,13 +4,11 @@ Maintains long-lived interactive shell sessions for REPLs, prompts, and CLI wiza
 """
 
 import re
-import select
 import threading
 import time
 from typing import Any, Dict, List, Optional
 
 import paramiko
-
 from mcp_win_stdio.ssh.connection import get_cached_or_connect, resolve_host_info
 
 _PTY_SESSIONS: Dict[str, Dict[str, Any]] = {}
@@ -171,12 +169,14 @@ def list_pty_sessions() -> List[Dict[str, Any]]:
     with _PTY_LOCK:
         for name, sess in _PTY_SESSIONS.items():
             chan = sess["channel"]
-            res.append({
-                "sessionName": name,
-                "host": sess["host"],
-                "createdAt": sess["createdAt"],
-                "isActive": not chan.closed,
-            })
+            res.append(
+                {
+                    "sessionName": name,
+                    "host": sess["host"],
+                    "createdAt": sess["createdAt"],
+                    "isActive": not chan.closed,
+                }
+            )
     return res
 
 
