@@ -36,7 +36,20 @@ your-repo/
 
 ### 1️⃣ `.mcp.json` (Unified Workspace MCP Configuration)
 
-Create `.mcp.json` in your project root (or generate it automatically using `mws init-project`):
+You can configure individual servers or simply use the **Unified On-Demand Gateway** (`server`) which dynamically proxies all 220+ tools across all 10 servers with zero token overhead:
+
+```json
+{
+  "mcpServers": {
+    "mws": {
+      "command": "python",
+      "args": ["-m", "mcp_win_stdio.server"]
+    }
+  }
+}
+```
+
+Or configure individual standalone servers if preferred:
 
 ```json
 {
@@ -121,17 +134,29 @@ You can configure project-level MCP files using the `mws` CLI directly:
 
 ### 1. Initialize Project (All or Specific Servers)
 ```powershell
-# Configure all servers:
+# Review installed servers, confirm workspace changes, then configure:
 mws init-project
 
-# Or configure only specific servers:
+# Configure specific servers; db prompts for DATABASE_URL:
 mws init-project excel db tsc
+
+# Configure Codex's trusted-project config as well:
+mws init codex excel db tsc
+
+# Explicitly accept without confirmation/environment prompts:
+mws init db --yes
+
+# Preview changes without writing files:
+mws init db --dry-run
+
+# Inspect project setup without changing it:
+mws status
 ```
 *(Creates `.mcp.json`, migrates and cleans legacy `.vscode/mcp.json` if found, and generates tailored `AGENTS.md`).*
 
 ### 2. Add / Setup Specific Server in Current Project
 ```powershell
-# Add one or more servers without overwriting existing ones:
+# Confirm and add one or more servers without overwriting existing ones:
 mws setup-project excel
 mws add-project db excel-db
 ```
@@ -146,3 +171,7 @@ mws remove-project ssh word
 When running `mws init-project` or `mws setup-project` in any repo that previously had `.vscode/mcp.json`:
 - All existing custom servers configured in `.vscode/mcp.json` are preserved and merged into `.mcp.json`.
 - The deprecated `.vscode/mcp.json` file is deleted to keep your workspace clean and prevent VS Code 1.106+ deprecation notices.
+
+`mws init` and `mws init-project` are aliases for interactive **project bootstrap**: they ask for confirmation, default to installed servers, and can configure an agent client when named. `mws setup-project`/`mws add-project` is the incremental alternative: it requires explicit server names and adds only those servers after confirmation. Both configure project-scoped MCP entries and environment settings. `mws setup <server>` (alias `mws add <server>`) is different: it checks/installs a server and configures Claude Desktop/Code at user scope. Use `--yes` for non-interactive project changes; this skips confirmation and interactive environment prompts. Project launch commands load the root `.env`; keep credentials there, not in `.mcp.json` or committed instruction files. The project commands update mws-managed guidance blocks in `AGENTS.md`, `GEMINI.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` without replacing surrounding text.
+
+`mws status` is read-only and reports configured versus installed servers, supported environment keys present in `.env`, and basic config warnings. Add `--dry-run` to `mws init` or `mws setup-project` to preview planned project file changes without prompting or writing anything.

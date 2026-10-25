@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio"
-version = "0.2.5"
-description = "Windows-optimized Model Context Protocol (MCP) suite & interactive CLI hub for Claude Desktop & Claude Code CLI (Excel COM, Word layouts, Workspace Explorer, and TypeScript diagnostic watcher)."
+version = "0.3.1"
+description = "Universal Windows-optimized Model Context Protocol (MCP) suite & dynamic on-demand tool gateway for AI IDEs and CLI agents (Gemini, Claude, ChatGPT, Cursor, Windsurf, Kiro, OpenCode)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
     { name = "Mohan Kumar Indala" }
 ]
-keywords = ["mcp", "claude", "windows", "excel", "word", "workspace-explorer", "typescript", "stdio", "ai", "llm"]
+keywords = ["mcp", "agent", "windows", "gemini", "claude", "cursor", "chatgpt", "excel", "word", "workspace-explorer", "typescript", "stdio", "ai", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
@@ -34,42 +34,46 @@ dependencies = [
 
 [project.optional-dependencies]
 excel = [
-    "mcp-win-stdio-excel>=0.2.5",
+    "mcp-win-stdio-excel>=0.3.1",
 ]
 word = [
-    "mcp-win-stdio-word>=0.2.5",
+    "mcp-win-stdio-word>=0.3.1",
 ]
 explorer = [
-    "mcp-win-stdio-explorer>=0.2.5",
+    "mcp-win-stdio-explorer>=0.3.1",
 ]
 tsc = [
-    "mcp-win-stdio-tsc>=0.2.5",
+    "mcp-win-stdio-tsc>=0.3.1",
 ]
 db = [
-    "mcp-win-stdio-db>=0.2.5",
+    "mcp-win-stdio-db>=0.3.1",
 ]
 git = [
-    "mcp-win-stdio-git>=0.2.5",
+    "mcp-win-stdio-git>=0.3.1",
 ]
 ssh = [
-    "mcp-win-stdio-ssh>=0.2.5",
+    "mcp-win-stdio-ssh>=0.3.1",
 ]
 rag = [
-    "mcp-win-stdio-rag>=0.2.5",
+    "mcp-win-stdio-rag>=0.3.1",
 ]
 excel-db = [
-    "mcp-win-stdio-excel-db>=0.2.5",
+    "mcp-win-stdio-excel-db>=0.3.1",
+]
+arch = [
+    "mcp-win-stdio-arch>=0.3.1",
 ]
 all = [
-    "mcp-win-stdio-excel>=0.2.5",
-    "mcp-win-stdio-word>=0.2.5",
-    "mcp-win-stdio-explorer>=0.2.5",
-    "mcp-win-stdio-tsc>=0.2.5",
-    "mcp-win-stdio-db>=0.2.5",
-    "mcp-win-stdio-git>=0.2.5",
-    "mcp-win-stdio-ssh>=0.2.5",
-    "mcp-win-stdio-rag>=0.2.5",
-    "mcp-win-stdio-excel-db>=0.2.5",
+    "mcp-win-stdio-excel>=0.3.1",
+    "mcp-win-stdio-word>=0.3.1",
+    "mcp-win-stdio-explorer>=0.3.1",
+    "mcp-win-stdio-tsc>=0.3.1",
+    "mcp-win-stdio-db>=0.3.1",
+    "mcp-win-stdio-git>=0.3.1",
+    "mcp-win-stdio-ssh>=0.3.1",
+    "mcp-win-stdio-rag>=0.3.1",
+    "mcp-win-stdio-excel-db>=0.3.1",
+    "mcp-win-stdio-arch>=0.3.1",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -112,6 +116,7 @@ ignore = ["E501", "E402", "E722", "F841", "W293", "W291", "E741", "F401"]
 [tool.pyright]
 extraPaths = [
     "src",
+    "packages/mcp-win-stdio-arch/src",
     "packages/mcp-win-stdio-db/src",
     "packages/mcp-win-stdio-excel/src",
     "packages/mcp-win-stdio-excel-db/src",
@@ -122,5 +127,20 @@ extraPaths = [
     "packages/mcp-win-stdio-tsc/src",
     "packages/mcp-win-stdio-word/src",
 ]
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+mcp-win-stdio-excel = { workspace = true }
+mcp-win-stdio-word = { workspace = true }
+mcp-win-stdio-explorer = { workspace = true }
+mcp-win-stdio-tsc = { workspace = true }
+mcp-win-stdio-db = { workspace = true }
+mcp-win-stdio-git = { workspace = true }
+mcp-win-stdio-ssh = { workspace = true }
+mcp-win-stdio-rag = { workspace = true }
+mcp-win-stdio-excel-db = { workspace = true }
+mcp-win-stdio-arch = { workspace = true }
 
 

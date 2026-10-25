@@ -17,8 +17,9 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-from mcp_win_stdio.git import __version__
 from mcp_win_stdio.git.server import mcp
+
+from mcp_win_stdio.git import __version__
 
 
 def cmd_run(args: argparse.Namespace) -> None:

@@ -45,6 +45,18 @@ except (ImportError, Exception):
 
 mcp = FastMCP("database-mcp")
 
+try:
+    from mcp_win_stdio.core.config import DB_CONNECTIONS_FILE, USER_DIR, ensure_workspace_dirs
+except Exception:
+    USER_DIR = Path.home() / ".mcp-win-stdio"
+    DB_CONNECTIONS_FILE = USER_DIR / "db_connections.json"
+
+    def ensure_workspace_dirs():
+        USER_DIR.mkdir(parents=True, exist_ok=True)
+        return {"root": USER_DIR}
+
+LEGACY_DB_CONFIG = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
+
 # Global connection registry & cache
 _RAW_CONFIG: Dict[str, Any] = {}
 _CONNECTION_REGISTRY: Dict[str, Any] = {}
@@ -109,96 +121,106 @@ def _parse_url(url: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _save_connection(name: str, url: str) -> None:
-    """Persist new or updated connection to connections.json."""
-    default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
+def _get_db_config_file() -> Path:
     config_file_env = os.environ.get("CONFIG_FILE")
-    cfg_path = Path(config_file_env) if config_file_env else default_config
+    if config_file_env:
+        return Path(config_file_env)
+    ensure_workspace_dirs()
+    return DB_CONNECTIONS_FILE
 
+
+def _load_db_config_data() -> Dict[str, Any]:
+    cfg_path = _get_db_config_file()
+    if cfg_path.exists():
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    # Migration fallback: check legacy path if primary doesn't exist yet
+    if not os.environ.get("CONFIG_FILE") and LEGACY_DB_CONFIG.exists():
+        try:
+            with open(LEGACY_DB_CONFIG, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _save_db_config_data(data)
+            return data
+        except Exception:
+            pass
+
+    return {"default": None, "connections": {}}
+
+
+def _save_db_config_data(data: Dict[str, Any]) -> None:
+    cfg_path = _get_db_config_file()
     try:
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        if cfg_path.exists():
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        if "connections" not in data or not isinstance(data["connections"], dict):
-            flat_conns = {k: v for k, v in data.items() if k != "default" and (_is_db_url(v) or isinstance(v, dict))}
-            data = {"default": data.get("default", name), "connections": flat_conns}
-        data["connections"][name] = url
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
+
+def _save_connection(name: str, url: str) -> None:
+    """Persist new or updated connection to db_connections.json."""
+    data = _load_db_config_data()
+    if "connections" not in data or not isinstance(data["connections"], dict):
+        flat_conns = {k: v for k, v in data.items() if k not in ("default", "active_connection") and (_is_db_url(v) or isinstance(v, dict))}
+        data = {"default": data.get("default", name), "connections": flat_conns}
+    data["connections"][name] = url
+    if not data.get("default"):
+        data["default"] = name
+    _save_db_config_data(data)
 
 
 def _save_active_connection(name: str) -> None:
-    """Persist active connection choice to connections.json so state remains sticky across restarts."""
-    default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
-    config_file_env = os.environ.get("CONFIG_FILE")
-    cfg_path = Path(config_file_env) if config_file_env else default_config
-
-    try:
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {}
-        if cfg_path.exists():
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        data["default"] = name
-        with open(cfg_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+    """Persist active connection choice to db_connections.json so state remains sticky across restarts."""
+    data = _load_db_config_data()
+    data["default"] = name
+    data["active_connection"] = name
+    _save_db_config_data(data)
 
 
 def _init_config() -> None:
     global _ACTIVE_CONNECTION
 
-    # 1. Environment variable SERVERS
+    # 1. Primary: load from ~/.mcp-win-stdio/db_connections.json
+    data = _load_db_config_data()
+    default_pointer = data.get("active_connection") or data.get("default")
+    if isinstance(default_pointer, str):
+        _ACTIVE_CONNECTION = default_pointer
+
+    if "connections" in data and isinstance(data["connections"], dict):
+        conns = data["connections"]
+    elif "SERVERS" in data and isinstance(data["SERVERS"], dict):
+        conns = data["SERVERS"]
+    elif isinstance(data, dict):
+        conns = {k: v for k, v in data.items() if k not in ("default", "active_connection") and (_is_db_url(v) or isinstance(v, dict))}
+    else:
+        conns = {}
+
+    for k, v in conns.items():
+        if _is_db_url(v) or isinstance(v, dict):
+            _RAW_CONFIG[k] = v
+
+    # 2. Environment variable SERVERS fallback / auto-migration
     servers_env = os.environ.get("SERVERS")
     if servers_env:
         try:
             parsed = json.loads(servers_env)
             s_map = parsed.get("SERVERS", parsed) if isinstance(parsed, dict) else {}
             for k, v in s_map.items():
-                if _is_db_url(v) or isinstance(v, dict):
+                if (_is_db_url(v) or isinstance(v, dict)) and k not in _RAW_CONFIG:
                     _RAW_CONFIG[k] = v
+                    _save_connection(k, v if isinstance(v, str) else v.get("url", ""))
         except Exception as e:
             sys.stderr.write(f"Warning: Failed to parse SERVERS env: {e}\n")
-
-    # 2. Config file
-    default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
-    config_file_env = os.environ.get("CONFIG_FILE")
-    cfg_path = Path(config_file_env) if config_file_env else default_config
-
-    if cfg_path.exists():
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            # Check if default specified
-            default_pointer = data.get("default")
-            if isinstance(default_pointer, str) and not _ACTIVE_CONNECTION:
-                _ACTIVE_CONNECTION = default_pointer
-
-            if "connections" in data and isinstance(data["connections"], dict):
-                conns = data["connections"]
-            elif "SERVERS" in data and isinstance(data["SERVERS"], dict):
-                conns = data["SERVERS"]
-            elif isinstance(data, dict):
-                conns = {k: v for k, v in data.items() if k != "default" and (_is_db_url(v) or isinstance(v, dict))}
-            else:
-                conns = {}
-
-            for k, v in conns.items():
-                if k not in _RAW_CONFIG and (_is_db_url(v) or isinstance(v, dict)):
-                    _RAW_CONFIG[k] = v
-        except Exception as e:
-            sys.stderr.write(f"Warning: Failed to load config file: {e}\n")
 
     # 3. Fallback DATABASE_URL
     db_url = os.environ.get("DATABASE_URL")
     if db_url and "default" not in _RAW_CONFIG:
         _RAW_CONFIG["default"] = db_url
+        _save_connection("default", db_url)
 
     # Reconcile active connection
     if _ACTIVE_CONNECTION:
@@ -808,22 +830,18 @@ def remove_connection(name: str) -> Dict[str, Any]:
     _RAW_CONFIG.pop(matched_key, None)
     _CONNECTION_REGISTRY.pop(matched_key, None)
 
-    # Clean up from connections.json if present
-    default_config = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
-    config_file_env = os.environ.get("CONFIG_FILE")
-    cfg_path = Path(config_file_env) if config_file_env else default_config
+    # Clean up from db_connections.json if present
     try:
-        if cfg_path.exists():
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "connections" in data and isinstance(data["connections"], dict):
-                data["connections"].pop(matched_key, None)
-            else:
-                data.pop(matched_key, None)
-            if data.get("default") == matched_key:
-                data["default"] = next(iter(_RAW_CONFIG.keys()), None)
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+        data = _load_db_config_data()
+        if "connections" in data and isinstance(data["connections"], dict):
+            data["connections"].pop(matched_key, None)
+        else:
+            data.pop(matched_key, None)
+        if data.get("default") == matched_key or data.get("active_connection") == matched_key:
+            new_active = next(iter(_RAW_CONFIG.keys()), None)
+            data["default"] = new_active
+            data["active_connection"] = new_active
+        _save_db_config_data(data)
     except Exception:
         pass
 
@@ -1762,7 +1780,7 @@ def read_query(
     sql: str,
     params: Optional[List[Any]] = None,
     limit: int = 50,
-    max_cell_chars: int = 500,
+    max_cell_chars: int = 2000,
     connection: Optional[str] = None,
     server: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1774,7 +1792,7 @@ def read_query(
         sql: SELECT SQL query.
         params: Optional query parameters.
         limit: Max rows to return (default 50, max 200).
-        max_cell_chars: Max characters per cell (default 500).
+        max_cell_chars: Max characters per cell (default 2000, increase up to 50000 for large string_agg/JSON values).
         connection: Optional target database connection or server alias.
         server: Optional server or connection alias.
     """
@@ -1913,18 +1931,32 @@ def execute_query(
 
                     rowcount = cur.rowcount
                     status = cur.statusmessage or "SUCCESS"
+                    returned_rows = None
+                    if cur.description:
+                        try:
+                            raw_fetched = cur.fetchmany(100)
+                            returned_rows = [_truncate_row(r, 2000) for r in raw_fetched]
+                        except Exception:
+                            pass
+
                     if dry_run:
                         conn.rollback()
-                        return {
+                        res_obj = {
                             "connection": info["name"],
                             "dryRun": True,
                             "status": "SUCCESS (ROLLED BACK)",
                             "rowCount": rowcount,
                             "statusMessage": status,
                         }
+                        if returned_rows is not None:
+                            res_obj["returned_rows"] = returned_rows
+                        return res_obj
                     else:
                         conn.commit()
-                        return {"connection": info["name"], "status": status, "rowCount": rowcount}
+                        res_obj = {"connection": info["name"], "status": status, "rowCount": rowcount}
+                        if returned_rows is not None:
+                            res_obj["returned_rows"] = returned_rows
+                        return res_obj
             except Exception as e:
                 try:
                     conn.rollback()
@@ -2181,7 +2213,13 @@ def get_database_stats(connection: Optional[str] = None, server: Optional[str] =
 
 
 @mcp.tool()
-def add_connection(name: str, url: str, type: Optional[str] = None, setActive: bool = True) -> Dict[str, Any]:
+def add_connection(
+    name: str,
+    url: str,
+    type: Optional[str] = None,
+    setActive: bool = True,
+    test_connect: bool = True,
+) -> Dict[str, Any]:
     """Dynamically add a new PostgreSQL or MySQL connection at runtime."""
     info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
@@ -2192,24 +2230,26 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
         info["name"] = name
         info["url"] = url
 
-        # Test connect
-        if info["engine"] == "postgres":
-            if not psycopg2:
-                raise RuntimeError("PostgreSQL driver (psycopg2) is not available.")
-            conn = psycopg2.connect(url, connect_timeout=3)
-            conn.close()
-        else:
-            if not pymysql:
-                raise RuntimeError("MySQL driver (pymysql) is not available.")
-            conn = pymysql.connect(
-                host=info["host"],
-                port=info["port"],
-                user=info["user"],
-                password=info["password"],
-                database=info["database"],
-                connect_timeout=3,
-            )
-            conn.close()
+        warning = None
+        if test_connect:
+            try:
+                if info["engine"] == "postgres":
+                    if psycopg2:
+                        conn = psycopg2.connect(url, connect_timeout=2)
+                        conn.close()
+                else:
+                    if pymysql:
+                        conn = pymysql.connect(
+                            host=info["host"],
+                            port=info["port"],
+                            user=info["user"],
+                            password=info["password"],
+                            database=info["database"],
+                            connect_timeout=2,
+                        )
+                        conn.close()
+            except Exception as e:
+                warning = f"Could not connect immediately ({e}). Connection configuration was saved."
 
         _CONNECTION_REGISTRY[name] = info
         _RAW_CONFIG[name] = url
@@ -2218,13 +2258,128 @@ def add_connection(name: str, url: str, type: Optional[str] = None, setActive: b
             _ACTIVE_CONNECTION = name
             _save_active_connection(_ACTIVE_CONNECTION)
 
-        return {
+        res: Dict[str, Any] = {
             "success": True,
-            "message": f"Connection '{name}' ({info['engine']}) successfully connected and registered.",
+            "message": f"Connection '{name}' ({info['engine']}) registered successfully.",
             "isActive": _ACTIVE_CONNECTION == name,
         }
+        if warning:
+            res["warning"] = warning
+        return res
     except Exception as e:
         return _format_db_error(e)
+
+
+@mcp.tool()
+def edit_connection(
+    name: str,
+    new_url: Optional[str] = None,
+    new_name: Optional[str] = None,
+    type: Optional[str] = None,
+    setActive: Optional[bool] = None,
+    test_connect: bool = True,
+) -> Dict[str, Any]:
+    """
+    Dynamically update an existing database connection's URL, credentials, or alias name at runtime.
+    Persists updates to ~/.mcp-win-stdio/db_connections.json.
+
+    Args:
+        name: Existing connection alias name to update (e.g. 'dev', 'showreel_dev').
+        new_url: Optional new PostgreSQL or MySQL connection string (e.g. 'postgresql://user:pass@host:5432/db').
+        new_name: Optional new alias name if renaming the connection.
+        type: Optional engine type override ('postgres' or 'mysql').
+        setActive: If True, sets this connection as the active sticky database default.
+        test_connect: If True, verifies connection reachability (default True).
+    """
+    global _ACTIVE_CONNECTION
+    norm_name = _normalize_connection_param(name)
+    if not norm_name:
+        return {"error": True, "message": "Please specify a connection name to edit."}
+
+    matched_key = None
+    for k in list(_RAW_CONFIG.keys()):
+        if k.lower() == norm_name.lower():
+            matched_key = k
+            break
+
+    if not matched_key:
+        return {"error": True, "message": f"Connection '{name}' not found. Configured connections: {list(_RAW_CONFIG.keys())}"}
+
+    current_val = _RAW_CONFIG[matched_key]
+    current_url = current_val if isinstance(current_val, str) else current_val.get("url", "")
+    target_url = new_url.strip() if new_url and new_url.strip() else current_url
+    target_name = new_name.strip() if new_name and new_name.strip() else matched_key
+
+    # Check for name collision if renaming
+    if target_name.lower() != matched_key.lower():
+        if any(k.lower() == target_name.lower() for k in _RAW_CONFIG if k.lower() != matched_key.lower()):
+            return {"error": True, "message": f"Cannot rename to '{target_name}': a connection with that alias already exists."}
+
+    # Validate target URL
+    try:
+        info = _parse_url(target_url)
+        if type:
+            info["engine"] = type.lower()
+        info["name"] = target_name
+        info["url"] = target_url
+
+        warning = None
+        if new_url and new_url.strip() and test_connect:
+            try:
+                if info["engine"] == "postgres":
+                    if psycopg2:
+                        conn = psycopg2.connect(target_url, connect_timeout=2)
+                        conn.close()
+                else:
+                    if pymysql:
+                        conn = pymysql.connect(
+                            host=info["host"],
+                            port=info["port"],
+                            user=info["user"],
+                            password=info["password"],
+                            database=info["database"],
+                            connect_timeout=2,
+                        )
+                        conn.close()
+            except Exception as e:
+                warning = f"Could not connect immediately ({e}). Connection configuration was saved."
+    except Exception as e:
+        return {
+            "error": True,
+            "message": f"Invalid database connection URL: {e}",
+            "hint": "Check the connection URL format, e.g. postgresql://user:pass@host:5432/dbname",
+        }
+
+    # Remove old key from cache and config if renamed
+    if target_name != matched_key:
+        _RAW_CONFIG.pop(matched_key, None)
+        _CONNECTION_REGISTRY.pop(matched_key, None)
+        data = _load_db_config_data()
+        if "connections" in data and isinstance(data["connections"], dict):
+            data["connections"].pop(matched_key, None)
+        _save_db_config_data(data)
+
+    _RAW_CONFIG[target_name] = target_url
+    _CONNECTION_REGISTRY[target_name] = info
+    _save_connection(target_name, target_url)
+
+    if setActive or (setActive is None and _ACTIVE_CONNECTION == matched_key):
+        _ACTIVE_CONNECTION = target_name
+        _save_active_connection(target_name)
+
+    res: Dict[str, Any] = {
+        "success": True,
+        "message": f"Connection '{target_name}' ({info['engine']}) updated successfully.",
+        "name": target_name,
+        "engine": info["engine"],
+        "host": info["host"],
+        "port": info["port"],
+        "database": info["database"],
+        "isActive": _ACTIVE_CONNECTION == target_name,
+    }
+    if warning:
+        res["warning"] = warning
+    return res
 
 
 # ==========================================

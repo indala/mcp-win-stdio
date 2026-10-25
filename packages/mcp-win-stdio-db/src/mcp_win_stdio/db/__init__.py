@@ -2,4 +2,4 @@
 Unified Database MCP Server for mcp-win-stdio (PostgreSQL & MySQL).
 """
 
-__version__ = "0.2.5"
+__version__ = "0.3.1"

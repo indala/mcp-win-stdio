@@ -19,12 +19,12 @@ try:
 except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
-from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
+from mcp_win_stdio.core.config import USER_DIR, ensure_workspace_dirs
 
 mcp = FastMCP("git-mcp")
 
 # Persistent repository bookmarks
-GIT_CONFIG_DIR = INDALA_DIR
+GIT_CONFIG_DIR = USER_DIR
 REPOS_CONFIG_FILE = GIT_CONFIG_DIR / "git_repos.json"
 
 _ACTIVE_REPO: Optional[Path] = None

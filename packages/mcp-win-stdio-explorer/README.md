@@ -6,17 +6,17 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🚀 Features (11 Tools)
+## 🚀 Features (14 Tools)
 
 - **Token-Safe Directory Navigation**: Depth-controlled tree (`get_directory_tree`) that automatically collapses heavy build directories (`node_modules`, `.next`, `dist`, `.git`) to protect LLM context windows.
 - **Git-Wildmatch Pattern Engine**: Respects workspace `.gitignore` rules with high-performance `pathspec` matching.
 - **Fast Content Search (Grep)**: Regex and plain-text search across file contents with surrounding context lines.
-- **Typo-Tolerant Search**: RapidFuzz fuzzy search to locate files even with incomplete names or abbreviations.
-- **Code Symbol Outlines**: Symbol extractor (`get_code_outline`) extracting classes, functions, arguments, docstrings, and line numbers from Python (AST) and JS/TS without loading entire files into memory.
+- **Typo-Tolerant Search & Dedup**: RapidFuzz fuzzy search to locate files even with incomplete names, plus duplicate file hash detection (`find_duplicate_files`).
+- **Code Symbol Outlines & Navigation**: Symbol extractor (`get_code_outline`), workspace symbol locator (`find_symbol`), and codebase metrics (`get_code_stats`) from Python (AST) and JS/TS without loading entire files into memory.
 
 ---
 
-## 🛠️ Included Tools (11 Tools)
+## 🛠️ Included Tools (14 Tools)
 
 1. `list_dir`: Detailed listing (PowerShell Get-ChildItem style) with file sizes, counts, and heavy folder indicators.
 2. `get_directory_tree`: Depth-controlled tree with automatic heavy folder collapsing.
@@ -29,6 +29,9 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 9. `get_file_info`: File metadata, line counts, line endings (CRLF vs LF), and hashes.
 10. `workspace_summary`: Folder disk usage, extension breakdown, and Git repo status.
 11. `export_tree_to_file`: Dumps an un-truncated workspace map directly to disk.
+12. `find_symbol`: Search for function, class, or variable declarations across the entire workspace.
+13. `get_code_stats`: Codebase-wide line counts (code, blank, comments) by language.
+14. `find_duplicate_files`: Identifies duplicate files across directories using MD5/SHA256 hashes.
 
 ---
 

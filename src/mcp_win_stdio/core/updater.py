@@ -8,9 +8,9 @@ import time
 import urllib.request
 from typing import Optional, Tuple
 
-from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
+from mcp_win_stdio.core.config import USER_DIR, ensure_workspace_dirs
 
-VERSION_CACHE_FILE = INDALA_DIR / "version_cache.json"
+VERSION_CACHE_FILE = USER_DIR / "version_cache.json"
 PYPI_URL = "https://pypi.org/pypi/mcp-win-stdio/json"
 CACHE_TTL_SECONDS = 21600  # 6 hours
 

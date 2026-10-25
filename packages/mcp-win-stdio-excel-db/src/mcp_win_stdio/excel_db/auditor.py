@@ -10,12 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
+from mcp_win_stdio.excel_db.stream import resolve_sqlalchemy_url
 from openpyxl import Workbook
 from openpyxl.styles import Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from sqlalchemy import create_engine, text
-
-from mcp_win_stdio.excel_db.stream import resolve_sqlalchemy_url
 
 
 def _clean_val(v: Any) -> Any:
@@ -153,11 +152,12 @@ def compare_master_datasets(
     only_in_b = merged[merged["_merge"] == "right_only"].copy()
     in_both = merged[merged["_merge"] == "both"].copy()
 
-    # 6. Detailed Field Comparison
+    # 6. Detailed Field Comparison (High-Speed Dict Iteration)
     discrepancies = []
     col_discrepancy_counts: Dict[str, int] = {c: 0 for c in shared_cols}
 
-    for _, row in in_both.iterrows():
+    in_both_records = in_both.to_dict(orient="records")
+    for row in in_both_records:
         row_diffs = {}
         for col in shared_cols:
             val_a = row.get(f"{col}_a")
@@ -340,10 +340,11 @@ def compare_master_datasets(
             for _, row in only_in_a.iterrows():
                 ws_miss.append([_clean_val(row.get(f"{c}_a", row.get(c))) for c in clean_a_cols])
 
-        # Auto-fit columns across all sheets
+        # Auto-fit columns across all sheets (sample up to 50 rows for high-speed report generation)
         for sheet in wb.worksheets:
-            for col in sheet.columns:
-                max_len = max(len(str(c.value or "")) for c in col)
+            max_check = min(sheet.max_row or 1, 50)
+            for col in sheet.iter_cols(min_row=1, max_row=max_check):
+                max_len = max(len(str(c.value or "")) for c in col) if col else 10
                 col_letter = get_column_letter(col[0].column)
                 sheet.column_dimensions[col_letter].width = min(max(max_len + 3, 12), 45)
 

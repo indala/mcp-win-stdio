@@ -272,3 +272,256 @@ def test_rag_compact_search_and_chunk_context():
         # 4. Test get_site_tree with filter_path and max_items
         tree_res = store.get_site_tree(filter_path="calculator", max_items=10)
         assert "src/finance/calculator.py" in tree_res
+
+
+def test_rag_context_window_stays_within_source_file(tmp_path):
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    store = RAGVectorStore(tmp_path / "vector_store.db")
+    store.update_files_batch(
+        "demo",
+        [
+            {
+                "file_path": "README.md",
+                "content_hash": "readme_hash",
+                "chunks": [
+                    {"chunk_index": 0, "line_start": 1, "line_end": 2, "text": "README target context"},
+                ],
+            },
+            {
+                "file_path": "src/other.py",
+                "content_hash": "other_hash",
+                "chunks": [
+                    {"chunk_index": 1, "line_start": 3, "line_end": 4, "text": "unrelated code from another file"},
+                ],
+            },
+        ],
+    )
+
+    target_id = store.search("README target", collection="demo")[0]["chunk_id"]
+    context = store.get_chunk_context(target_id, window=1, collection="demo")
+    assert context is not None
+    assert context["total_chunks_in_window"] == 1
+    assert "unrelated code" not in context["full_text"]
+
+
+def test_rag_web_context_window_stays_within_document_section(tmp_path):
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    store = RAGVectorStore(tmp_path / "web-store.db")
+    store.index_crawled_data(
+        {
+            "target_url": "https://docs.example.test/guide",
+            "pages": [
+                {
+                    "url": "https://docs.example.test/guide",
+                    "title": "Guide",
+                    "sections": [
+                        {"anchor_id": "alpha", "section_title": "Alpha", "text": "alpha " * 300},
+                        {"anchor_id": "beta", "section_title": "Beta", "text": "beta isolated context"},
+                    ],
+                }
+            ],
+        },
+        collection_name="web-demo",
+    )
+    with store._get_connection() as conn:
+        target_id = conn.execute(
+            "SELECT id FROM chunks WHERE section_title = 'Alpha' AND chunk_index = 1"
+        ).fetchone()[0]
+
+    context = store.get_chunk_context(target_id, window=1, collection="web-demo")
+    assert context is not None
+    assert context["total_chunks_in_window"] == 2
+    assert "alpha" in context["full_text"]
+    assert "beta isolated context" not in context["full_text"]
+
+
+def test_rag_query_coverage_ignores_question_filler_and_substring_accidents():
+    from mcp_win_stdio.rag.store import analyze_query_coverage
+
+    answer = (
+        "Requests costing more than the token bucket capacity are rejected without changing the balance."
+    )
+    coverage = analyze_query_coverage(
+        "What happens when a request costs more than the token bucket capacity?",
+        answer,
+        "Rate limiting",
+    )
+    assert coverage["coverage_ratio"] == 1.0
+    assert coverage["missing"] == []
+
+    substring_only = analyze_query_coverage("rate", "This is a separate concern.", "")
+    assert substring_only["coverage_ratio"] == 0
+    assert substring_only["missing"] == ["rate"]
+
+
+def test_rag_natural_language_query_confidence(monkeypatch, tmp_path):
+    import json
+
+    import mcp_win_stdio.rag.server as rag_server
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    monkeypatch.setattr(rag_server, "_get_rag_data_dir", lambda: tmp_path)
+    store = RAGVectorStore(tmp_path / "confidence-demo" / "vector_store.db")
+    store.update_files_batch(
+        "confidence-demo",
+        [
+            {
+                "file_path": "rate-limits.md",
+                "content_hash": "rate_limit_content",
+                "chunks": [
+                    {
+                        "chunk_index": 0,
+                        "line_start": 1,
+                        "line_end": 4,
+                        "section_title": "Rate limiting",
+                        "text": (
+                            "Requests costing more than the token bucket capacity are rejected "
+                            "without changing the balance."
+                        ),
+                    }
+                ],
+            }
+        ],
+    )
+
+    answer = json.loads(
+        rag_server.query_knowledge_base(
+            "What happens when a request costs more than the token bucket capacity?",
+            target_url_or_collection="confidence-demo",
+        )
+    )
+    assert answer["confidence"] == "high"
+    assert answer["missing_query_terms"] == []
+    assert answer["results"][0]["file_path"] == "rate-limits.md"
+
+
+def test_rag_query_abstains_when_keyword_overlap_is_too_weak(monkeypatch, tmp_path):
+    import json
+
+    import mcp_win_stdio.rag.server as rag_server
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    monkeypatch.setattr(rag_server, "_get_rag_data_dir", lambda: tmp_path)
+    store = RAGVectorStore(tmp_path / "weak-match-demo" / "vector_store.db")
+    store.update_files_batch(
+        "weak-match-demo",
+        [
+            {
+                "file_path": "database.md",
+                "content_hash": "database_content",
+                "chunks": [
+                    {
+                        "chunk_index": 0,
+                        "line_start": 1,
+                        "line_end": 2,
+                        "section_title": "Database guide",
+                        "text": "This guide covers database connections and safe query execution.",
+                    }
+                ],
+            }
+        ],
+    )
+
+    result = json.loads(
+        rag_server.query_knowledge_base(
+            "database schema migration quantum oracle",
+            target_url_or_collection="weak-match-demo",
+        )
+    )
+    assert result["confidence"] == "none"
+    assert result["results"] == []
+    assert "schema" in result["missing_query_terms"]
+
+
+def test_rag_chunk_id_collisions_require_collection_scope(monkeypatch, tmp_path):
+    import json
+
+    import mcp_win_stdio.rag.server as rag_server
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    monkeypatch.setattr(rag_server, "_get_rag_data_dir", lambda: tmp_path)
+    for collection, text in (("alpha", "alpha source content"), ("beta", "beta source content")):
+        store = RAGVectorStore(tmp_path / collection / "vector_store.db")
+        store.update_files_batch(
+            collection,
+            [
+                {
+                    "file_path": "README.md",
+                    "content_hash": f"{collection}_hash",
+                    "chunks": [{"chunk_index": 0, "line_start": 1, "line_end": 1, "text": text}],
+                }
+            ],
+        )
+
+    alpha_store = RAGVectorStore(tmp_path / "alpha" / "vector_store.db")
+    alpha_id = alpha_store.search("alpha source", collection="alpha")[0]["chunk_id"]
+    beta_store = RAGVectorStore(tmp_path / "beta" / "vector_store.db")
+    beta_id = beta_store.search("beta source", collection="beta")[0]["chunk_id"]
+    assert alpha_id == beta_id
+
+    ambiguous = json.loads(rag_server.get_chunk_context(alpha_id))
+    assert "multiple collections" in ambiguous["error"]
+    assert set(ambiguous["collections"]) == {"alpha", "beta"}
+
+    scoped = json.loads(rag_server.get_chunk_context(alpha_id, target_url_or_collection="alpha"))
+    assert scoped["status"] == "success"
+    assert scoped["chunk"]["collection"] == "alpha"
+    assert "alpha source content" in scoped["chunk"]["text"]
+
+    related_ambiguous = json.loads(rag_server.find_related_chunks(alpha_id))
+    assert "multiple collections" in related_ambiguous["error"]
+
+
+def test_rag_cache_prunes_expired_temporary_collections(monkeypatch, tmp_path):
+    import json
+
+    import mcp_win_stdio.rag.server as rag_server
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    monkeypatch.setattr(rag_server, "_get_rag_data_dir", lambda: tmp_path)
+
+    def create_collection(name, is_temp):
+        db_path = tmp_path / name / "vector_store.db"
+        store = RAGVectorStore(db_path)
+        store.set_collection_meta(name, "remote_git", "https://github.com/example/repo", is_temp=is_temp)
+        if is_temp:
+            with store._get_connection() as conn:
+                conn.execute(
+                    "UPDATE collections_meta SET expires_at = ? WHERE collection_name = ?",
+                    ("2000-01-01T00:00:00+00:00", name),
+                )
+        return db_path.parent
+
+    expired_temp = create_collection("expired-temp", is_temp=True)
+    permanent = create_collection("permanent", is_temp=False)
+
+    result = json.loads(rag_server.prune_rag_cache(purge_temp_only=True))
+    assert result["status"] == "success"
+    assert result["expired_collections_deleted"] == ["expired-temp"]
+    assert not expired_temp.exists()
+    assert permanent.exists()
+
+
+def test_rag_cache_size_limit_removes_oldest_collections(monkeypatch, tmp_path):
+    import json
+    import os
+    import time
+
+    import mcp_win_stdio.rag.server as rag_server
+    from mcp_win_stdio.rag.store import RAGVectorStore
+
+    monkeypatch.setattr(rag_server, "_get_rag_data_dir", lambda: tmp_path)
+    old_path = tmp_path / "old" / "vector_store.db"
+    new_path = tmp_path / "new" / "vector_store.db"
+    for db_path, name in ((old_path, "old"), (new_path, "new")):
+        store = RAGVectorStore(db_path)
+        store.set_collection_meta(name, "local_codebase", name)
+    os.utime(old_path, (time.time() - 60, time.time() - 60))
+
+    result = json.loads(rag_server.prune_rag_cache(max_total_mb=0))
+    assert result["status"] == "success"
+    assert result["deleted_collections"] == ["old", "new"]
+    assert not old_path.parent.exists()
+    assert not new_path.parent.exists()

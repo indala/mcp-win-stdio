@@ -24,47 +24,69 @@ from mcp_win_stdio.excel_db.stream import stream_db_to_excel, stream_db_to_templ
 
 mcp = FastMCP("excel-db-mcp")
 
+try:
+    from mcp_win_stdio.core.config import DB_CONNECTIONS_FILE, USER_DIR, ensure_workspace_dirs
+except Exception:
+    USER_DIR = Path.home() / ".mcp-win-stdio"
+    DB_CONNECTIONS_FILE = USER_DIR / "db_connections.json"
+
+    def ensure_workspace_dirs():
+        USER_DIR.mkdir(parents=True, exist_ok=True)
+        return {"root": USER_DIR}
+
+LEGACY_DB_CONFIG = Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json"
+
 
 def _get_db_config(conn_name_or_url: Optional[str] = None) -> str:
-    """Resolve database connection identifier against SERVERS env, connections.json, or raw URL."""
-    if not conn_name_or_url:
-        # Check active default
-        conn_name_or_url = "default"
-
+    """Resolve database connection identifier against ~/.mcp-win-stdio/db_connections.json, SERVERS env, or raw URL."""
     # 1. Check if raw connection string
-    if any(conn_name_or_url.startswith(prefix) for prefix in ("postgresql://", "postgres://", "mysql://", "sqlite://")):
+    if conn_name_or_url and any(conn_name_or_url.startswith(prefix) for prefix in ("postgresql://", "postgres://", "mysql://", "sqlite://")):
         return conn_name_or_url
 
-    # 2. Check SERVERS environment variable
-    servers_env = os.environ.get("SERVERS")
-    if servers_env:
-        try:
-            parsed = json.loads(servers_env)
-            s_map = parsed.get("SERVERS", parsed) if isinstance(parsed, dict) else {}
-            if conn_name_or_url in s_map:
-                return s_map[conn_name_or_url]
-            elif conn_name_or_url == "default" and s_map:
-                return next(iter(s_map.values()))
-        except Exception:
-            pass
-
-    # 3. Check ~/.gemini/config/mcp-servers/database-mcp/connections.json
+    # 2. Check ~/.mcp-win-stdio/db_connections.json (shared single-source hub)
+    config_file_env = os.environ.get("CONFIG_FILE")
     cfg_paths = [
-        Path.home() / ".gemini" / "config" / "mcp-servers" / "database-mcp" / "connections.json",
-        Path.home() / ".mcp-win-stdio" / "db_connections.json",
+        Path(config_file_env) if config_file_env else DB_CONNECTIONS_FILE,
+        LEGACY_DB_CONFIG,
     ]
     for cp in cfg_paths:
         if cp.exists():
             try:
                 with open(cp, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                target_key = data.get("default") if conn_name_or_url == "default" else conn_name_or_url
+                target_key = conn_name_or_url
+                if not target_key or target_key.lower() == "default":
+                    target_key = data.get("active_connection") or data.get("default")
+
                 conns = data.get("connections", data)
-                if target_key in conns:
-                    entry = conns[target_key]
-                    return entry if isinstance(entry, str) else entry.get("url", entry)
+                if isinstance(conns, dict):
+                    # Check direct or case-insensitive match
+                    if target_key:
+                        for k, v in conns.items():
+                            if k.lower() == str(target_key).lower():
+                                return v if isinstance(v, str) else v.get("url", str(v))
+                    elif conns:
+                        first_entry = next(iter(conns.values()))
+                        return first_entry if isinstance(first_entry, str) else first_entry.get("url", str(first_entry))
             except Exception:
                 pass
+
+    # 3. Environment variable fallback (SERVERS / DATABASE_URL)
+    servers_env = os.environ.get("SERVERS")
+    if servers_env:
+        try:
+            parsed = json.loads(servers_env)
+            s_map = parsed.get("SERVERS", parsed) if isinstance(parsed, dict) else {}
+            if conn_name_or_url and conn_name_or_url in s_map:
+                return s_map[conn_name_or_url]
+            elif (not conn_name_or_url or conn_name_or_url == "default") and s_map:
+                return next(iter(s_map.values()))
+        except Exception:
+            pass
+
+    db_url_env = os.environ.get("DATABASE_URL")
+    if db_url_env:
+        return db_url_env
 
     # 4. Fallback: If bare db name without protocol, default to local PostgreSQL
     if conn_name_or_url and "://" not in conn_name_or_url and conn_name_or_url != "default":

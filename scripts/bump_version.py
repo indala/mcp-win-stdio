@@ -16,7 +16,7 @@ if sys.platform == "win32":
     except Exception:
         pass
 
-NEW_VERSION = "0.2.5"
+NEW_VERSION = sys.argv[1] if len(sys.argv) > 1 else "0.3.1"
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
 
@@ -25,6 +25,8 @@ def bump_all():
 
     # 1. Update pyproject.toml files
     for p in ROOT_DIR.rglob("pyproject.toml"):
+        if ".venv" in p.parts or "dist" in p.parts:
+            continue
         text = p.read_text(encoding="utf-8")
         new_text = re.sub(r'version = "[0-9]+\.[0-9]+\.[0-9]+"', f'version = "{NEW_VERSION}"', text)
         new_text = re.sub(r'("mcp-win-stdio(?:-[a-z0-9-]+)?>=)[0-9]+\.[0-9]+\.[0-9]+', rf"\g<1>{NEW_VERSION}", new_text)
@@ -33,6 +35,8 @@ def bump_all():
 
     # 2. Update __init__.py files
     for p in ROOT_DIR.rglob("__init__.py"):
+        if ".venv" in p.parts or "dist" in p.parts:
+            continue
         text = p.read_text(encoding="utf-8")
         if "__version__" in text:
             new_text = re.sub(r'__version__ = "[0-9]+\.[0-9]+\.[0-9]+"', f'__version__ = "{NEW_VERSION}"', text)

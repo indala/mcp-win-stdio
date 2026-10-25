@@ -1,6 +1,6 @@
 # mcp-win-stdio-ssh
 
-> Advanced Multi-SSH Connection & Remote Management Model Context Protocol (MCP) Server for Windows & Claude Desktop / Claude Code CLI.
+> Advanced Multi-SSH Connection & Remote Management Model Context Protocol (MCP) Server for Windows & Claude Desktop / Claude Code CLI: **34 Tools** for stateful SSH connection pooling, background execution, interactive PTYs, SFTP, and port tunnels. Zero mandatory environment variables (persists dynamically to `~/.mcp-win-stdio/ssh_hosts.json`).
 
 Part of the **[mcp-win-stdio](https://github.com/indala/mcp-win-stdio)** suite.
 

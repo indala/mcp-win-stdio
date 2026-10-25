@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import pandas as pd
-from sqlalchemy import create_engine, text
-
 from mcp_win_stdio.excel_db.stream import resolve_sqlalchemy_url
+from sqlalchemy import create_engine, text
 
 
 def _clean_sql_val(v: Any) -> str:

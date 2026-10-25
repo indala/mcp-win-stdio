@@ -2,6 +2,7 @@
 Installer and transparent configuration engine for Claude Desktop and Claude Code CLI.
 """
 
+import importlib.metadata
 import json
 import os
 import shutil
@@ -11,6 +12,64 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp_win_stdio.core.discovery import get_server_info
+
+
+def get_installed_mws_packages() -> List[str]:
+    """
+    Find all installed packages in the active Python environment that belong to mcp-win-stdio.
+    Matches 'mcp-win-stdio' and any 'mcp-win-stdio-*' subpackages.
+    """
+    installed = set()
+    try:
+        for dist in importlib.metadata.distributions():
+            raw_name = dist.metadata.get("Name")
+            if not raw_name:
+                continue
+            name = raw_name.lower().replace("_", "-")
+            if name == "mcp-win-stdio" or name.startswith("mcp-win-stdio-"):
+                installed.add(name)
+    except Exception:
+        pass
+    return sorted(installed)
+
+
+def get_package_manager_cmd(action: str) -> Optional[List[str]]:
+    """
+    Determine the best available package manager command (uv pip or python -m pip)
+    for installing, upgrading, or uninstalling packages in the current environment.
+    action: 'install', 'install --upgrade', or 'uninstall'
+    """
+    python_exe = str(Path(sys.executable).resolve())
+
+    # 1. Prefer uv if installed on system
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        if action == "uninstall":
+            return [uv_bin, "pip", "uninstall", "--python", python_exe, "-y"]
+        elif "upgrade" in action:
+            return [uv_bin, "pip", "install", "--python", python_exe, "--upgrade"]
+        else:
+            return [uv_bin, "pip", "install", "--python", python_exe]
+
+    # 2. Fallback to python -m pip if pip module exists
+    try:
+        check = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check.returncode == 0:
+            if action == "uninstall":
+                return [sys.executable, "-m", "pip", "uninstall", "-y"]
+            elif "upgrade" in action:
+                return [sys.executable, "-m", "pip", "install", "--upgrade"]
+            else:
+                return [sys.executable, "-m", "pip", "install"]
+    except Exception:
+        pass
+
+    return None
 
 
 def get_claude_desktop_config_path() -> Optional[Path]:
@@ -40,12 +99,17 @@ def get_server_exec_args(server_name: str) -> Tuple[str, List[str]]:
     # 1. Prefer absolute path to mws executable if present on PATH
     mws_bin = shutil.which("mws")
     if mws_bin and Path(mws_bin).is_file():
+        if server_name in ("server", "mws"):
+            return str(Path(mws_bin).resolve()).replace("\\", "/"), ["server"]
         return str(Path(mws_bin).resolve()).replace("\\", "/"), ["run", server_name]
 
     # 2. Fallback to absolute Python interpreter executable
     python_exe = str(Path(sys.executable).resolve()).replace("\\", "/")
     if srv["is_builtin"]:
-        args = ["-m", "mcp_win_stdio.cli", "run", server_name]
+        if server_name in ("server", "mws"):
+            args = ["-m", "mcp_win_stdio.server"]
+        else:
+            args = ["-m", "mcp_win_stdio.cli", "run", server_name]
     else:
         args = [srv["path"].replace("\\", "/")]
 
@@ -73,22 +137,32 @@ def generate_claude_cli_command(server_name: str, env_vars: Optional[Dict[str, s
     return f'claude mcp add -s user {env_flags}{server_name} -- "{python_exe}" {" ".join(args)}'
 
 
-def install_pip_dependencies(packages: List[str]) -> Tuple[bool, str]:
-    """Install required Python packages using pip."""
+def install_pip_dependencies(packages: List[str], upgrade: bool = False) -> Tuple[bool, str]:
+    """Install required Python packages using the best available package manager (uv or pip)."""
     if not packages:
         return True, "No extra packages required."
 
-    print(f"\n==> 📦 Installing dependencies: {', '.join(packages)}...")
-    cmd = [sys.executable, "-m", "pip", "install"] + packages
+    action = "install --upgrade" if upgrade else "install"
+    cmd_base = get_package_manager_cmd(action)
+    if not cmd_base:
+        return (
+            False,
+            f"Neither 'uv' nor 'pip' could be found to install: {', '.join(packages)}\n"
+            f"Please run manually:\n    pip install {' '.join(packages)}",
+        )
+
+    mgr_name = Path(cmd_base[0]).stem
+    print(f"\n==> 📦 Installing packages via {mgr_name}: {', '.join(packages)}...")
+    cmd = cmd_base + packages
 
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0:
             return True, "Dependencies installed successfully."
         else:
-            return False, f"Pip error:\n{res.stderr or res.stdout}"
+            return False, f"Package manager error:\n{res.stderr or res.stdout}"
     except Exception as e:
-        return False, f"Failed to run pip: {str(e)}"
+        return False, f"Failed to run installer: {str(e)}"
 
 
 def safe_apply_to_desktop(server_name: str, env_vars: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
@@ -193,16 +267,27 @@ def remove_server_from_cli(server_name: str) -> Tuple[bool, str]:
 
 
 def uninstall_pip_packages(packages: List[str]) -> Tuple[bool, str]:
-    """Uninstall Python packages using pip."""
+    """Uninstall Python packages using the best available package manager (uv or pip)."""
     if not packages:
         return True, "No packages specified to uninstall."
 
-    cmd = [sys.executable, "-m", "pip", "uninstall", "-y"] + packages
+    cmd_base = get_package_manager_cmd("uninstall")
+    if not cmd_base:
+        return (
+            False,
+            f"Neither 'uv' nor 'pip' could be found to uninstall: {', '.join(packages)}\n"
+            f"Please run manually:\n    pip uninstall -y {' '.join(packages)}",
+        )
+
+    mgr_name = Path(cmd_base[0]).stem
+    print(f"\n==> 🧹 Removing packages via {mgr_name}: {', '.join(packages)}...")
+    cmd = cmd_base + packages
+
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0:
             return True, "Packages uninstalled successfully."
         else:
-            return False, f"Pip uninstall error:\n{res.stderr or res.stdout}"
+            return False, f"Package manager uninstall error:\n{res.stderr or res.stdout}"
     except Exception as e:
-        return False, f"Failed to run pip uninstall: {str(e)}"
+        return False, f"Failed to run package uninstall: {str(e)}"

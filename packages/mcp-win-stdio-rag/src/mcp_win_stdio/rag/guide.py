@@ -4,15 +4,15 @@ Interactive and printable guide for the RAG MCP server.
 
 RAG_GUIDE = """
 # ================================================================
-# RAG MCP (MULTI-COLLECTION EMBEDDINGS & SEARCH) - USER GUIDE
+# RAG MCP (MULTI-COLLECTION SEARCH) - USER GUIDE
 # ================================================================
 
-The RAG MCP server provides 9 specialized tools for multi-collection web crawling,
+The RAG MCP server provides 10 specialized tools for multi-collection web crawling,
 incremental local codebase indexing, zero-clone remote GitHub repository streaming,
 token-compact hybrid search, and on-demand chunk expansion on Windows.
 
 ----------------------------------------------------------------
-1. TOOL SUMMARY (9 TOOLS)
+1. TOOL SUMMARY (10 TOOLS)
 ----------------------------------------------------------------
 * Crawling & Ingestion:
   - crawl_and_index_url(target_url, collection_name, max_depth, max_pages):
@@ -24,8 +24,10 @@ token-compact hybrid search, and on-demand chunk expansion on Windows.
 
 * Querying & Knowledge Retrieval (Agent-Friendly & Token-Efficient):
   - query_knowledge_base(query, target_url_or_collection, top_k, max_chars_per_snippet, compact):
-    Performs hybrid BM25 + dense semantic vector search with relevance ranking.
-    Features compact snippet mode and character limits (default 500 chars) to prevent context window bloat.
+    Performs hybrid SQLite FTS5 BM25 + TF-IDF ranking, with token-overlap fallback.
+    Features compact snippet mode and character limits (default 1000 chars) to prevent context window bloat.
+  - find_related_chunks(chunk_id, target_url_or_collection, top_k):
+    Finds nearby knowledge based on a retrieved chunk so an agent can follow relevant concepts.
   - get_chunk_context(chunk_id, target_url_or_collection, window):
     Retrieves full untruncated content for any chunk, optionally expanding surrounding context window.
   - get_knowledge_tree(target_url_or_collection, filter_path, max_items):
@@ -37,7 +39,17 @@ token-compact hybrid search, and on-demand chunk expansion on Windows.
   - delete_rag_collection(collection_name):
     Permanently deletes a collection and its vector index from disk.
   - prune_rag_cache(max_total_mb, purge_temp_only):
-    Frees disk space by deleting outdated crawl artifacts and orphan chunks.
+    Deletes expired temporary collections and optionally removes oldest-modified collections to meet a size limit.
+
+----------------------------------------------------------------
+2. AGENT WORKFLOW
+----------------------------------------------------------------
+1. Index a local project with index_local_codebase() or documentation with crawl_and_index_url().
+2. Search with query_knowledge_base(), narrowing with a collection or file-path filter when useful.
+3. Pass both chunk_id and collection from a result to get_chunk_context(); use the same collection with find_related_chunks().
+4. Use list_rag_collections() to discover sources and get_knowledge_tree() to inspect a collection's structure.
+5. Treat confidence and citations as evidence: verify retrieved code/docs before making changes.
+   Very weak keyword matches are returned as no-results with suggestions rather than unrelated snippets.
 # ================================================================
 """
 

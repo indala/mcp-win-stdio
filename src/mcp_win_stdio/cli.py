@@ -3,9 +3,11 @@ mcp-win-stdio CLI: Windows-optimized Model Context Protocol suite orchestrator.
 """
 
 import argparse
+import getpass
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,7 +39,15 @@ if _repo_packages.is_dir():
         )
 
 from mcp_win_stdio import __version__
-from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
+from mcp_win_stdio.core.clients import (
+    SUPPORTED_CLIENTS,
+    generate_snippet,
+    get_actual_windows_paths,
+    get_all_clients,
+    resolve_client,
+)
+from mcp_win_stdio.core.config import USER_DIR, ensure_workspace_dirs
+from mcp_win_stdio.core.dialogs import prompt_path_or_dialog
 from mcp_win_stdio.core.discovery import BUILTIN_SERVERS, get_server_info, list_available_servers
 from mcp_win_stdio.core.environment import (
     check_and_prompt_path_setup,
@@ -49,6 +59,7 @@ from mcp_win_stdio.core.installer import (
     generate_claude_desktop_snippet,
     get_claude_cli_config_path,
     get_claude_desktop_config_path,
+    get_installed_mws_packages,
     install_pip_dependencies,
     remove_server_from_cli,
     remove_server_from_desktop,
@@ -67,8 +78,6 @@ def print_dashboard() -> None:
     """Print interactive home dashboard when run with no arguments."""
     ensure_workspace_dirs()
     servers = list_available_servers()
-    desktop_cfg = get_claude_desktop_config_path()
-    cli_cfg = get_claude_cli_config_path()
 
     # Check for PyPI updates (fast/cached)
     update_info = check_for_update(__version__)
@@ -80,14 +89,13 @@ def print_dashboard() -> None:
     check_and_prompt_path_setup()
 
     print("\n" + "=" * 76)
-
-    print(f"   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v{__version__})")
+    print(f"   🚀  mcp-win-stdio — Universal Windows MCP Suite (v{__version__})")
     print("=" * 76)
-    desktop_status = str(desktop_cfg) if desktop_cfg else r"Not detected (%APPDATA%\Claude)"
-    cli_status = str(cli_cfg) if cli_cfg else "Not detected (~/.claude.json)"
-    print(f" Single-Source Hub:      {INDALA_DIR}")
-    print(f" Claude Desktop Config:  {desktop_status}")
-    print(f" Claude Code CLI Config: {cli_status}")
+    print(f" Single-Source Hub:      {USER_DIR}")
+    print(" Supported AI Clients:   Gemini / Antigravity, Claude Desktop & Code,")
+    print("                         ChatGPT, Cursor, Kiro, OpenCode, Windsurf,")
+    print("                         GitHub Copilot, OpenAI Codex")
+    print(" Architecture:           Non-invasive (zero automatic config file mutations)")
     print("-" * 76)
 
     print(f"{'SERVER':<12} {'STATUS':<16} {'TOOLS':<8} {'DESCRIPTION'}")
@@ -103,79 +111,304 @@ def print_dashboard() -> None:
         print(f"{name:<12} {status_str:<16} {tools:<8} {desc}")
 
     print("-" * 76)
-    print(" 💡 Quick Commands:")
-    print("   mws install <server|all>   -> Install server packages from PyPI")
-    print("   mws update <server|all>    -> Check & upgrade to latest PyPI version")
-    print("   mws setup <server>         -> Configure Claude Desktop & Claude Code CLI")
-    print("   mws uninstall <server|all> -> Cleanly remove packages & Claude configs")
-    print("   mws guide <server>         -> View complete tool reference & Claude prompts")
-    print("   mws doctor                 -> Run health checks (COM, Python, DB, Git)")
-    print("   mws run <server>           -> Launch MCP server over stdio")
-    print("   mws list                   -> List all servers and custom plugins")
+    print(" 🛠️  Quick Commands:")
+    print("   mws guide [server] [client] -> Copy-paste configs & instructions for any agent")
+    print("   mws server                 -> Run Unified Gateway MCP over stdio (ALL 220+ tools)")
+    print("   mws run <server>           -> Launch individual MCP server over stdio")
+    print("   mws config [db|ssh|tsc]    -> Interactive wizard for DBs, SSH keys, & TS projects")
+    print("   mws doctor [--fix-path]    -> Run health checks (COM, Python, DB, Git, PATH)")
+    print("   mws list                   -> Show concise server inventory")
+    print("   mws update [server|all]    -> Check & upgrade to latest PyPI version")
     print("=" * 76 + "\n")
 
 
+def print_server_list() -> None:
+    """Print a focused inventory of built-in servers and custom plugins."""
+    servers = list_available_servers()
+    print("\nMCP Server Inventory")
+    print("=" * 100)
+    print(f"{'SERVER':<16} {'STATUS':<16} {'TOOLS':<8} {'TYPE':<12} DESCRIPTION")
+    print("-" * 100)
+    for name, server in servers.items():
+        status = "Installed" if server.get("is_installed") else "Not installed"
+        tools = str(server.get("tools_count", "?"))
+        server_type = "Plugin" if not server.get("is_builtin") else "Built-in"
+        description = server.get("description", "").replace("\n", " ").strip()
+        print(f"{name:<16} {status:<16} {tools:<8} {server_type:<12} {description}")
+    print("-" * 100)
+    print(f"{len(servers)} server(s) found. Run 'mws' for the home dashboard or 'mws status' for project setup.")
+    print()
+
+
 def cmd_list(args: argparse.Namespace) -> None:
-    """List available MCP servers and installation status."""
-    print_dashboard()
+    """Show the focused server inventory."""
+    print_server_list()
 
 
-def cmd_guide(args: argparse.Namespace) -> None:
-    """Print guide and prompt recipes for a specific server or merged for all installed servers."""
-    target = (args.server or "all").lower()
+def _get_guide_func(srv_name: str):
+    """Look for guide function in server package or legacy guides module."""
+    if srv_name in ("server", "mws", "gateway"):
+        try:
+            from mcp_win_stdio.server.guide import print_server_guide
+            return print_server_guide
+        except ImportError:
+            pass
+
+    for mod_path, func_name in [
+        (f"mcp_win_stdio.{srv_name}.guide", f"print_{srv_name}_guide"),
+        (f"mcp_win_stdio.guides.{srv_name}_guide", f"print_{srv_name}_guide"),
+    ]:
+        try:
+            mod = importlib.import_module(mod_path)
+            fn = getattr(mod, func_name, None)
+            if callable(fn):
+                return fn
+        except (ImportError, ModuleNotFoundError):
+            continue
+    return None
+
+
+def print_global_guide() -> None:
+    """Print the universal multi-agent configuration guide and index."""
+    print("\n" + "=" * 80)
+    print("   📖  mws Universal MCP Guide — Multi-Agent Configuration Hub")
+    print("=" * 80)
+    print("\nmws provides 220+ tools across 10 modular servers on Windows.")
+    print("Zero-Mutation Philosophy: mws never modifies your agent's config files automatically.")
+    print("Simply copy and paste the snippet below into your AI client of choice!\n")
+
+    print("-" * 80)
+    print(" 🚀 RECOMMENDED: Unified On-Demand Gateway (Single Entry Point for ALL Tools)")
+    print("-" * 80)
+    print("Instead of configuring 9 separate servers and bloating context with 30,000+ tokens,")
+    print("the Gateway exposes lightweight meta-tools that dynamically load child servers on demand.\n")
+    print("Copy & paste under 'mcpServers' in your client configuration file:")
+    print("```json")
+    print(generate_snippet("server"))
+    print("```")
+    print("\n(Alternative using direct Python path if 'mws' is not on PATH):")
+    print("```json")
+    print(generate_snippet("server", use_python_exe=True))
+    print("```\n")
+
+    print("-" * 80)
+    print(" 📁 Supported AI Clients & Windows Configuration Paths:")
+    print("-" * 80)
+    clients = get_all_clients()
+    for idx, c in enumerate(clients, 1):
+        paths_str = ", ".join(c["paths"][:2])
+        print(f" {idx:>2}. {c['name']:<26} -> {paths_str}")
+        print(f"     Run: mws guide {c['id']}")
+
+    print("\n" + "-" * 80)
+    print(" 🛠️  Available Standalone MCP Servers:")
+    print("-" * 80)
+    servers = list_available_servers()
+    for name, srv in servers.items():
+        if name in ("server", "mws"):
+            continue
+        tools = str(srv.get("tools_count", "?"))
+        desc = srv.get("description", "")
+        if len(desc) > 55:
+            desc = desc[:52] + "..."
+        print(f"   • {name:<10} ({tools:>2} tools) : {desc}")
+
+    print("\n" + "-" * 80)
+    print(" 💡 Guide Commands:")
+    print("   mws guide <server>           -> Tool reference & config snippets for all clients")
+    print("   mws guide <client>           -> Client-specific instructions & file paths")
+    print("   mws guide <server> <client>  -> Client-tailored standalone config snippet")
+    print("   (Examples: 'mws guide tsc', 'mws guide gemini', 'mws guide tsc gemini')")
+    print("=" * 80 + "\n")
+
+
+def print_client_guide(client_data: Dict[str, Any]) -> None:
+    """Print setup instructions and Unified Gateway config for a specific client."""
+    c_name = client_data["name"]
+    c_id = client_data["id"]
+    paths = client_data.get("paths", [])
+    expanded_paths = get_actual_windows_paths(client_data)
+    instructions = client_data.get("instructions", "")
+
+    print("\n" + "=" * 80)
+    print(f"   📖  mws Guide: {c_name} Configuration")
+    print("=" * 80)
+
+    print("\n📁 Target Configuration Files on Windows:")
+    for p, ep in zip(paths, expanded_paths):
+        exists_marker = " [Found on system]" if Path(ep).exists() else ""
+        print(f"   • {p}{exists_marker}")
+        if p != ep and "%" in p:
+            print(f"     -> Actual path: {ep}")
+
+    print("\n" + "-" * 80)
+    print(" 📋 Recommended Configuration (Unified On-Demand Gateway — ALL Tools)")
+    print("-" * 80)
+    fmt = client_data.get("format", "json")
+    print(f"Copy & paste into your {fmt.upper()} configuration file:\n")
+    print(f"```{fmt}")
+    print(generate_snippet("server", c_id))
+    print("```")
+
+    if fmt == "json":
+        print("\n(Alternative using direct Python executable if 'mws' is not in PATH):")
+        print("```json")
+        print(generate_snippet("server", c_id, use_python_exe=True))
+        print("```")
+
+    print("\n" + "-" * 80)
+    print(" 📝 Setup Instructions:")
+    print("-" * 80)
+    print(instructions)
+
+    print("\n" + "-" * 80)
+    print(f" 💡 To configure a specific standalone server for {c_name}:")
+    print(f"    mws guide <server> {c_id}    (e.g. 'mws guide tsc {c_id}')")
+    print("=" * 80 + "\n")
+
+
+def print_server_client_guide(server_name: str, client_data: Dict[str, Any]) -> None:
+    """Print configuration snippet and instructions for a specific server and client."""
+    s_norm = server_name.lower().strip()
+    c_name = client_data["name"]
+    c_id = client_data["id"]
+    fmt = client_data.get("format", "json")
+    paths = client_data.get("paths", [])
+    expanded_paths = get_actual_windows_paths(client_data)
+    instructions = client_data.get("instructions", "")
+
+    print("\n" + "=" * 80)
+    print(f"   📖  mws Guide: '{s_norm}' for {c_name}")
+    print("=" * 80)
+
+    print("\n📁 Target Configuration Files on Windows:")
+    for p, ep in zip(paths, expanded_paths):
+        exists_marker = " [Found on system]" if Path(ep).exists() else ""
+        print(f"   • {p}{exists_marker}")
+        if p != ep and "%" in p:
+            print(f"     -> Actual path: {ep}")
+
+    print("\n" + "-" * 80)
+    print(f" 📋 Copy & Paste Configuration Snippet for '{s_norm}':")
+    print("-" * 80)
+    print(f"```{fmt}")
+    print(generate_snippet(s_norm, c_id))
+    print("```")
+
+    if fmt == "json":
+        print("\n(Alternative using direct Python executable):")
+        print("```json")
+        print(generate_snippet(s_norm, c_id, use_python_exe=True))
+        print("```")
+
+    if s_norm == "db":
+        print("\n🔒 Database Tip: Set DATABASE_URL in 'env', or manage credentials centrally")
+        print("   without hardcoding passwords using: mws config db")
+    elif s_norm == "ssh":
+        print("\n🔑 SSH Tip: Manage host credentials and private keys dynamically with: mws config ssh")
+
+    print("\n" + "-" * 80)
+    print(f" 📝 Setup Instructions for {c_name}:")
+    print("-" * 80)
+    print(instructions)
+    print("=" * 80 + "\n")
+
+
+def print_server_guide_universal(server_name: str) -> None:
+    """Print server specifications, universal copy-paste snippet, and tool recipes."""
+    s_norm = server_name.lower().strip()
     target_aliases = {
         "github": "git",
         "database": "db",
         "workspace-explorer": "explorer",
         "excel-db": "excel_db",
         "exceldb": "excel_db",
+        "mws": "server",
+        "gateway": "server",
     }
-    target = target_aliases.get(target, target)
+    s_norm = target_aliases.get(s_norm, s_norm)
 
-    known_servers = ["git", "db", "excel", "explorer", "word", "tsc", "ssh", "rag", "excel_db"]
+    print("\n" + "=" * 80)
+    print(f"   📖  mws Guide: '{s_norm}' Standalone MCP Server")
+    print("=" * 80)
 
-    def _get_guide_func(srv_name: str):
-        # Look for guide function in server package or legacy guides module
-        for mod_path, func_name in [
-            (f"mcp_win_stdio.{srv_name}.guide", f"print_{srv_name}_guide"),
-            (f"mcp_win_stdio.guides.{srv_name}_guide", f"print_{srv_name}_guide"),
-        ]:
-            try:
-                mod = importlib.import_module(mod_path)
-                fn = getattr(mod, func_name, None)
-                if callable(fn):
-                    return fn
-            except (ImportError, ModuleNotFoundError):
-                continue
-        return None
+    print("\n📋 Universal Copy & Paste Configuration Snippet:")
+    print("Add this under 'mcpServers' in any standard MCP client config:")
+    print("```json")
+    print(generate_snippet(s_norm))
+    print("```")
 
-    if target == "all":
-        installed_count = 0
-        uninstalled = []
-        for srv in known_servers:
-            fn = _get_guide_func(srv)
-            if fn:
-                fn()
-                installed_count += 1
-            else:
-                uninstalled.append(srv)
+    print("\n(Alternative using direct Python executable if 'mws' is not on PATH):")
+    print("```json")
+    print(generate_snippet(s_norm, use_python_exe=True))
+    print("```")
 
-        if uninstalled:
-            print("\n" + "-" * 80)
-            print("💡 Additional Uninstalled MCP Modules:")
-            for u in uninstalled:
-                print(f"   • mcp-win-stdio-{u:<8} -> Install with: mws install {u}")
-            print("-" * 80 + "\n")
-    elif target in known_servers:
-        fn = _get_guide_func(target)
-        if fn:
-            fn()
-        else:
-            print(f"\n[!] Server '{target}' (mcp-win-stdio-{target}) is not currently installed.")
-            print(f"    -> Run: mws install {target}")
-            print(f"       (or: pip install mcp-win-stdio-{target})\n")
+    if s_norm == "db":
+        print("\n🔒 Database Tip: Set DATABASE_URL in 'env', or manage credentials centrally")
+        print("   without hardcoding passwords using: mws config db")
+    elif s_norm == "ssh":
+        print("\n🔑 SSH Tip: Manage host credentials and private keys dynamically with: mws config ssh")
+
+    print("\n" + "-" * 80)
+    print(" 📁 Common Configuration File Paths on Windows:")
+    print("-" * 80)
+    for c in get_all_clients():
+        print(f"   • {c['name']:<24} : {', '.join(c['paths'][:2])}")
+
+    print(f"\n💡 For client-tailored instructions, run: mws guide {s_norm} <client>")
+    print(f"   (e.g. 'mws guide {s_norm} gemini' or 'mws guide {s_norm} cursor')")
+
+    fn = _get_guide_func(s_norm)
+    if fn:
+        print("\n" + "=" * 80)
+        print(f" 🛠️  Tools Reference, Parameter Schemas & Prompt Recipes for '{s_norm}'")
+        print("=" * 80)
+        fn()
     else:
-        print(f"Unknown server '{target}'. Known servers: {', '.join(known_servers)}.")
+        print(f"\n[!] Note: Server package 'mcp-win-stdio-{s_norm}' is not currently installed.")
+        print(f"    -> Run: mws install {s_norm}\n")
+
+
+def cmd_guide(args: argparse.Namespace) -> None:
+    """Universal guide dispatcher for AI clients, standalone servers, and multi-agent setups."""
+    arg1 = getattr(args, "target", None) or getattr(args, "server", None)
+    arg2 = getattr(args, "client", None)
+
+    if arg1:
+        arg1 = arg1.lower().strip()
+    if arg2:
+        arg2 = arg2.lower().strip()
+
+    # Case 1: Both arguments provided (e.g. 'mws guide tsc gemini' or 'mws guide gemini tsc')
+    if arg1 and arg2:
+        c1 = resolve_client(arg1)
+        c2 = resolve_client(arg2)
+        if c1 and not c2:
+            print_server_client_guide(arg2, c1)
+            return
+        elif c2:
+            print_server_client_guide(arg1, c2)
+            return
+        else:
+            print(f"[!] Unrecognized client '{arg2}'. Run 'mws guide' to list all supported AI clients.")
+            return
+
+    # Case 2: Exactly one argument provided
+    if arg1:
+        if arg1 == "all":
+            print_global_guide()
+            return
+
+        client_match = resolve_client(arg1)
+        if client_match:
+            print_client_guide(client_match)
+            return
+
+        print_server_guide_universal(arg1)
+        return
+
+    # Case 3: No arguments provided -> show universal global guide
+    print_global_guide()
 
 
 def cmd_install(args: argparse.Namespace) -> None:
@@ -222,8 +455,9 @@ def cmd_install(args: argparse.Namespace) -> None:
     selected_servers = list(BUILTIN_SERVERS.keys()) if target == "all" else [target]
 
     if target == "all":
-        print("\n==> 🚀 Installing full suite via 'pip install \"mcp-win-stdio[all]\"'...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "mcp-win-stdio[all]"])
+        ok, msg = install_pip_dependencies(["mcp-win-stdio[all]"])
+        if not ok:
+            print(f"[ERROR] {msg}")
     else:
         for srv_name in selected_servers:
             srv = get_server_info(srv_name)
@@ -231,8 +465,9 @@ def cmd_install(args: argparse.Namespace) -> None:
                 print(f"[ERROR] Unknown server: '{srv_name}'. Run 'mws list' to see available servers.")
                 continue
             pkg = srv.get("package", f"mcp-win-stdio-{srv_name}")
-            print(f"\n==> 📦 Installing '{srv['title']}' via 'pip install {pkg}'...")
-            subprocess.run([sys.executable, "-m", "pip", "install", pkg])
+            ok, msg = install_pip_dependencies([pkg])
+            if not ok:
+                print(f"[ERROR] {msg}")
 
     # Special check for git / gh system tools
     if "git" in selected_servers:
@@ -270,215 +505,37 @@ def cmd_install(args: argparse.Namespace) -> None:
     # Check and prompt to add Python Scripts directory to Windows User PATH
     check_and_prompt_path_setup()
 
-    print("\n✅ Installation complete! Run 'mws list' to verify status or 'mws setup <server>' to configure Claude.\n")
+    print("\n✅ Installation complete! Run 'mws list' to verify status or 'mws guide' to view agent setup snippets.\n")
+
+
+def cmd_retired(args: argparse.Namespace) -> None:
+    """Friendly guidance when a retired auto-configuration command is invoked."""
+    cmd_name = getattr(args, "command", "this command")
+    print("\n" + "=" * 76)
+    print(" ℹ️  Notice: mws has transitioned to a Non-Invasive Multi-Agent Architecture")
+    print("=" * 76)
+    print(f"The '{cmd_name}' command has been retired because mws no longer automatically")
+    print("modifies client configuration files. We support all major AI environments:")
+    print("  • Gemini / Antigravity IDE     • Claude Desktop & Claude Code")
+    print("  • ChatGPT Desktop              • Cursor AI")
+    print("  • Kiro IDE                     • OpenCode")
+    print("  • Codeium Windsurf             • GitHub Copilot / VS Code")
+    print("  • OpenAI Codex")
+    print("\n👉 To view copy-paste configuration snippets and exact file paths:")
+    print("   mws guide                   -> Universal multi-agent guide")
+    print("   mws guide <client>          -> Recommended Unified Gateway setup (e.g. 'mws guide gemini')")
+    print("   mws guide <server> <client> -> Standalone server snippet (e.g. 'mws guide tsc gemini')")
+    print("=" * 76 + "\n")
 
 
 def cmd_setup(args: argparse.Namespace) -> None:
-    """Setup and configure a server with transparent guidance and optional safe auto-apply."""
-    ensure_workspace_dirs()
-    servers = list_available_servers()
-
-    target = args.server
-    client = args.client.lower()
-
-    if not target:
-        if sys.stdin.isatty():
-            print("\n=== 🛠️  mcp-win-stdio Setup Wizard ===")
-            print("Select an MCP server to configure:")
-            print("  [1] excel     (44 tools: Pandas queries, RapidFuzz reconciliation, native tables, Office COM)")
-            print("  [2] word      (20 tools: Multi-unit margins, typography, authoring, template filling, COM PDF)")
-            print("  [3] explorer  (14 tools: Token-safe collapsible tree, .gitignore, regex grep, AST outline)")
-            print("  [4] tsc       (8 tools: TypeScript diagnostic watcher, 0ms cache, fix suggestions)")
-            print("  [5] db        (31 tools: Polyglot PostgreSQL & MySQL DBA manager, ERDs, diffs, locks, imports)")
-            print("  [6] git       (46 tools: Local Git branching, commits, diffs, conflicts, & GitHub PRs/issues)")
-            print("  [7] ssh       (34 tools: Multi-host pooling, SFTP, interactive PTY shells, background jobs)")
-            print(
-                "  [8] rag       (8 tools: Headless Playwright crawler, codebase indexer, hybrid BM25 + vector search)"
-            )
-            print(
-                "  [9] excel-db  (9 tools: Zero-context streaming, master dataset audit diffs, transactional migrations)"
-            )
-            print("  [10] all      (Configure all 9 servers)")
-            print("  [11] Exit")
-            choice = input("\nEnter choice (1-11) [default: 10]: ").strip() or "10"
-            mapping = {
-                "1": "excel",
-                "2": "word",
-                "3": "explorer",
-                "4": "tsc",
-                "5": "db",
-                "6": "git",
-                "7": "ssh",
-                "8": "rag",
-                "9": "excel-db",
-                "10": "all",
-            }
-            if choice not in mapping:
-                print("Setup cancelled.")
-                return
-            target = mapping[choice]
-        else:
-            target = "all"
-
-    selected_servers = list(BUILTIN_SERVERS.keys()) if target.lower() == "all" else [target.lower()]
-
-    for srv_name in selected_servers:
-        srv = get_server_info(srv_name)
-        if not srv:
-            print(f"\n[ERROR] Unknown server: '{srv_name}'. Run 'mws list' to see available servers.")
-            continue
-
-        print("\n" + "=" * 70)
-        print(f"  Configuration Setup for: {srv['title']}")
-        print("=" * 70)
-
-        # 1. Dependency check & optional installation
-        env_vars = {}
-        if not srv.get("is_installed"):
-            req_pip = srv.get("required_pip", [])
-            print(f"\n[INFO] '{srv_name}' requires the following Python packages: {', '.join(req_pip)}")
-            if sys.stdin.isatty():
-                do_install = input("Would you like to install them now via pip? [Y/n]: ").strip().lower()
-                if do_install not in ("n", "no"):
-                    ok, msg = install_pip_dependencies(req_pip)
-                    if ok:
-                        print(f"[OK] {msg}")
-                    else:
-                        print(f"[WARN] {msg}")
-            else:
-                install_pip_dependencies(req_pip)
-
-        # Special prompt for TSC watch directory
-        if srv_name == "tsc":
-            default_dir = os.getcwd()
-            if sys.stdin.isatty():
-                chosen_dir = (
-                    input(f"\nEnter TypeScript project directory to watch [default: {default_dir}]: ").strip()
-                    or default_dir
-                )
-            else:
-                chosen_dir = default_dir
-            env_vars["TSC_WATCH_DIR"] = os.path.abspath(chosen_dir)
-
-        # Special prompt for DB SERVERS env var
-        if srv_name == "db":
-            servers_env = os.environ.get("SERVERS")
-            if servers_env:
-                env_vars["SERVERS"] = servers_env
-            elif sys.stdin.isatty():
-                print("\n[Optional] Enter SERVERS JSON string (or press Enter to configure later):")
-                chosen_servers = input("SERVERS JSON: ").strip()
-                if chosen_servers:
-                    env_vars["SERVERS"] = chosen_servers
-
-        # Special guidance for Git & GitHub CLI
-        if srv_name == "git":
-            if not shutil.which("git"):
-                print("\n[MISSING] Git CLI not found on PATH.")
-                print("👉 Install Git: winget install --id Git.Git -e")
-                if sys.stdin.isatty():
-                    do_git = input("Would you like to install Git now via winget? [Y/n]: ").strip().lower()
-                    if do_git not in ("n", "no"):
-                        subprocess.run(["winget", "install", "--id", "Git.Git", "-e"])
-
-            # Check git identity
-            name_check = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True).stdout.strip()
-            email_check = subprocess.run(["git", "config", "user.email"], capture_output=True, text=True).stdout.strip()
-            if not name_check or not email_check:
-                print("\n[WARN] Git author identity is not configured.")
-                if sys.stdin.isatty():
-                    u_name = input(f"Enter Git author name [{name_check or 'Developer'}]: ").strip() or (
-                        name_check or "Developer"
-                    )
-                    u_email = input(f"Enter Git author email [{email_check or 'developer@example.com'}]: ").strip() or (
-                        email_check or "developer@example.com"
-                    )
-                    subprocess.run(["git", "config", "--global", "user.name", u_name])
-                    subprocess.run(["git", "config", "--global", "user.email", u_email])
-                    print(f"[OK] Configured Git author: {u_name} <{u_email}>")
-
-            if not shutil.which("gh"):
-                print("\n[INFO] GitHub CLI ('gh') is not installed (optional: unlocks PR, Issue, and Actions tools).")
-                print("👉 Install GitHub CLI: winget install --id GitHub.cli -e")
-                if sys.stdin.isatty():
-                    do_gh = input("Would you like to install GitHub CLI now via winget? [y/N]: ").strip().lower()
-                    if do_gh in ("y", "yes"):
-                        subprocess.run(["winget", "install", "--id", "GitHub.cli", "-e"])
-            else:
-                auth_res = subprocess.run(["gh", "auth", "status"], capture_output=True, text=True)
-                if "Logged in to" not in (auth_res.stderr or auth_res.stdout):
-                    print("\n[INFO] GitHub CLI is installed but not authenticated.")
-                    print("👉 Run 'gh auth login' in your terminal to connect your GitHub account.")
-
-        # Special setup for RAG (Playwright Chromium browser binaries)
-        if srv_name == "rag":
-            print("\nChecking Playwright Chromium browser binaries...")
-            try:
-                res = subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=False)
-                if res.returncode == 0:
-                    print("[OK] Playwright Chromium browser is installed and ready.")
-                else:
-                    print(
-                        "[WARN] Could not install Playwright Chromium automatically. Run 'playwright install chromium' manually."
-                    )
-            except Exception as e:
-                print(f"[WARN] Failed to run playwright install: {e}")
-
-        # 2. Transparent Configuration Guidance
-        snippet_dict = generate_claude_desktop_snippet(srv_name, env_vars if env_vars else None)
-        snippet_json = json.dumps({srv_name: snippet_dict}, indent=2)
-        cli_command = generate_claude_cli_command(srv_name, env_vars if env_vars else None)
-
-        print("\n" + "-" * 70)
-        print("📋 Claude Desktop Configuration:")
-        print("File: %APPDATA%\\Claude\\claude_desktop_config.json")
-        print('Add this snippet inside your "mcpServers" object:\n')
-        print(snippet_json)
-
-        print("\n" + "-" * 70)
-        print("💻 Claude Code CLI Command:")
-        print("Run this command in your terminal:\n")
-        print(f"  {cli_command}")
-        print("-" * 70)
-
-        # 3. Optional Safe Auto-Write
-        if sys.stdin.isatty():
-            auto_apply = (
-                input("\n👉 Would you like mws to safely write this configuration for you? [y/N]: ").strip().lower()
-            )
-            if auto_apply in ("y", "yes"):
-                if client in ("all", "desktop"):
-                    ok, msg = safe_apply_to_desktop(srv_name, env_vars if env_vars else None)
-                    symbol = "OK" if ok else "ERROR"
-                    print(f"  [{symbol}] Claude Desktop: {msg}")
-                if client in ("all", "cli"):
-                    ok, msg = safe_apply_to_cli(srv_name, env_vars if env_vars else None)
-                    symbol = "OK" if ok else "ERROR"
-                    print(f"  [{symbol}] Claude Code CLI: {msg}")
-                print("\n[NOTE] Please restart Claude Desktop if it is currently running.")
-        else:
-            print("\nTo auto-apply via script, pass interactive input or use the JSON snippet above.")
-
-    print("\n" + "=" * 70)
-    print("Setup guide complete!")
-    print("=" * 70 + "\n")
+    """Retired auto-setup command."""
+    cmd_retired(args)
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
-    """Remove server(s) from Claude Desktop and CLI."""
-    target = args.server.lower()
-    client = args.client.lower()
-
-    servers_to_remove = list(BUILTIN_SERVERS.keys()) if target == "all" else [target]
-
-    for srv_name in servers_to_remove:
-        print(f"\nRemoving '{srv_name}'...")
-        if client in ("all", "desktop"):
-            ok, msg = remove_server_from_desktop(srv_name)
-            print(f"  Claude Desktop: {msg}")
-        if client in ("all", "cli"):
-            ok, msg = remove_server_from_cli(srv_name)
-            print(f"  Claude CLI:     {msg}")
+    """Retired auto-remove command."""
+    cmd_retired(args)
 
 
 def cmd_update(args: argparse.Namespace) -> None:
@@ -496,41 +553,38 @@ def cmd_update(args: argparse.Namespace) -> None:
         print(f"✅ Core CLI is on the latest version: v{__version__} (PyPI: v{latest or __version__})")
 
     if target == "all":
-        print("\n==> 🚀 Updating full suite via 'pip install --upgrade \"mcp-win-stdio[all]\"'...")
-        res = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "mcp-win-stdio[all]"])
+        ok, msg = install_pip_dependencies(["mcp-win-stdio[all]"], upgrade=True)
     elif target in ("core", "mws", "mcp-win-stdio"):
-        print("\n==> 🚀 Updating core CLI via 'pip install --upgrade mcp-win-stdio'...")
-        res = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "mcp-win-stdio"])
+        ok, msg = install_pip_dependencies(["mcp-win-stdio"], upgrade=True)
     else:
         srv = get_server_info(target)
         pkg = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
-        print(f"\n==> 🚀 Updating '{target}' via 'pip install --upgrade {pkg}'...")
-        res = subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", pkg])
+        ok, msg = install_pip_dependencies([pkg], upgrade=True)
 
-    if res.returncode == 0:
+    if ok:
         print("\n✅ Update completed successfully!\n")
     else:
-        print(f"\n[WARN] Update process completed with return code: {res.returncode}\n")
+        print(f"\n[WARN] Update process warning:\n{msg}\n")
 
 
 def cmd_uninstall(args: argparse.Namespace) -> None:
-    """Cleanly uninstall MCP server package(s) and Claude configs while preserving ~/.mcp-win-stdio and mws CLI."""
+    """Cleanly uninstall MCP server package(s) while preserving ~/.mcp-win-stdio user configurations."""
     target = (args.server or "").lower()
 
     if not target:
         if sys.stdin.isatty():
             print("\n=== 🗑️  mcp-win-stdio Uninstaller ===")
-            print("  [1] excel     -> Uninstall mcp-win-stdio-excel & remove from Claude")
-            print("  [2] word      -> Uninstall mcp-win-stdio-word & remove from Claude")
-            print("  [3] explorer  -> Uninstall mcp-win-stdio-explorer & remove from Claude")
-            print("  [4] tsc       -> Uninstall mcp-win-stdio-tsc & remove from Claude")
-            print("  [5] db        -> Uninstall mcp-win-stdio-db & remove from Claude")
-            print("  [6] git       -> Uninstall mcp-win-stdio-git & remove from Claude")
-            print("  [7] ssh       -> Uninstall mcp-win-stdio-ssh & remove from Claude")
-            print("  [8] rag       -> Uninstall mcp-win-stdio-rag & remove from Claude")
-            print("  [9] excel-db  -> Uninstall mcp-win-stdio-excel-db & remove from Claude")
-            print("  [10] all      -> Uninstall all 9 MCP servers & remove from Claude (keeps mws CLI)")
-            print("  [11] self     -> Uninstall mws CLI itself (mcp-win-stdio)")
+            print("  [1] excel     -> Uninstall mcp-win-stdio-excel")
+            print("  [2] word      -> Uninstall mcp-win-stdio-word")
+            print("  [3] explorer  -> Uninstall mcp-win-stdio-explorer")
+            print("  [4] tsc       -> Uninstall mcp-win-stdio-tsc")
+            print("  [5] db        -> Uninstall mcp-win-stdio-db")
+            print("  [6] git       -> Uninstall mcp-win-stdio-git")
+            print("  [7] ssh       -> Uninstall mcp-win-stdio-ssh")
+            print("  [8] rag       -> Uninstall mcp-win-stdio-rag")
+            print("  [9] excel-db  -> Uninstall mcp-win-stdio-excel-db")
+            print("  [10] all      -> Uninstall all 9 standalone MCP servers (keeps mws CLI)")
+            print("  [11] self     -> Completely uninstall mws CLI & all mcp-win-stdio-* packages")
             print("  [12] Exit")
             choice = input("\nEnter choice (1-12) [default: 10]: ").strip() or "10"
             mapping = {
@@ -553,49 +607,76 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         else:
             target = "all"
 
-    known_servers = list(BUILTIN_SERVERS.keys())
+    # CASE 1: Completely uninstall mws CLI and ALL installed mcp-win-stdio-* subpackages
+    if target in ("self", "purge"):
+        all_installed = get_installed_mws_packages()
+        if not all_installed:
+            all_installed = ["mcp-win-stdio"]
+        if "mcp-win-stdio" not in all_installed:
+            all_installed.insert(0, "mcp-win-stdio")
 
-    if target == "self":
-        print("\n==> 🧹 Uninstalling mws CLI core package (mcp-win-stdio)...")
-        ok_pip, msg_pip = uninstall_pip_packages(["mcp-win-stdio"])
+        print(f"\n==> 🧹 Completely uninstalling mws suite ({len(all_installed)} packages found):")
+        for p in all_installed:
+            print(f"   • {p}")
+
+        ok_pip, msg_pip = uninstall_pip_packages(all_installed)
         if ok_pip:
-            print("[OK] mcp-win-stdio core CLI uninstalled successfully.")
+            print("\n[OK] All mcp-win-stdio packages uninstalled successfully.")
         else:
-            print(f"[WARN] {msg_pip}")
-        print(f"🔒 Single-source hub directory PRESERVED: {INDALA_DIR}")
+            print(f"\n[WARN] {msg_pip}")
+
+        print("\n" + "=" * 76)
+        print(f"🔒 Single-source hub directory PRESERVED: {USER_DIR}")
+        print("   (Your custom plugins, logs, and configs in ~/.mcp-win-stdio remain safe.)")
+        print("ℹ️  Zero-Mutation Policy: Client config files were untouched.")
+        print("=" * 76)
+        print("✅ Uninstallation complete!\n")
         return
 
-    selected_servers = known_servers if target == "all" else [target]
+    # CASE 2: Uninstall all standalone servers but KEEP mws CLI core
+    if target == "all":
+        installed_subpkgs = [p for p in get_installed_mws_packages() if p != "mcp-win-stdio"]
+        if not installed_subpkgs:
+            # Fallback to list of known server packages
+            installed_subpkgs = [
+                srv.get("package", f"mcp-win-stdio-{s}")
+                for s, srv in BUILTIN_SERVERS.items()
+                if s not in ("server", "mws")
+            ]
 
-    print(f"\n==> 🧹 Starting clean uninstallation for: {target}...")
+        print(f"\n==> 🧹 Uninstalling all standalone MCP server packages ({len(installed_subpkgs)} targets)...")
+        for p in installed_subpkgs:
+            print(f"   • {p}")
 
-    # 1. Remove from Claude Desktop and Claude Code CLI
-    print("\n--- 1. Cleaning Claude Registrations ---")
-    for srv_name in selected_servers:
-        ok_d, msg_d = remove_server_from_desktop(srv_name)
-        ok_c, msg_c = remove_server_from_cli(srv_name)
-        print(f"  • {srv_name:<10} Desktop: {msg_d} | CLI: {msg_c}")
+        ok_pip, msg_pip = uninstall_pip_packages(installed_subpkgs)
+        if ok_pip:
+            print("[OK] Standalone server packages uninstalled successfully.")
+        else:
+            print(f"[WARN] {msg_pip}")
 
-    # 2. Pip Uninstall packages (only server packages, mws CLI is preserved)
-    print("\n--- 2. Removing Python Packages via pip ---")
-    packages_to_remove = []
-    for srv_name in selected_servers:
-        srv = get_server_info(srv_name)
-        pkg = srv.get("package", f"mcp-win-stdio-{srv_name}") if srv else f"mcp-win-stdio-{srv_name}"
-        packages_to_remove.append(pkg)
+        print("\n" + "=" * 76)
+        print(f"🔒 Single-source hub directory PRESERVED: {USER_DIR}")
+        print("⚙️  mws CLI PRESERVED (You can continue using 'mws' or reinstall anytime).")
+        print("ℹ️  Zero-Mutation Policy: Client config files were untouched.")
+        print("=" * 76)
+        print("✅ Uninstallation complete!\n")
+        return
 
-    print(f"Packages to uninstall: {', '.join(packages_to_remove)}")
-    ok_pip, msg_pip = uninstall_pip_packages(packages_to_remove)
+    # CASE 3: Uninstall a single specific server package
+    srv = get_server_info(target)
+    pkg = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
+
+    print(f"\n==> 🧹 Uninstalling server package '{target}' ({pkg})...")
+    ok_pip, msg_pip = uninstall_pip_packages([pkg])
     if ok_pip:
-        print("[OK] Server packages uninstalled successfully.")
+        print(f"[OK] Package '{pkg}' uninstalled successfully.")
     else:
         print(f"[WARN] {msg_pip}")
 
-    # 3. Explicitly preserve Single-Source Hub ~/.mcp-win-stdio and mws CLI
-    print("\n--- 3. Single-Source Hub & CLI Status ---")
-    print(f"🔒 Single-source hub directory PRESERVED: {INDALA_DIR}")
-    print("   (Your custom plugins, logs, and configs in ~/.mcp-win-stdio are kept safe.)")
-    print("⚙️  mws CLI PRESERVED (You can continue to use 'mws' to install servers or manage plugins.)")
+    print("\n" + "=" * 76)
+    print(f"🔒 Single-source hub directory PRESERVED: {USER_DIR}")
+    print("⚙️  mws CLI PRESERVED")
+    print("ℹ️  Zero-Mutation Policy: Client config files were untouched.")
     print("=" * 76)
     print("✅ Uninstallation complete!\n")
 
@@ -623,7 +704,37 @@ def cmd_fix_path(args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     """Run an MCP server over stdio."""
+    env_file = Path(getattr(args, "env_file", ".env"))
+    if not env_file.is_absolute():
+        env_file = Path.cwd() / env_file
+    if env_file.exists():
+        try:
+            for line_number, raw_line in enumerate(env_file.read_text(encoding="utf-8-sig").splitlines(), start=1):
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                key, separator, value = line.partition("=")
+                key = key.strip()
+                if not separator or not key or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    print(f"Error: Invalid environment entry in {env_file} at line {line_number}.", file=sys.stderr)
+                    sys.exit(1)
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                os.environ.setdefault(key, value)
+        except OSError as exc:
+            print(f"Error: Could not read environment file '{env_file}': {exc}", file=sys.stderr)
+            sys.exit(1)
+
     server_name = args.server.lower()
+    if server_name in ("self", "mws", "server"):
+        from mcp_win_stdio.server.server import mcp
+
+        mcp.run()
+        return
+
     srv = get_server_info(server_name)
 
     if not srv:
@@ -639,6 +750,11 @@ def cmd_run(args: argparse.Namespace) -> None:
             else:
                 print(f"Error: Module '{module_name}' does not expose 'mcp'.", file=sys.stderr)
                 sys.exit(1)
+        except ModuleNotFoundError as e:
+            pkg = srv.get("package", f"mcp-win-stdio-{server_name}")
+            print(f"Error: Server package '{pkg}' is not installed in the current environment.", file=sys.stderr)
+            print(f"👉 To install: mws install {server_name}  (or: uv pip install {pkg} / pip install {pkg})", file=sys.stderr)
+            sys.exit(1)
         except Exception as e:
             print(f"Error launching server '{server_name}': {str(e)}", file=sys.stderr)
             sys.exit(1)
@@ -652,8 +768,48 @@ def cmd_run(args: argparse.Namespace) -> None:
             sys.exit(1)
 
 
+def cmd_server(args: argparse.Namespace) -> None:
+    """Run mws as the unified on-demand MCP server or run server subcommands."""
+    action = getattr(args, "server_action", "run")
+    target = getattr(args, "target_server", None)
+    if target and not getattr(args, "server", None):
+        args.server = target
+
+    if action == "list":
+        from mcp_win_stdio.server.cli import cmd_list
+
+        cmd_list(args)
+    elif action == "doctor":
+        from mcp_win_stdio.server.cli import cmd_doctor
+
+        cmd_doctor(args)
+    elif action == "guide":
+        from mcp_win_stdio.server.guide import print_server_guide
+
+        print_server_guide()
+    elif action == "stop":
+        from mcp_win_stdio.server.cli import cmd_stop
+
+        cmd_stop(args)
+    else:
+        from mcp_win_stdio.server.server import mcp
+
+        mcp.run()
+
+
+def cmd_config(args: argparse.Namespace) -> None:
+    """Launch interactive configuration hub for DB, SSH, TSC, and Gateway."""
+    from mcp_win_stdio.core.wizard import main_config_interactive
+
+    main_config_interactive(getattr(args, "domain", None))
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Run diagnostic health checks on Windows environment, COM automation, and dependencies."""
+    if getattr(args, "fix_path", False):
+        cmd_fix_path(args)
+        return
+
     print(f"\n=== mcp-win-stdio Doctor Diagnostic (v{__version__}) ===\n")
 
     # 1. Python Check
@@ -670,7 +826,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         print(f"[OK] Scripts Directory: {d} (in PATH)")
     for d in missing_dirs:
         print(f"[WARN] Scripts Directory: {d} (NOT in PATH)")
-        print("       👉 Run 'mws fix-path' to add it to your Windows User PATH automatically.")
+        print("       👉 Run 'mws doctor --fix-path' to add it to your Windows User PATH automatically.")
 
     if not candidate_dirs:
         print("[INFO] Scripts Directory: No standard scripts directory detected.")
@@ -861,7 +1017,7 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     print("\nDiagnostic complete.\n")
 
 
-ALL_BUILTIN_SERVERS = ["rag", "excel-db", "excel", "db", "explorer", "git", "ssh", "tsc", "word"]
+ALL_BUILTIN_SERVERS = ["server", "rag", "excel-db", "excel", "db", "explorer", "git", "ssh", "tsc", "word"]
 
 
 def get_server_agents_guide(servers: List[str]) -> str:
@@ -871,10 +1027,13 @@ def get_server_agents_guide(servers: List[str]) -> str:
         "",
         "This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite.",
         "",
+        "Project MCP commands use the active Python runtime and load an optional root `.env` file. Keep secrets in `.env`, never in committed MCP configuration.",
+        "",
         "## 🛠️ Active Tools & Recommended Selection",
         "",
     ]
     guide_map = {
+        "server": "* **Unified On-Demand Gateway:** Use `mws` MCP (`list_servers`, `search_tools`, `call_tool`) to route and execute tools on demand with zero context bloat.",
         "db": "* **Database Operations:** Use `db` MCP (`read_query`, `execute_query`, `describe_table`).",
         "excel": "* **Spreadsheets & Excel:** Use `excel` MCP (`preview_sheet`, `update_cells`, `profile_sheet`).",
         "excel-db": "* **High-Speed Pipelines & Streaming:** Use `excel-db` MCP (`db_to_excel_stream`, `excel_to_db_upsert`, `query_unified_sources`, `reconcile_db_vs_excel`).",
@@ -895,34 +1054,350 @@ def get_server_agents_guide(servers: List[str]) -> str:
 
 def _build_server_entry(s_name: str, is_vscode: bool, cwd: Path) -> Dict[str, Any]:
     """Build smart MCP server config entry with appropriate environment variables for the target client."""
-    entry: Dict[str, Any] = {"command": "mws", "args": ["run", s_name]}
+    if s_name in ("server", "mws"):
+        return {
+            "command": sys.executable.replace("\\", "/"),
+            "args": [
+                "-m",
+                "mcp_win_stdio.server",
+            ],
+        }
+
+    entry: Dict[str, Any] = {
+        "command": sys.executable.replace("\\", "/"),
+        "args": [
+            "-m",
+            "mcp_win_stdio",
+            "run",
+            s_name,
+            "--env-file",
+            "${workspaceFolder}/.env" if is_vscode else str(cwd / ".env"),
+        ],
+    }
     env: Dict[str, str] = {}
 
-    # 1. TypeScript Compiler Watch Directory
-    if s_name == "tsc":
-        env["TSC_WATCH_DIR"] = "${workspaceFolder}" if is_vscode else str(cwd)
-
-    # 2. Explorer Workspace Root
-    elif s_name == "explorer":
+    # 1. Explorer Workspace Root
+    if s_name == "explorer":
         env["EXPLORER_ROOT"] = "${workspaceFolder}" if is_vscode else str(cwd)
 
-    # 3. Local SQLite database auto-detection
-    elif s_name in ("db", "excel-db"):
-        try:
-            sqlite_candidates = [f for f in cwd.glob("*.db") if f.is_file()] + [
-                f for f in cwd.glob("*.sqlite*") if f.is_file()
-            ]
-            if sqlite_candidates:
-                first_db = sqlite_candidates[0]
-                rel_sql = str(first_db.relative_to(cwd)).replace("\\", "/")
-                env["SQLITE_DATABASE"] = f"${{workspaceFolder}}/{rel_sql}" if is_vscode else str(first_db)
-        except Exception:
-            pass
+    elif s_name == "git":
+        env["GIT_REPO_DIR"] = "${workspaceFolder}" if is_vscode else str(cwd)
 
     if env:
         entry["env"] = env
 
     return entry
+
+
+def _upsert_managed_section(path: Path, section: str, content: str) -> None:
+    """Update only mws-owned content while preserving user-authored file contents."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if section == "environment":
+        begin = f"# mws:{section}:begin"
+        end = f"# mws:{section}:end"
+    else:
+        begin = f"<!-- mws:{section}:begin -->"
+        end = f"<!-- mws:{section}:end -->"
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    start_index = existing.find(begin)
+    end_index = existing.find(end, start_index + len(begin)) if start_index >= 0 else -1
+    block = f"{begin}\n{content.rstrip()}\n{end}"
+
+    if start_index >= 0 and end_index >= 0:
+        end_index += len(end)
+        updated = f"{existing[:start_index]}{block}{existing[end_index:]}"
+    else:
+        separator = "\n\n" if existing and not existing.endswith("\n\n") else ""
+        updated = f"{existing}{separator}{block}\n"
+    path.write_text(updated, encoding="utf-8")
+
+
+def _project_env_template(servers: List[str]) -> str:
+    """Return secret-free examples for environment variables read by selected servers."""
+    lines = [
+        "# Copy this file to .env and fill in only the values you need.",
+        "# Never commit .env or put credentials in .mcp.json.",
+    ]
+    env_by_server = {
+        "db": [
+            ("DATABASE_URL", "# Optional single database URL; prefer a local connections file for multiple databases."),
+            ("SERVERS", "# Optional JSON object mapping database aliases to connection URLs."),
+        ],
+        "excel-db": [("SERVERS", "# Optional JSON object mapping database aliases to connection URLs.")],
+        "ssh": [("SSH_SERVERS", "# Optional JSON object mapping SSH aliases to host configuration.")],
+        "git": [("GIT_REPO_DIR", "# Optional default repository path.")],
+        "rag": [("MCP_RAG_DATA_DIR", "# Optional directory for the local RAG index.")],
+    }
+    seen = set()
+    for server in servers:
+        for key, description in env_by_server.get(server, []):
+            if key in seen:
+                continue
+            seen.add(key)
+            lines.extend(["", f"# {server}: {description}", f"{key}="])
+    return "\n".join(lines)
+
+
+def _confirm_project_setup(servers: List[str], cwd: Path, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    print(f"\nProject setup in: {cwd}")
+    print(f"Servers to configure: {', '.join(servers)}")
+    print("This updates project MCP configs and mws-managed agent guidance; existing entries are preserved.")
+    if not sys.stdin.isatty():
+        print("Setup not confirmed in a non-interactive terminal. Re-run with --yes to proceed.", file=sys.stderr)
+        return False
+    return input("Continue? [y/N]: ").strip().lower() in ("y", "yes")
+
+
+def _write_env_values(env_file: Path, values: Dict[str, str]) -> None:
+    existing = env_file.read_text(encoding="utf-8") if env_file.exists() else ""
+    lines = existing.splitlines()
+    remaining = dict(values)
+    updated = []
+    for line in lines:
+        match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        key = match.group(1) if match else None
+        if key in remaining:
+            updated.append(f"{key}={remaining.pop(key)}")
+        else:
+            updated.append(line)
+    for key, value in remaining.items():
+        if updated and updated[-1]:
+            updated.append("")
+        updated.append(f"{key}={value}")
+    env_file.write_text("\n".join(updated) + ("\n" if updated else ""), encoding="utf-8")
+
+
+def _configure_project_environment(servers: List[str], cwd: Path, interactive: bool) -> List[str]:
+    """Ask for optional server credentials and persist them only in the ignored project .env."""
+    db_url_key = "DATABASE_URL" if "db" in servers else None
+    excel_db_key = "SERVERS" if "excel-db" in servers else None
+    requested_keys = [key for key in (db_url_key, excel_db_key) if key]
+    if not requested_keys:
+        return []
+
+    env_file = cwd / ".env"
+    existing_values = {}
+    if env_file.exists():
+        for raw_line in env_file.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            key, separator, value = line.partition("=")
+            if separator:
+                existing_values[key.strip()] = value.strip().strip("'\"")
+
+    updates: Dict[str, str] = {}
+    if interactive and sys.stdin.isatty():
+        if db_url_key:
+            sqlite_candidates = sorted(
+                [*cwd.glob("*.db"), *cwd.glob("*.sqlite"), *cwd.glob("*.sqlite3")],
+                key=lambda path: path.name.lower(),
+            )
+            default_url = f"sqlite:///{sqlite_candidates[0].resolve().as_posix()}" if sqlite_candidates else ""
+            if default_url:
+                print(f"Detected local SQLite database: {sqlite_candidates[0].name}")
+            prompt = (
+                "DATABASE_URL [Enter uses detected SQLite; '-' skips]: "
+                if default_url and "DATABASE_URL" not in existing_values
+                else "DATABASE_URL (optional; Enter keeps current value or skips): "
+            )
+            value = getpass.getpass(prompt)
+            if value == "-":
+                pass
+            elif value:
+                updates["DATABASE_URL"] = value
+            elif "DATABASE_URL" not in existing_values and default_url:
+                updates["DATABASE_URL"] = default_url
+
+        if excel_db_key:
+            value = getpass.getpass("SERVERS JSON for excel-db (Enter keeps current value; '-' skips): ")
+            if value == "-":
+                pass
+            elif value:
+                try:
+                    parsed = json.loads(value)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"Invalid SERVERS JSON: {exc}") from exc
+                if not isinstance(parsed, dict) or not all(isinstance(item, str) for item in parsed.values()):
+                    raise ValueError("SERVERS must be a JSON object mapping aliases to connection URL strings.")
+                updates["SERVERS"] = json.dumps(parsed)
+
+    if updates:
+        _ensure_env_gitignored(cwd)
+        _write_env_values(env_file, updates)
+    return requested_keys
+
+
+def _project_change_preview(servers: List[str], cwd: Path, clients: List[str]) -> List[str]:
+    files = [
+        ".mcp.json",
+        ".agents/mcp_config.json",
+        ".codex/config.toml",
+        "AGENTS.md",
+        "GEMINI.md",
+        "CLAUDE.md",
+        ".github/copilot-instructions.md",
+        ".env.example",
+    ]
+    if any(server in ("db", "excel-db", "ssh", "git", "rag") for server in servers):
+        files.append(".gitignore (ensure .env is ignored)")
+    if any(server in ("db", "excel-db") for server in servers):
+        files.append(".env (only if environment values are entered)")
+    if (cwd / ".vscode" / "mcp.json").exists():
+        files.append(".vscode/mcp.json (legacy config may be migrated and removed)")
+
+    print("\nDry run: no files will be changed.")
+    print(f"Workspace: {cwd}")
+    print(f"Servers: {', '.join(servers)}")
+    if clients:
+        print(f"Agent targets: {', '.join(clients)}")
+    print("Planned project files:")
+    for path in files:
+        print(f"  - {path}")
+    environment_keys = []
+    if "db" in servers:
+        environment_keys.append("DATABASE_URL")
+    if "excel-db" in servers:
+        environment_keys.append("SERVERS")
+    if environment_keys:
+        print(f"Environment values to review (not shown or written in dry-run): {', '.join(environment_keys)}")
+    machine_configs = {
+        "antigravity": str(Path.home() / ".gemini" / "config" / "mcp_config.json"),
+        "claude": f"{os.environ.get('APPDATA', '')}\\Claude\\claude_desktop_config.json and {Path.home() / '.claude.json'}",
+        "copilot": f"{Path.home() / '.copilot' / 'mcp-config.json'} and {os.environ.get('APPDATA', '')}\\Code\\User\\mcp.json",
+        "cursor": f"{os.environ.get('APPDATA', '')}\\Cursor\\User\\mcp.json or {Path.home() / '.cursor' / 'mcp.json'}",
+        "windsurf": str(Path.home() / ".codeium" / "windsurf" / "mcp_config.json"),
+    }
+    if clients:
+        print("Potential machine-level client config targets:")
+        selected_clients = list(machine_configs) if "all" in clients else clients
+        for client in selected_clients:
+            if client in machine_configs:
+                print(f"  - {client}: {machine_configs[client]}")
+    print("Existing unrelated MCP entries and text outside mws-managed guidance blocks will be preserved.")
+    return files
+
+
+def _detected_project_clients() -> Dict[str, bool]:
+    appdata = Path(os.environ.get("APPDATA", ""))
+    local_appdata = Path(os.environ.get("LOCALAPPDATA", ""))
+    return {
+        "antigravity": (Path.home() / ".gemini").exists()
+        or (local_appdata / "Programs" / "Antigravity IDE").exists(),
+        "codex": bool(shutil.which("codex")) or (Path.home() / ".codex").exists(),
+        "claude": (appdata / "Claude").exists()
+        or (Path.home() / ".claude.json").exists()
+        or (Path.home() / ".claude").exists()
+        or bool(shutil.which("claude")),
+        "copilot": (appdata / "Code").exists()
+        or (Path.home() / ".copilot").exists()
+        or bool(shutil.which("code"))
+        or bool(shutil.which("code.cmd"))
+        or bool(shutil.which("gh")),
+        "cursor": (appdata / "Cursor").exists()
+        or (Path.home() / ".cursor").exists()
+        or bool(shutil.which("cursor")),
+        "windsurf": (Path.home() / ".codeium" / "windsurf").exists()
+        or (appdata / "Windsurf").exists()
+        or bool(shutil.which("windsurf")),
+    }
+
+
+def _read_project_env_keys(env_file: Path) -> set[str]:
+    if not env_file.exists():
+        return set()
+    keys = set()
+    for raw_line in env_file.read_text(encoding="utf-8-sig").splitlines():
+        line = raw_line.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, _ = line.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
+            keys.add(key.strip())
+    return keys
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    """Show project MCP setup state without modifying files."""
+    cwd = Path.cwd()
+    available = list_available_servers()
+    mcp_file = cwd / ".mcp.json"
+    config = _read_json_object(mcp_file) if mcp_file.exists() else {}
+    configured = config.get("mcpServers", {})
+    if not isinstance(configured, dict):
+        raise ValueError(f"Expected 'mcpServers' to be an object in '{mcp_file}'.")
+    env_keys = _read_project_env_keys(cwd / ".env")
+
+    print(f"Workspace: {cwd}")
+    print(f"MCP config: {'present' if mcp_file.exists() else 'not initialized'}")
+    print("Detected agent clients:")
+    for client, detected in _detected_project_clients().items():
+        print(f"  {client}: {'detected' if detected else 'not detected'}")
+    print("Servers:")
+    server_names = sorted(set(available) | set(configured))
+    if not server_names:
+        print("  (no known servers)")
+    for server in server_names:
+        installed = bool(available.get(server, {}).get("is_installed"))
+        configured_state = "configured" if server in configured else "not configured"
+        installed_state = "installed" if installed else "not installed"
+        print(f"  {server}: {installed_state}; {configured_state}")
+
+    required_environment = {}
+    if "db" in configured:
+        required_environment["DATABASE_URL"] = "optional DB connection"
+    if "excel-db" in configured:
+        required_environment["SERVERS"] = "optional Excel-DB connections"
+    print("Environment:")
+    if not required_environment:
+        print(f"  .env: {'present' if (cwd / '.env').exists() else 'not present'}")
+    for key, label in required_environment.items():
+        print(f"  {key}: {'set' if key in env_keys else 'not set'} ({label})")
+
+    issues = []
+    if mcp_file.exists() and not configured:
+        issues.append(".mcp.json has no MCP server entries")
+    for server, entry in configured.items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("command"), str):
+            issues.append(f"{server}: missing or invalid command")
+        elif not isinstance(entry.get("args", []), list):
+            issues.append(f"{server}: args must be a list")
+    print("Configuration:")
+    if issues:
+        for issue in issues:
+            print(f"  WARNING: {issue}")
+    else:
+        print("  No basic MCP config problems found.")
+
+
+def _update_project_agent_guides(cwd: Path, servers: List[str]) -> None:
+    content = get_server_agents_guide(servers)
+    _upsert_managed_section(cwd / "AGENTS.md", "agent-guidance", content)
+    _upsert_managed_section(cwd / "GEMINI.md", "agent-guidance", content)
+    _upsert_managed_section(cwd / "CLAUDE.md", "agent-guidance", content)
+    _upsert_managed_section(cwd / ".github" / "copilot-instructions.md", "agent-guidance", content)
+
+
+def _ensure_env_gitignored(target_dir: Path) -> None:
+    gitignore = target_dir / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if ".env" in {line.strip() for line in existing.splitlines()} or "*.env" in existing.splitlines():
+        return
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    gitignore.write_text(f"{existing}{separator}\n# Local mws environment secrets\n.env\n", encoding="utf-8")
+
+
+def _read_json_object(path: Path) -> Dict[str, Any]:
+    """Read a JSON object without treating invalid user configuration as empty."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read valid JSON from '{path}': {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in '{path}'.")
+    return data
 
 
 def setup_project_mcp(
@@ -935,38 +1410,31 @@ def setup_project_mcp(
     cwd = target_dir or Path.cwd()
     root_file = cwd / ".mcp.json"
     vscode_file = cwd / ".vscode" / "mcp.json"
+    config_data = _read_json_object(root_file) if root_file.exists() else {}
 
-    # Read existing configurations if updating
-    existing_servers: Dict[str, Any] = {}
-    if not overwrite and root_file.exists():
-        try:
-            with open(root_file, "r", encoding="utf-8") as f:
-                existing_servers = json.load(f).get("mcpServers", {})
-        except Exception:
-            pass
+    # Preserve existing user and agent configurations; only update requested server entries.
+    existing_servers = config_data.get("mcpServers", {})
+    if not isinstance(existing_servers, dict):
+        raise ValueError(f"Expected 'mcpServers' to be an object in '{root_file}'.")
 
     # Check for legacy .vscode/mcp.json to migrate servers
     migrated_from_legacy = False
     if vscode_file.exists():
-        try:
-            with open(vscode_file, "r", encoding="utf-8") as f:
-                legacy_servers = json.load(f).get("mcpServers", {})
-                for k, v in legacy_servers.items():
-                    if k not in existing_servers or overwrite:
-                        existing_servers[k] = v
-                        migrated_from_legacy = True
-        except Exception:
-            pass
+        legacy_config = _read_json_object(vscode_file)
+        legacy_servers = legacy_config.get("mcpServers", {})
+        if not isinstance(legacy_servers, dict):
+            raise ValueError(f"Expected 'mcpServers' to be an object in '{vscode_file}'.")
+        for k, v in legacy_servers.items():
+            if k not in existing_servers:
+                existing_servers[k] = v
+                migrated_from_legacy = True
 
         # Clean up deprecated .vscode/mcp.json if requested to avoid VS Code 1.106+ warnings
         if clean_deprecated_vscode:
-            try:
-                vscode_file.unlink()
-                vscode_dir = vscode_file.parent
-                if vscode_dir.exists() and not any(vscode_dir.iterdir()):
-                    vscode_dir.rmdir()
-            except Exception:
-                pass
+            vscode_file.unlink()
+            vscode_dir = vscode_file.parent
+            if vscode_dir.exists() and not any(vscode_dir.iterdir()):
+                vscode_dir.rmdir()
 
     for s in servers:
         s_norm = s.lower().strip()
@@ -974,31 +1442,31 @@ def setup_project_mcp(
             existing_servers[s_norm] = _build_server_entry(s_norm, is_vscode=True, cwd=cwd)
 
     # 1. Root .mcp.json
+    config_data["mcpServers"] = existing_servers
     with open(root_file, "w", encoding="utf-8") as f:
-        json.dump({"mcpServers": existing_servers}, f, indent=2)
+        json.dump(config_data, f, indent=2)
 
     # 2. Antigravity workspace agent (.agents/mcp_config.json)
-    try:
-        agents_dir = cwd / ".agents"
-        agents_dir.mkdir(parents=True, exist_ok=True)
-        agents_mcp_file = agents_dir / "mcp_config.json"
-        with open(agents_mcp_file, "w", encoding="utf-8") as f:
-            json.dump({"mcpServers": existing_servers}, f, indent=2)
-    except Exception:
-        pass
+    agents_dir = cwd / ".agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    agents_mcp_file = agents_dir / "mcp_config.json"
+    agents_config = _read_json_object(agents_mcp_file) if agents_mcp_file.exists() else {}
+    agents_servers = agents_config.get("mcpServers", {})
+    if not isinstance(agents_servers, dict):
+        raise ValueError(f"Expected 'mcpServers' to be an object in '{agents_mcp_file}'.")
+    agents_servers.update(existing_servers)
+    with open(agents_mcp_file, "w", encoding="utf-8") as f:
+        agents_config["mcpServers"] = agents_servers
+        json.dump(agents_config, f, indent=2)
 
-    # 3. Agent guidelines (AGENTS.md and GEMINI.md)
-    content = get_server_agents_guide(list(existing_servers.keys()))
-    agents_md = cwd / "AGENTS.md"
-    with open(agents_md, "w", encoding="utf-8") as f:
-        f.write(content)
+    # 3. Agent guidelines and safe local environment scaffold.
+    _update_project_agent_guides(cwd, list(existing_servers.keys()))
 
-    gemini_md = cwd / "GEMINI.md"
-    try:
-        with open(gemini_md, "w", encoding="utf-8") as f:
-            f.write(content)
-    except Exception:
-        pass
+    env_template = _project_env_template(list(existing_servers.keys()))
+    _upsert_managed_section(cwd / ".env.example", "environment", env_template)
+    if any(server in ("db", "excel-db", "ssh", "git", "rag") for server in existing_servers):
+        _ensure_env_gitignored(cwd)
+    _update_codex_project_config(servers, cwd)
 
     return {
         "cwd": cwd,
@@ -1008,37 +1476,107 @@ def setup_project_mcp(
     }
 
 
+def _update_codex_project_config(servers: List[str], cwd: Path) -> Path:
+    """Merge selected MCP server tables into Codex's trusted project config."""
+    config_dir = cwd / ".codex"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.toml"
+    existing = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    lines = existing.splitlines()
+    output = []
+    index = 0
+    selected = {server.lower().strip() for server in servers if server.strip()}
+    while index < len(lines):
+        match = re.fullmatch(r"\[mcp_servers\.([A-Za-z0-9_-]+)\]", lines[index].strip())
+        if match and match.group(1) in selected:
+            server_prefix = f"[mcp_servers.{match.group(1)}."
+            index += 1
+            while index < len(lines):
+                current = lines[index].strip()
+                if re.fullmatch(r"\[[^]]+\]", current) and not current.startswith(server_prefix):
+                    break
+                index += 1
+            continue
+        output.append(lines[index])
+        index += 1
+
+    blocks = []
+    for server in sorted(selected):
+        entry = _build_server_entry(server, is_vscode=False, cwd=cwd)
+        args = ", ".join(json.dumps(arg) for arg in entry["args"])
+        fields = [
+            f"[mcp_servers.{server}]",
+            f"command = {json.dumps(entry['command'])}",
+            f"args = [{args}]",
+            'cwd = "."',
+            "startup_timeout_sec = 20",
+        ]
+        if entry.get("env"):
+            env = ", ".join(f"{json.dumps(key)} = {json.dumps(value)}" for key, value in entry["env"].items())
+            fields.append(f"env = {{ {env} }}")
+        blocks.append("\n".join(fields))
+
+    preserved = "\n".join(output).rstrip()
+    updated = (f"{preserved}\n\n" if preserved else "") + "\n\n".join(blocks)
+    config_path.write_text(f"{updated}\n" if updated else "", encoding="utf-8")
+    return config_path
+
+
+def _remove_codex_project_servers(servers: List[str], cwd: Path) -> None:
+    config_path = cwd / ".codex" / "config.toml"
+    if not config_path.exists():
+        return
+    selected = {server.lower().strip() for server in servers if server.strip()}
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    output = []
+    index = 0
+    while index < len(lines):
+        match = re.fullmatch(r"\[mcp_servers\.([A-Za-z0-9_-]+)\]", lines[index].strip())
+        if match and match.group(1) in selected:
+            server_prefix = f"[mcp_servers.{match.group(1)}."
+            index += 1
+            while index < len(lines):
+                current = lines[index].strip()
+                if re.fullmatch(r"\[[^]]+\]", current) and not current.startswith(server_prefix):
+                    break
+                index += 1
+            continue
+        output.append(lines[index])
+        index += 1
+    config_path.write_text("\n".join(output).rstrip() + ("\n" if output else ""), encoding="utf-8")
+
+
 def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) -> Dict[str, Any]:
     """Remove server(s) from .mcp.json, clean up any legacy .vscode/mcp.json, and refresh AGENTS.md / GEMINI.md."""
     cwd = target_dir or Path.cwd()
     root_file = cwd / ".mcp.json"
     vscode_file = cwd / ".vscode" / "mcp.json"
 
-    existing_servers: Dict[str, Any] = {}
-    if root_file.exists():
-        try:
-            with open(root_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                existing_servers = data.get("mcpServers", {})
-        except Exception:
-            pass
+    config_data = _read_json_object(root_file) if root_file.exists() else {}
+    existing_servers = config_data.get("mcpServers", {})
+    if not isinstance(existing_servers, dict):
+        raise ValueError(f"Expected 'mcpServers' to be an object in '{root_file}'.")
 
     for s in servers:
         s_norm = s.lower().strip()
         existing_servers.pop(s_norm, None)
 
-    mcp_config = {"mcpServers": existing_servers}
+    config_data["mcpServers"] = existing_servers
 
     with open(root_file, "w", encoding="utf-8") as f:
-        json.dump(mcp_config, f, indent=2)
+        json.dump(config_data, f, indent=2)
 
-    try:
-        agents_mcp_file = cwd / ".agents" / "mcp_config.json"
-        if agents_mcp_file.exists():
-            with open(agents_mcp_file, "w", encoding="utf-8") as f:
-                json.dump(mcp_config, f, indent=2)
-    except Exception:
-        pass
+    agents_mcp_file = cwd / ".agents" / "mcp_config.json"
+    if agents_mcp_file.exists():
+        agents_config = _read_json_object(agents_mcp_file)
+        agents_servers = agents_config.get("mcpServers", {})
+        if not isinstance(agents_servers, dict):
+            raise ValueError(f"Expected 'mcpServers' to be an object in '{agents_mcp_file}'.")
+        for server in servers:
+            agents_servers.pop(server.lower().strip(), None)
+        with open(agents_mcp_file, "w", encoding="utf-8") as f:
+            agents_config["mcpServers"] = agents_servers
+            json.dump(agents_config, f, indent=2)
 
     if vscode_file.exists():
         try:
@@ -1048,17 +1586,9 @@ def remove_project_mcp(servers: List[str], target_dir: Optional[Path] = None) ->
         except Exception:
             pass
 
-    agents_md = cwd / "AGENTS.md"
-    content = get_server_agents_guide(list(existing_servers.keys()))
-    with open(agents_md, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    gemini_md = cwd / "GEMINI.md"
-    try:
-        with open(gemini_md, "w", encoding="utf-8") as f:
-            f.write(content)
-    except Exception:
-        pass
+    _update_project_agent_guides(cwd, list(existing_servers.keys()))
+    _upsert_managed_section(cwd / ".env.example", "environment", _project_env_template(list(existing_servers.keys())))
+    _remove_codex_project_servers(servers, cwd)
 
     return {"cwd": cwd, "servers": list(existing_servers.keys()), "config_file": str(root_file)}
 
@@ -1070,6 +1600,7 @@ CLIENT_ALIASES = {
     "claude": "claude",
     "claude-desktop": "claude",
     "claude-code": "claude",
+    "codex": "codex",
     "copilot": "copilot",
     "vscode": "copilot",
     "code": "copilot",
@@ -1086,19 +1617,19 @@ def _get_active_python_server_entries(servers: List[str], cwd: Path) -> Dict[str
     res = {}
     for s in servers:
         s_norm = s.lower().strip()
-        mod_name = s_norm.replace("-", "_")
-        entry: Dict[str, Any] = {"command": py_exe, "args": ["-m", f"mcp_win_stdio.{mod_name}"]}
+        if s_norm in ("server", "mws"):
+            res[s_norm] = {
+                "command": py_exe,
+                "args": ["-m", "mcp_win_stdio.server"],
+            }
+            continue
+        entry: Dict[str, Any] = {
+            "command": py_exe,
+            "args": ["-m", "mcp_win_stdio", "run", s_norm, "--env-file", str(cwd / ".env")],
+        }
         env: Dict[str, str] = {}
-        if s_norm == "tsc":
-            env["TSC_WATCH_DIR"] = str(cwd)
-        elif s_norm == "explorer":
+        if s_norm == "explorer":
             env["EXPLORER_ROOT"] = str(cwd)
-        elif s_norm in ("db", "excel-db"):
-            servers_env = os.environ.get("SERVERS")
-            if servers_env:
-                env["SERVERS"] = servers_env
-            else:
-                env["SERVERS"] = '{"showreel_dev": "postgresql://postgres:postgres@localhost:5432/showreel_dev"}'
         if env:
             entry["env"] = env
         res[s_norm] = entry
@@ -1153,6 +1684,20 @@ def init_antigravity(servers: List[str], cwd: Path) -> Dict[str, Any]:
         "status": "Configured",
         "primary_config": str(gemini_cfg_file),
         "files_updated": updated_files,
+        "servers_count": len(servers),
+    }
+
+
+def init_codex(servers: List[str], cwd: Path) -> Dict[str, Any]:
+    """Initialize Codex with a trusted project-scoped MCP configuration."""
+    setup_project_mcp(servers, target_dir=cwd, overwrite=False)
+    project_config = cwd / ".codex" / "config.toml"
+    return {
+        "client": "OpenAI Codex",
+        "detected": bool(shutil.which("codex")) or (Path.home() / ".codex").exists(),
+        "status": "Configured",
+        "primary_config": str(project_config),
+        "files_updated": [str(project_config), str(cwd / ".mcp.json"), str(cwd / "AGENTS.md")],
         "servers_count": len(servers),
     }
 
@@ -1328,123 +1873,125 @@ def init_all_clients(servers: List[str], cwd: Path) -> List[Dict[str, Any]]:
     results = []
     client_handlers = [
         ("antigravity", init_antigravity),
+        ("codex", init_codex),
         ("claude", init_claude),
         ("copilot", init_copilot),
         ("cursor", init_cursor),
         ("windsurf", init_windsurf),
     ]
 
-    for _, handler in client_handlers:
-        res = handler(servers, cwd)
+    detected_clients = _detected_project_clients()
+
+    for name, handler in client_handlers:
+        if detected_clients[name]:
+            res = handler(servers, cwd)
+        else:
+            res = {
+                "client": name.capitalize() if name != "codex" else "OpenAI Codex",
+                "detected": False,
+                "status": "Skipped",
+                "primary_config": "",
+                "files_updated": [],
+                "servers_count": len(servers),
+            }
         results.append(res)
+
+    if not any(detected_clients.values()):
+        setup_project_mcp(servers, target_dir=cwd)
 
     return results
 
 
 def cmd_init_project(args: argparse.Namespace) -> None:
-    """Initialize MCP configuration for specific AI client (antigravity, claude, copilot, all) or project repository."""
-    raw_targets = getattr(args, "targets", []) or getattr(args, "servers", [])
-    cwd = Path.cwd()
-    avail = list_available_servers()
-    installed_servers = [name for name, info in avail.items() if info.get("is_installed", False)]
-    active_servers = installed_servers if installed_servers else list(BUILTIN_SERVERS.keys())
+    """Retired project bootstrap command."""
+    cmd_retired(args)
 
-    # Check if any target is a recognized client
-    client_tokens = [CLIENT_ALIASES[t.lower()] for t in raw_targets if t.lower() in CLIENT_ALIASES]
-    server_tokens = [t.lower() for t in raw_targets if t.lower() not in CLIENT_ALIASES]
 
-    selected_servers = server_tokens if server_tokens else active_servers
-
-    if "all" in client_tokens or raw_targets == ["all"]:
-        # User requested 'mws init all' -> scan system, init all detected clients!
-        print(f"\n🚀 Initializing mws MCP suite across all system clients & project: {cwd}\n")
-        results = init_all_clients(selected_servers, cwd)
-        print("=" * 86)
-        print(f" {'CLIENT':<26} {'DETECTED':<12} {'STATUS':<14} {'PRIMARY CONFIG'}")
-        print("-" * 86)
-        for r in results:
-            det = "[Yes]" if r["detected"] else "[No]"
-            stat = f"[{r['status']}]" if r["detected"] else "[Skipped]"
-            cfg = r["primary_config"] if r["detected"] else "Not detected on system"
-            print(f" {r['client']:<26} {det:<12} {stat:<14} {cfg}")
-        print("=" * 86)
-        print(f"\n✅ Workspace Project Initialized ({len(selected_servers)} servers):")
-        print("   • .mcp.json (Unified standard for VS Code 1.106+, Copilot, Antigravity, Cursor)")
-        print("   • .agents/mcp_config.json (Antigravity workspace agent)")
-        print("   • AGENTS.md & GEMINI.md (Agent pair-programming guidelines)\n")
-        return
-
-    elif client_tokens:
-        # User specified specific client(s), e.g. 'mws init antigravity', 'mws init copilot'
-        client_dispatch = {
-            "antigravity": init_antigravity,
-            "claude": init_claude,
-            "copilot": init_copilot,
-            "cursor": init_cursor,
-            "windsurf": init_windsurf,
-        }
-        for c in client_tokens:
-            handler = client_dispatch.get(c)
-            if handler:
-                res = handler(selected_servers, cwd)
-                status_icon = "✅" if res["detected"] else "ℹ️"
-                print(f"\n{status_icon} Initialized MCP configuration for {res['client']}:")
-                print(f"   • Primary Config: {res['primary_config']}")
-                print(f"   • Active Servers ({res['servers_count']}): {', '.join(selected_servers)}")
-                print(f"   • Workspace: {cwd}")
-                print(f"   • Detected on system: {'Yes' if res['detected'] else 'No (configuration created)'}")
-                for f_path in res["files_updated"]:
-                    print(f"     -> {f_path}")
-        print()
-        return
-
-    else:
-        # Default project initialization: .mcp.json, .agents/mcp_config.json, AGENTS.md, GEMINI.md
-        result = setup_project_mcp(selected_servers, overwrite=True)
-        configured = ", ".join(result["servers"])
-        print(f"\n✅ Successfully initialized mws auto-configuration in: {cwd}")
-        print(f"   • Active Servers ({len(result['servers'])}): {configured}")
-        print("   • Created: .mcp.json (Unified standard for VS Code 1.106+, Copilot, Antigravity, Cursor)")
-        print("   • Created: .agents/mcp_config.json (Antigravity workspace agent)")
-        if result.get("migrated_from_legacy_vscode"):
-            print("   • Migrated & cleaned: Deprecated .vscode/mcp.json (VS Code 1.106+ deprecation)")
-        print("   • Created: AGENTS.md & GEMINI.md (Tailored AI Agent tool guidelines)\n")
+cmd_init = cmd_init_project
 
 
 def cmd_setup_project(args: argparse.Namespace) -> None:
-    """Add specific MCP server(s) to the current repository configuration."""
-    targets = args.servers
-    if not targets:
-        print("Error: Specify at least one server to add (e.g. 'mws setup-project excel db').", file=sys.stderr)
-        sys.exit(1)
-
-    result = setup_project_mcp(targets, overwrite=False)
-    cwd = result["cwd"]
-    configured = ", ".join(result["servers"])
-
-    print(f"\n✅ Added server(s) {targets} to project: {cwd}")
-    print(f"   • Total Active Servers ({len(result['servers'])}): {configured}")
-    print("   • Updated: .mcp.json (Unified standard for VS Code 1.106+, Antigravity, Claude Code, Cursor)")
-    if result.get("migrated_from_legacy_vscode"):
-        print("   • Migrated & cleaned: Deprecated .vscode/mcp.json (VS Code 1.106+ deprecation)")
-    print("   • Updated: AGENTS.md\n")
+    """Retired project setup command."""
+    cmd_retired(args)
 
 
 def cmd_remove_project(args: argparse.Namespace) -> None:
-    """Remove specific MCP server(s) from the current repository configuration."""
-    targets = args.servers
-    if not targets:
-        print("Error: Specify at least one server to remove (e.g. 'mws remove-project excel').", file=sys.stderr)
-        sys.exit(1)
+    """Retired project removal command."""
+    cmd_retired(args)
 
-    result = remove_project_mcp(targets)
-    cwd = result["cwd"]
-    configured = ", ".join(result["servers"]) if result["servers"] else "None"
 
-    print(f"\n✅ Removed server(s) {targets} from project: {cwd}")
-    print(f"   • Remaining Active Servers ({len(result['servers'])}): {configured}")
-    print("   • Updated: .mcp.json")
-    print("   • Updated: AGENTS.md\n")
+def cmd_workflow(args: argparse.Namespace) -> None:
+    """Manage and execute custom composite workflows."""
+    from mcp_win_stdio.core.workflows import (
+        delete_workflow,
+        list_workflows,
+        load_workflow,
+        run_workflow,
+    )
+
+    action = getattr(args, "wf_action", "list") or "list"
+    name = getattr(args, "wf_name", None)
+
+    if action == "list":
+        wfs = list_workflows()
+        print("\n" + "=" * 70)
+        print("  ⚡ mws Composite Workflows (Zero-Latency Multi-Tool Pipelines)")
+        print("=" * 70)
+        if not wfs:
+            print("  No workflows found.")
+            print("\n  Create one in your workspace at `.mws/workflows/<name>.json` or via:")
+            print("  AI Agent MCP tool: save_workflow(...)")
+            print("=" * 70 + "\n")
+            return
+
+        print(f"  {'NAME':<20} {'SCOPE':<10} {'STEPS':<8} {'TITLE'}")
+        print("  " + "-" * 66)
+        for w in wfs:
+            print(f"  {w['name']:<20} {w['scope']:<10} {w['steps_count']:<8} {w['title']}")
+        print("=" * 70)
+        print("  Run a workflow:  mws workflow run <name>")
+        print("  View recipe:     mws workflow view <name>\n")
+
+    elif action == "view":
+        if not name:
+            print("Error: Missing workflow name. Usage: mws workflow view <name>")
+            sys.exit(1)
+        wf = load_workflow(name)
+        if not wf:
+            print(f"Error: Workflow '{name}' not found.")
+            sys.exit(1)
+        print(json.dumps(wf, indent=2))
+
+    elif action == "delete":
+        if not name:
+            print("Error: Missing workflow name. Usage: mws workflow delete <name>")
+            sys.exit(1)
+        res = delete_workflow(name)
+        print(res["message"])
+
+    elif action == "run":
+        if not name:
+            print("Error: Missing workflow name. Usage: mws workflow run <name> [--params '{...}']")
+            sys.exit(1)
+        params = {}
+        if getattr(args, "params", None):
+            try:
+                params = json.loads(args.params)
+            except Exception as e:
+                print(f"Error: Invalid JSON string for --params: {e}")
+                sys.exit(1)
+
+        print(f"\n⚡ Executing composite workflow '{name}'...")
+        res = run_workflow(name, parameters=params)
+        print(f"Status: {res['status'].upper()} (Duration: {res.get('duration_ms', 0)}ms)")
+        if res.get("status") == "success":
+            print(f"Completed {res.get('steps_completed', 0)} / {res.get('total_steps', 0)} steps successfully.\n")
+            for step in res.get("trace", []):
+                print(f"  ✓ [{step['step_id']}] {step['server']}.{step['tool']} ({step['duration_ms']}ms)")
+        else:
+            print(f"Failed at step: {res.get('failed_step')}")
+            print(json.dumps(res.get("error"), indent=2))
+        print()
 
 
 def main() -> None:
@@ -1455,33 +2002,88 @@ def main() -> None:
     )
     parser.add_argument("--version", "-v", action="version", version=f"%(prog)s {__version__}")
 
-    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>", help="Command to execute")
 
-    # list
-    sub_list = subparsers.add_parser("list", help="List available MCP servers and tool counts")
-    sub_list.set_defaults(func=cmd_list)
-
-    # guide
-    sub_guide = subparsers.add_parser("guide", help="View usage guide, tool specs, and LLM prompts")
-    sub_guide.add_argument(
+    # 1. server: run mws as the unified on-demand MCP server
+    sub_server = subparsers.add_parser(
         "server",
+        help="Run mws unified on-demand MCP server (anti-tool-bloat gateway)",
+    )
+    sub_server.add_argument(
+        "server_action",
         nargs="?",
-        default="all",
-        help="Server name ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+        default="run",
+        choices=["run", "list", "doctor", "guide", "stop"],
+        help="Action to perform ('run', 'list', 'stop', 'doctor', 'guide')",
+    )
+    sub_server.add_argument("target_server", nargs="?", default=None, help="Target server name for stop")
+    sub_server.add_argument("-v", "--verbose", action="store_true", help="Verbose output for list")
+    sub_server.add_argument("-r", "--refresh", action="store_true", help="Force probe refresh for list")
+    sub_server.set_defaults(func=cmd_server)
+
+    # 2. guide: universal setup instructions, copy-paste config snippets, and tool specs for all agents
+    sub_guide = subparsers.add_parser(
+        "guide",
+        help="Universal setup instructions, copy-paste config snippets, and tool specs for all agents",
+    )
+    sub_guide.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        help="Server ('server', 'tsc', 'excel', ...) or client ('gemini', 'claude', 'chatgpt', 'cursor', 'kiro', 'opencode', 'windsurf', 'copilot', 'codex', 'all')",
+    )
+    sub_guide.add_argument(
+        "client",
+        nargs="?",
+        default=None,
+        help="Optional client name to tailor config snippet ('gemini', 'claude', 'chatgpt', 'cursor', 'kiro', 'opencode', 'windsurf', 'copilot', 'codex')",
     )
     sub_guide.set_defaults(func=cmd_guide)
 
-    # install
-    sub_install = subparsers.add_parser("install", help="Install standalone MCP server package(s) from PyPI")
-    sub_install.add_argument(
-        "server",
+    # 3. run: launch an individual MCP server over stdio
+    sub_run = subparsers.add_parser("run", help="Launch an MCP server over stdio")
+    sub_run.add_argument("server", help="Server name to launch ('excel', 'word', 'explorer', 'tsc', or custom plugin)")
+    sub_run.add_argument(
+        "--env-file",
+        default=".env",
+        help="Optional dotenv file to load before starting the server (default: .env in the current directory)",
+    )
+    sub_run.set_defaults(func=cmd_run)
+
+    # 4. config: interactive configuration hub
+    sub_config = subparsers.add_parser(
+        "config",
+        aliases=["cfg", "configure"],
+        help="Interactive configuration hub for DB, SSH, TSC, and Gateway (~/.mcp-win-stdio/)",
+    )
+    sub_config.add_argument(
+        "domain",
         nargs="?",
         default=None,
-        help="Server package to install ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+        choices=["db", "database", "ssh", "tsc", "typescript", "server", "gateway", "list", "view", "status", "all"],
+        help="Configuration domain to edit ('db', 'ssh', 'tsc', 'server', 'list')",
     )
-    sub_install.set_defaults(func=cmd_install)
+    sub_config.set_defaults(func=cmd_config)
 
-    # update / upgrade
+    # 5. doctor: health checks & PATH self-healing
+    sub_doctor = subparsers.add_parser("doctor", help="Check system health, dependencies, COM readiness, & PATH")
+    sub_doctor.add_argument(
+        "--fix-path", action="store_true", help="Configure Python Scripts directory in Windows User PATH"
+    )
+    sub_doctor.add_argument(
+        "--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH without prompting"
+    )
+    sub_doctor.set_defaults(func=cmd_doctor)
+
+    # 6. list: server inventory
+    sub_list = subparsers.add_parser("list", help="Show built-in servers and custom plugins with install status")
+    sub_list.set_defaults(func=cmd_list)
+
+    # 7. status: project environment readiness
+    sub_status = subparsers.add_parser("status", help="Show current environment readiness without modifying files")
+    sub_status.set_defaults(func=cmd_status)
+
+    # 8. update: upgrade suite or specific server
     sub_update = subparsers.add_parser(
         "update", aliases=["upgrade"], help="Check PyPI and upgrade mcp-win-stdio suite or specific server"
     )
@@ -1493,83 +2095,44 @@ def main() -> None:
     )
     sub_update.set_defaults(func=cmd_update)
 
-    # setup
-    sub_setup = subparsers.add_parser("setup", help="Configure server(s) into Claude Desktop and CLI")
-    sub_setup.add_argument(
+    # 9. install: pip install packages
+    sub_install = subparsers.add_parser("install", help="Install standalone MCP server package(s) from PyPI")
+    sub_install.add_argument(
         "server",
         nargs="?",
         default=None,
-        help="Server to configure ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+        help="Server package to install ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
     )
-    sub_setup.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
-    sub_setup.set_defaults(func=cmd_setup)
+    sub_install.set_defaults(func=cmd_install)
 
-    # setup-project / add-project / add
-    sub_setup_proj = subparsers.add_parser(
-        "setup-project",
-        aliases=["add-project", "add"],
-        help="Add specific MCP server(s) to current project (.mcp.json, AGENTS.md)",
-    )
-    sub_setup_proj.add_argument("servers", nargs="+", help="Server name(s) to add (e.g. 'excel', 'db', 'tsc')")
-    sub_setup_proj.set_defaults(func=cmd_setup_project)
-
-    # remove-project
-    sub_rm_proj = subparsers.add_parser("remove-project", help="Remove specific MCP server(s) from current project")
-    sub_rm_proj.add_argument("servers", nargs="+", help="Server name(s) to remove (e.g. 'excel', 'word')")
-    sub_rm_proj.set_defaults(func=cmd_remove_project)
-
-    # remove
-    sub_remove = subparsers.add_parser("remove", help="Remove server(s) from Claude Desktop and CLI")
-    sub_remove.add_argument(
-        "server",
-        help="Server to remove ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
-    )
-    sub_remove.add_argument("--client", "-c", choices=["all", "desktop", "cli"], default="all", help="Target client")
-    sub_remove.set_defaults(func=cmd_remove)
-
-    # uninstall
+    # 10. uninstall: uninstall packages
     sub_uninstall = subparsers.add_parser(
-        "uninstall", help="Uninstall MCP server(s) & clean Claude configs while preserving ~/.mcp-win-stdio"
+        "uninstall", help="Uninstall MCP server package(s) from Python environment"
     )
     sub_uninstall.add_argument(
         "server",
         nargs="?",
         default=None,
-        help="Server to uninstall ('excel', 'word', 'explorer', 'tsc', 'db', 'git', 'ssh', 'rag', 'excel-db', 'all')",
+        help="Server to uninstall ('excel', 'word', 'tsc', 'db', 'all', or 'self' to completely remove all mws packages)",
     )
     sub_uninstall.set_defaults(func=cmd_uninstall)
 
-    # run
-    sub_run = subparsers.add_parser("run", help="Launch an MCP server over stdio for Claude")
-    sub_run.add_argument("server", help="Server name to launch ('excel', 'word', 'explorer', 'tsc', or custom plugin)")
-    sub_run.set_defaults(func=cmd_run)
-
-    # doctor
-    sub_doctor = subparsers.add_parser("doctor", help="Check system health, dependencies, and COM readiness")
-    sub_doctor.set_defaults(func=cmd_doctor)
-
-    # init-project / init
-    sub_init = subparsers.add_parser(
-        "init-project",
-        aliases=["init"],
-        help="Initialize MCP configuration for specific AI client (antigravity, claude, copilot, all) or project (.mcp.json, AGENTS.md)",
+    # 11. workflow: manage and run composite workflows
+    sub_wf = subparsers.add_parser(
+        "workflow",
+        aliases=["wf"],
+        help="List, inspect, and run custom multi-step composite workflows",
     )
-    sub_init.add_argument(
-        "targets",
-        nargs="*",
-        default=[],
-        help="Target AI client ('antigravity', 'claude', 'copilot', 'cursor', 'windsurf', 'all') or server names ('excel', 'db'). If omitted or 'all', auto-detects all installed clients.",
+    sub_wf.add_argument(
+        "wf_action",
+        nargs="?",
+        default="list",
+        choices=["list", "run", "view", "delete"],
+        help="Action ('list', 'run', 'view', 'delete')",
     )
-    sub_init.set_defaults(func=cmd_init_project)
-
-    # fix-path / path
-    sub_path = subparsers.add_parser(
-        "fix-path", aliases=["path"], help="Check and configure Python Scripts directory in Windows User PATH"
-    )
-    sub_path.add_argument(
-        "--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH"
-    )
-    sub_path.set_defaults(func=cmd_fix_path)
+    sub_wf.add_argument("wf_name", nargs="?", default=None, help="Workflow name")
+    sub_wf.add_argument("--params", default=None, help="JSON string of parameter key/value overrides for run")
+    sub_wf.set_defaults(func=cmd_workflow)
 
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
     known_srvs = {
@@ -1586,29 +2149,43 @@ def main() -> None:
         "excel-db",
         "excel_db",
         "ssh",
+        "arch",
+        "server",
+        "gateway",
+        "mws",
         "antigravity",
+        "gemini",
+        "codex",
         "claude",
-        "copilot",
+        "claudecode",
+        "chatgpt",
         "cursor",
+        "kiro",
+        "opencode",
         "windsurf",
+        "copilot",
         "all",
     }
     known_cmds = {
+        "server",
         "guide",
         "run",
+        "doctor",
+        "config",
+        "configure",
+        "cfg",
+        "install",
+        "update",
+        "upgrade",
+        "uninstall",
+        "list",
+        "status",
         "setup",
         "setup-project",
         "add",
         "add-project",
         "remove-project",
-        "doctor",
         "remove",
-        "install",
-        "update",
-        "upgrade",
-        "uninstall",
-        "fix-path",
-        "path",
         "init",
         "init-project",
     }
@@ -1617,9 +2194,26 @@ def main() -> None:
         cmd_token = sys.argv[2].lower()
         sys.argv = [sys.argv[0], cmd_token, srv_token] + sys.argv[3:]
 
+    # Retired commands notice dispatcher: non-invasive, no file mutations
+    retired_cmds = {
+        "setup",
+        "init",
+        "remove",
+        "add",
+        "setup-project",
+        "add-project",
+        "remove-project",
+        "init-project",
+    }
+    if len(sys.argv) >= 2:
+        cmd_raw = sys.argv[1].lower()
+        if cmd_raw in retired_cmds:
+            cmd_retired(argparse.Namespace(command=cmd_raw))
+            sys.exit(0)
+
     args = parser.parse_args()
     if not args.command:
-        # Default action when run with no arguments: show interactive dashboard
+        # Default action for mws CLI: show dashboard
         print_dashboard()
         sys.exit(0)
 

@@ -1,6 +1,6 @@
 # mcp-win-stdio
 
-Windows-optimized **Model Context Protocol (MCP)** suite and interactive CLI hub (`mws`) for local `stdio` execution with transparent Claude Desktop & Claude Code CLI configuration.
+Windows-optimized **Model Context Protocol (MCP)** suite and non-invasive CLI hub (`mws`) for local `stdio` execution across all major AI IDEs, CLI agents, and desktop apps (Gemini, Antigravity, Claude, ChatGPT, Cursor, Kiro, OpenCode, Windsurf, Copilot, Codex).
 
 [![PyPI Version](https://img.shields.io/pypi/v/mcp-win-stdio.svg)](https://pypi.org/project/mcp-win-stdio/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -8,21 +8,24 @@ Windows-optimized **Model Context Protocol (MCP)** suite and interactive CLI hub
 
 ---
 
-## 🌟 Highlights (214 Tools Across 9 Modular Servers)
+## 🌟 Highlights (230+ Tools Across 10 Modular Servers)
 
-* **Interactive CLI Hub (`mws`)**: Run `mws` alone to view all servers, live installation status (`[Installed]` vs `[Not Installed]`), and quick commands.
-* **Safe, Transparent Setup (`mws setup <server>` / `mws add <server>`)**: Installs missing dependencies on-demand, generates exact copy-pasteable JSON configuration for Claude Desktop and Claude Code CLI, and asks confirmation before making any automated edits (always creating `.bak` backups).
-* **Dynamic Guide Merging (`mws guide [server]`)**: View comprehensive tool schemas, prompt recipes, and diagnostic checks for individual servers (`mws excel-db guide`, `mws ssh guide`, `mws git guide`, `mws db guide`) or all installed servers merged (`mws guide all`).
-* **Excel MCP (44 Tools)**: High-speed Pandas data queries, multi-column reconciliation with RapidFuzz, native styled Excel Tables (ListObjects), row/column structural mutations, formula templates, cell merging, workbook diffing, and native Windows Excel COM automation (PDF exports, recalculation, pivot refreshes, VBA macros).
-* **Git & GitHub MCP (46 Tools)**: Unified local Git repository management (init, remotes, restore, bookmarks, branching, commits, paginated diffs, conflicts) and remote GitHub CLI (`gh`) operations (PR checks, releases, issues, Actions) with hybrid synergy workflows.
-* **Multi-SSH & Remote Management MCP (34 Tools)**: Advanced multi-host connection pooling, auto-discovery of `~/.ssh/config` aliases/identity files/ProxyJump, sticky active host routing, command execution, elevated `sudo` automation, interactive PTY terminal sessions, detached background jobs, systemd/docker/pm2 service inspection, package listing, log tailing, comprehensive SFTP file management, and background local port forwarding tunnels.
-* **Polyglot Database MCP (31 Tools)**: Unified PostgreSQL & MySQL database manager with cross-database switching, cross-schema auto-resolution, fast JSON queries, DBA administrative operations (safety-guarded DROP, CREATE, CLONE), active connection monitoring, index health audits, schema diffing with migration SQL, Mermaid ERD diagrams, row-level data diffing, slow queries, lock blocking trees, CSV/JSON streaming export, and transactional batch CSV import.
-* **Word MCP (20 Tools)**: Multi-unit page layout geometry (margins in inches, cm, mm, pt), multi-column layout analysis, paragraph spacing/indentation, typography (fonts, sizes, hex colors), floating/inline header image extraction, document authoring, template placeholder filling, and native Word COM PDF export.
-* **Workspace Explorer MCP (14 Tools)**: Token-safe directory exploration, collapsible heavy folders (`node_modules`, `.next`, `.git`), dynamic `.gitignore` parsing, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outline extraction.
-* **Excel & DB Power Engine MCP (9 Tools)**: Zero-context streaming from database to Excel, chunked Excel-to-DB upserting, in-memory cross-source SQL joins, automated reconciliation diffs, multi-master datasets comparison with tolerance, transactional migration generation, and custom Python template pipelines.
-* **TypeScript Diagnostic Watcher MCP (8 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection across multi-tsconfig projects.
-* **RAG MCP (8 Tools)**: Multi-collection asynchronous Playwright web crawling, codebase indexing with incremental SHA-256 caching, zero-clone remote GitHub streaming, and hybrid BM25 + dense semantic vector search.
-* **Extensible User Plugins**: Drop any standalone Python MCP script into `~/.mcp-win-stdio/plugins/` and it is immediately discovered, runnable, and configurable.
+* **Unified On-Demand Gateway & Workflow Engine (`mws server`)**: Configure just `mws server` (or `python -m mcp_win_stdio.server`) in Claude Desktop, Cursor, Gemini, or Antigravity. Instead of dumping 200+ tools (35,000+ tokens) into the context window, it exposes 10 lightweight meta-tools (~500 tokens) that lazily spawn child servers and execute agent-synthesized multi-step workflows in 0 LLM turns!
+* **Agent-Synthesized Workflows (`.mws/workflows/`)**: AI agents and developers can chain multiple MCP tools into named composite pipelines with argument templating and error halting.
+* **100% Dynamic & Zero-Env Architecture**: All configurations (databases, TypeScript projects, SSH hosts, Git repositories) are managed interactively and stored in `~/.mcp-win-stdio/`. No environment variables required in client configs!
+* **Universal Multi-Agent Guide (`mws guide`)**: Generates tailored copy-paste configuration snippets and exact configuration file paths for 10 major AI agents without mutating user files.
+* **Cascading Clean Uninstallation (`mws uninstall self`)**: Dynamically discovers and purges all installed `mcp-win-stdio-*` distributions in one atomic batch.
+* **Excel MCP (44 Tools)**: High-speed Pandas queries, multi-column reconciliation with RapidFuzz, native Excel Tables, row/col mutations, formulas, cell merging, workbook diffing, and Office COM automation.
+* **Git & GitHub MCP (46 Tools)**: Unified local Git management (init, remotes, restore, bookmarks, branches, commits, diffs) and remote GitHub CLI (`gh`) operations (PR checks, releases, issues, Actions).
+* **Multi-SSH MCP (34 Tools)**: Multi-host connection pooling, auto-discovery of `~/.ssh/config`, interactive PTY terminal sessions, detached background jobs, systemd/docker services, SFTP file management, and port forwarding.
+* **Polyglot Database MCP (34 Tools)**: PostgreSQL & MySQL manager with dynamic connection hub, cross-schema resolution, index health audits, schema diffing with migration SQL, Mermaid ERD, slow queries, lock trees, and streaming export/import.
+* **Word MCP (20 Tools)**: Multi-unit geometry (in, cm, mm, pt), multi-column layout, typography, document authoring, template placeholder filling, and native Word COM PDF export.
+* **Workspace Explorer MCP (14 Tools)**: Token-safe directory exploration, collapsible heavy folders, `.gitignore` resolution, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outlines.
+* **Excel & DB Power Engine MCP (9 Tools)**: Zero-context streaming from database to Excel, chunked upserting, in-memory cross-source SQL joins, automated reconciliation diffs, and migration planning.
+* **TypeScript Diagnostic Watcher MCP (12 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection and actionable fixes.
+* **RAG MCP (10 Tools)**: Multi-collection web crawling, incremental local and remote repository indexing, hybrid BM25 + TF-IDF search, and knowledge trees.
+* **Architecture Knowledge Graph MCP (5 Tools)**: Full-stack vertical blueprint flowcharts, execution trace down to storage entities, ERD diagrams, and blast-radius impact analysis.
+* **Extensible User Plugins**: Drop any standalone Python MCP script into `~/.mcp-win-stdio/plugins/` and it is immediately discovered and proxied.
 
 ---
 
@@ -32,15 +35,17 @@ Each server is published as an independent, lightweight PyPI package. Installing
 
 | Server | Standalone Package | Tools | Primary Capabilities |
 | :--- | :--- | :---: | :--- |
+| **mws Server** | `pip install mcp-win-stdio` | 10 | Unified On-Demand Gateway, Composite Workflow Engine, & Dynamic Process Orchestrator |
 | **Excel** | `pip install mcp-win-stdio-excel` | 44 | Native Excel Tables, row/col mutations, formulas, Pandas queries, RapidFuzz reconciliation, Office COM automation |
 | **Git & GitHub** | `pip install mcp-win-stdio-git` | 46 | Local Git init/remotes/restore/bookmarks/branches, commits, diffs + GitHub PR checks, releases, issues, Actions |
 | **SSH** | `pip install mcp-win-stdio-ssh` | 34 | Multi-host pooling, ~/.ssh/config discovery, PTY shells, background jobs, systemd/docker, package management, SFTP, tunnels |
-| **Database** | `pip install mcp-win-stdio-db` | 31 | PostgreSQL & MySQL pooling, cross-schema resolution, index audits, schema diffs, Mermaid ERD, slow queries, lock trees |
+| **Database** | `pip install mcp-win-stdio-db` | 34 | PostgreSQL & MySQL dynamic pooling, ~/.mcp-win-stdio config, cross-schema resolution, index audits, schema diffs, Mermaid ERD |
 | **Word** | `pip install mcp-win-stdio-word` | 20 | Margins (in, cm, mm, pt), multi-column layout, typography, document authoring, template filling, Office COM PDF export |
 | **Explorer** | `pip install mcp-win-stdio-explorer` | 14 | Token-safe collapsible tree, .gitignore resolution, in-file grep, AST outlines, fuzzy search |
 | **Excel & DB** | `pip install mcp-win-stdio-excel-db` | 9 | Zero-context streaming, cross-joins, master reconciliation with tolerance, transactional migration plan, dry-run sync |
-| **TypeScript** | `pip install mcp-win-stdio-tsc` | 8 | 0ms in-memory compilation error cache, multi-tsconfig watchers, fix suggestions |
-| **RAG** | `pip install mcp-win-stdio-rag` | 8 | Async Playwright crawling, codebase indexing, zero-clone GitHub ingest, hybrid BM25 + vector search |
+| **TypeScript** | `pip install mcp-win-stdio-tsc` | 12 | 0ms in-memory compilation error cache, dynamic multi-project config (add_project/use_project), multi-tsconfig watchers |
+| **RAG** | `pip install mcp-win-stdio-rag` | 10 | Web crawling, local/remote repo indexing, hybrid BM25 + TF-IDF search, context and collection lifecycle |
+| **Arch** | `pip install mcp-win-stdio-arch` | 5 | Vertical full-stack blueprint flowcharts, execution trace down to storage entities, ERD, blast-radius analysis |
 
 ### Install Individual Servers:
 ```powershell
@@ -53,6 +58,7 @@ pip install mcp-win-stdio-explorer
 pip install mcp-win-stdio-excel-db
 pip install mcp-win-stdio-tsc
 pip install mcp-win-stdio-rag
+pip install mcp-win-stdio-arch
 ```
 
 ### Or Install the Complete Suite:
@@ -78,7 +84,7 @@ mws
 Output:
 ```text
 ============================================================================
-   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.2.5)
+   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.3.1)
 ============================================================================
 
  Single-Source Hub:      C:\Users\admin\.mcp-win-stdio
@@ -99,7 +105,7 @@ git          [Installed]      26       26 tools: Local Git branching, co...
    mws guide <server>    -> View complete tool reference & Claude prompts
    mws doctor            -> Run health checks (COM, Python, DB, Git)
    mws run <server>      -> Launch MCP server over stdio
-   mws list              -> List all servers and custom plugins
+   mws list              -> Show concise server inventory
 ============================================================================
 ```
 
@@ -115,27 +121,40 @@ mws add db
 
 ## 📖 CLI Commands
 
-| Command | Shorthand / Alternate Syntax | Description |
+mws follows a **zero-mutation, non-invasive philosophy**: it never automatically modifies your agent's configuration files. Use `mws guide` to inspect copy-paste configuration snippets and exact file paths for your AI client.
+
+| Command | Usage | Description |
 | :--- | :--- | :--- |
-| `mws` | `mws list` | Displays interactive terminal home dashboard with live server status, PyPI update alerts, and tips. |
-| `mws install <server\|all>` | `mws <server> install` | Installs standalone server packages from PyPI. |
-| `mws update <server\|all>` | `mws <server> update` | Checks PyPI for new versions and upgrades the suite or specific server. |
-| `mws setup <server>` | `mws add <server>` / `mws <server> setup` | Guides setup, verifies dependencies, and generates Claude config snippets. |
-| `mws remove <server>` | `mws <server> remove` | Safely removes server(s) from Claude Desktop and CLI configs. |
-| `mws uninstall <server\|all>` | `mws <server> uninstall` | Cleanly uninstalls packages and removes Claude registrations while preserving your single-source hub (`~/.mcp-win-stdio`). |
-| `mws guide [server]` | `mws <server> guide` | Prints tool reference, parameter schemas, and prompt recipes for Claude. |
-| `mws doctor` | `mws <server> doctor` | Runs diagnostic health checks (Python, Git CLI, GitHub CLI, COM, DB drivers, PyPI updates). |
-| `mws fix-path` | `mws path` | Checks and configures Python Scripts/bin directories in Windows User PATH. |
-| `mws run <server>` | `mws <server> run` | Launches the MCP server over stdio. |
+| `mws` | — | Home dashboard showing suite health, supported agents, server statuses, and quick commands. |
+| `mws guide` | `mws guide [server] [client]` | **Universal Multi-Agent Guide**: copy-paste snippets, tool references, and Windows config file paths. |
+| `mws server` | `mws server run` | Runs the Unified On-Demand Gateway MCP server (loads all 230+ tools dynamically, anti-bloat). |
+| `mws workflow` | `mws workflow [list|run|view|delete]` | **Composite Workflows**: execute multi-step tool pipelines in zero LLM turns. |
+| `mws run <server>` | `mws run tsc` | Launches an individual MCP server directly over stdio. |
+| `mws config [domain]` | `mws config db` | Interactive terminal wizard to configure databases, SSH hosts, and TypeScript projects. |
+| `mws doctor` | `mws doctor [--fix-path]` | Diagnostic health checks (Python, COM, DB, Git CLI, SSH, PATH). Pass `--fix-path` to auto-repair PATH. |
+| `mws list` | — | Focused inventory of built-in servers and custom plugins with tool counts. |
+| `mws status` | — | Reports server environment readiness without modifying any files. |
+| `mws update [server]` | `mws update all` | Checks PyPI for new versions and upgrades the suite or specific server package. |
+| `mws install <server>` | `mws install excel` | Installs standalone server packages from PyPI into your Python environment. |
+| `mws uninstall <server>` | `mws uninstall self` | Uninstalls packages (use `self` to atomically purge all `mcp-win-stdio*` packages). |
 
 
-> [!TIP]
-> If `mws` is not yet in Windows `PATH`, all commands can be executed using Python's module runner:
-> ```powershell
-> python -m mcp_win_stdio run git
-> python -m mcp_win_stdio update all
-> python -m mcp_win_stdio doctor
-> ```
+### 🧭 Universal Guide Examples (`mws guide`)
+
+| Scenario | Command | What It Shows |
+| :--- | :--- | :--- |
+| **All Agents & Servers** | `mws guide` | Global overview with Unified Gateway snippet and config paths for all 10 supported AI clients. |
+| **Client Setup** | `mws guide gemini` | Recommended Unified Gateway snippet, instructions, and Windows paths for Gemini / Antigravity. |
+| **Server Reference** | `mws guide tsc` | Standalone server snippet for `mcpServers`, Windows config paths, and full tool specifications. |
+| **Client-Tailored Server** | `mws guide tsc gemini` | Ready-to-copy snippet and step-by-step instructions specifically for `tsc` on Gemini / Antigravity. |
+| **ChatGPT Desktop** | `mws guide chatgpt` | Ready-to-copy snippet and developer config file path for ChatGPT Desktop. |
+| **Cursor AI** | `mws guide cursor` | Ready-to-copy snippet and settings path for Cursor IDE. |
+| **Kiro IDE** | `mws guide kiro` | Ready-to-copy snippet and config file path for Kiro IDE. |
+| **OpenCode** | `mws guide opencode` | Ready-to-copy snippet and configuration path for OpenCode. |
+| **OpenAI Codex** | `mws guide codex` | TOML-formatted configuration snippet for `~/.codex/config.toml`. |
+
+> [!NOTE]
+> The legacy auto-setup commands (`setup`, `init`, `remove`) have been retired. `mws` does not modify your IDE configuration files behind your back; simply copy and paste the snippet provided by `mws guide`!
 
 
 ---
@@ -174,8 +193,9 @@ mws add db
 * **Code Intelligence**: `get_code_outline` (AST extractor for Python classes/methods and JS/TS signatures), `get_file_info`, `workspace_summary`, `export_tree_to_file`.
 * **Safe Reading**: `read_file` (windowed line slicing, binary safeguard), `read_head_tail`.
 
-### ⚡ 6. TypeScript Diagnostic Watcher MCP (`mcp_win_stdio.tsc`) — 6 Tools
-* **Instant Diagnostic Query**: `get_tsc_errors` (0ms in-memory cache), `get_file_errors`, `get_error_summary`.
+### ⚡ 6. TypeScript Diagnostic Watcher MCP (`mcp_win_stdio.tsc`) — 12 Tools
+* **Dynamic Multi-Project Config**: `list_projects`, `use_project(alias_or_path)`, `add_project(path, alias)`, `remove_project(alias_or_path)`.
+* **Instant Diagnostic Query**: `get_tsc_errors` (0ms in-memory cache), `get_file_errors`, `get_error_summary`, `get_error_category_breakdown`, `suggest_error_fixes`.
 * **Dynamic Watchers**: `list_watched_projects`, `watch_project(path)`, `restart_tsc_watcher`.
 
 ---
@@ -188,7 +208,7 @@ Simply place your script into:
 %USERPROFILE%\.mcp-win-stdio\plugins\my_custom_mcp.py
 ```
 `mcp-win-stdio` automatically discovers it:
-* View it in `mws list`
+* View it in `mws list` (or use `mws` for the full dashboard)
 * Run it via `mws run my_custom_mcp`
 * Add it to Claude via `mws setup my_custom_mcp`
 

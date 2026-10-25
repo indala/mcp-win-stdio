@@ -107,6 +107,26 @@ COMMON_STOPWORDS = {
     "files",
     "example",
     "examples",
+    "happen",
+    "happens",
+    "just",
+    "much",
+    "many",
+    "more",
+    "most",
+    "less",
+    "least",
+    "than",
+    "then",
+    "please",
+    "tell",
+    "describe",
+    "explain",
+    "did",
+    "should",
+    "would",
+    "could",
+    "will",
 }
 
 
@@ -120,18 +140,20 @@ def _stem_token(word: str) -> str:
 
 
 def analyze_query_coverage(query: str, text: str, section_title: str) -> Dict[str, Any]:
-    """Analyze how many significant query keywords are actually found in the chunk using stemmed matching."""
+    """Analyze significant query-term overlap without accepting accidental substring matches."""
     raw_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9_]+", query)]
     sig_terms = [w for w in raw_words if len(w) > 2 and w not in COMMON_STOPWORDS]
     if not sig_terms:
         return {"matched": [], "missing": [], "coverage_ratio": 1.0}
 
-    target_content = f"{section_title} {text}".lower()
+    content_terms = set(extract_code_subwords(f"{section_title} {text}"))
+    content_terms.update(re.findall(r"[a-zA-Z0-9_]+", f"{section_title} {text}".lower()))
+    normalized_content_terms = content_terms | {_stem_token(word) for word in content_terms}
     matched = []
     missing = []
     for t in sig_terms:
         st = _stem_token(t)
-        if (t in target_content) or (st in target_content):
+        if t in normalized_content_terms or st in normalized_content_terms:
             matched.append(t)
         else:
             missing.append(t)
@@ -913,7 +935,7 @@ class RAGVectorStore:
 
                     truncated_chars = total_chars - len(snippet_part)
                     item["snippet"] = (
-                        f"{snippet_part} ... [Truncated {truncated_chars} chars; call get_chunk_context(chunk_id={cid})]"
+                        f"{snippet_part} ... [Truncated {truncated_chars} chars; call get_chunk_context with this result's chunk_id and collection]"
                     )
                     item["is_truncated"] = True
                 else:
@@ -928,7 +950,12 @@ class RAGVectorStore:
     def find_related(self, chunk_id: int, top_k: int = 5, collection: Optional[str] = None) -> List[Dict[str, Any]]:
         """Find chunks semantically and topical related to a given chunk ID."""
         with self._get_connection() as conn:
-            cur = conn.execute("SELECT section_title, text FROM chunks WHERE id = ?", (chunk_id,))
+            sql = "SELECT section_title, text FROM chunks WHERE id = ?"
+            params: List[Any] = [chunk_id]
+            if collection:
+                sql += " AND collection = ?"
+                params.append(collection)
+            cur = conn.execute(sql, params)
             row = cur.fetchone()
             if not row:
                 return []
@@ -937,24 +964,28 @@ class RAGVectorStore:
             results = self.search(query=query, top_k=top_k + 1, collection=collection)
             return [r for r in results if r.get("chunk_id") != chunk_id][:top_k]
 
-    def get_chunk_context(self, chunk_id: int, window: int = 0) -> Optional[Dict[str, Any]]:
+    def get_chunk_context(
+        self, chunk_id: int, window: int = 0, collection: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Fetch full content for a chunk by ID, optionally expanding with adjacent chunks.
         """
         with self._get_connection() as conn:
-            cur = conn.execute(
-                """
+            query = """
                 SELECT id, collection, file_path, url, anchor_url, section_title,
-                       line_start, line_end, chunk_index, text
+                       anchor_id, line_start, line_end, chunk_index, text
                 FROM chunks WHERE id = ?
-            """,
-                (chunk_id,),
-            )
+            """
+            params: List[Any] = [chunk_id]
+            if collection:
+                query += " AND collection = ?"
+                params.append(collection)
+            cur = conn.execute(query, params)
             target = cur.fetchone()
             if not target:
                 return None
 
-            cid, col, fp, url, aurl, st, ls, le, cidx, txt = target
+            cid, col, fp, url, aurl, st, anchor_id, ls, le, cidx, txt = target
 
             if window <= 0:
                 return {
@@ -970,17 +1001,19 @@ class RAGVectorStore:
                     "window": 0,
                 }
 
-            # Fetch surrounding chunks from same file/URL
-            cur_ctx = conn.execute(
-                """
+            # Keep context within the same file; web chunks are additionally grouped by section.
+            context_query = """
                 SELECT id, line_start, line_end, chunk_index, text
                 FROM chunks
-                WHERE collection = ? AND (file_path = ? OR url = ?)
+                WHERE collection = ? AND file_path = ?
                   AND chunk_index BETWEEN ? AND ?
-                ORDER BY chunk_index ASC
-            """,
-                (col, fp, url, max(0, cidx - window), cidx + window),
-            )
+            """
+            context_params: List[Any] = [col, fp or url, max(0, cidx - window), cidx + window]
+            if ls <= 0 and le <= 0:
+                context_query += " AND anchor_id = ? AND section_title = ?"
+                context_params.extend([anchor_id, st])
+            context_query += " ORDER BY chunk_index ASC"
+            cur_ctx = conn.execute(context_query, context_params)
 
             ctx_rows = cur_ctx.fetchall()
             combined_texts = []
@@ -1017,13 +1050,17 @@ class RAGVectorStore:
 
             try:
                 col_row = conn.execute(
-                    "SELECT source_uri, collection_name, collection_type, commit_sha FROM collections_meta ORDER BY updated_at DESC LIMIT 1"
+                    "SELECT source_uri, collection_name, collection_type, commit_sha, is_temp, expires_at, updated_at "
+                    "FROM collections_meta ORDER BY updated_at DESC LIMIT 1"
                 ).fetchone()
                 if col_row:
                     meta["source_uri"] = col_row[0]
                     meta["collection_name"] = col_row[1]
                     meta["collection_type"] = col_row[2]
                     meta["commit_sha"] = col_row[3]
+                    meta["is_temp"] = col_row[4]
+                    meta["expires_at"] = col_row[5]
+                    meta["updated_at"] = col_row[6]
             except Exception:
                 pass
 

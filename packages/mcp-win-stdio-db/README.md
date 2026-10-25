@@ -6,9 +6,10 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🚀 Features (31 Tools)
+## 🚀 Features (34 Tools)
 
 - **Polyglot Database Engine**: Handles PostgreSQL (`psycopg2`) and MySQL (`pymysql`) transparently side-by-side.
+- **Dynamic Config Management**: Persistently stored in `~/.mcp-win-stdio/db_connections.json`, shared between `db` and `excel-db`. No required environment variables!
 - **Entity-Relationship Diagrams (`generate_erd`)**: Generates clean GitHub/Mermaid markdown ER diagrams from foreign key metadata.
 - **Row-Level Data Diffing (`diff_data`)**: Compares data across tables, schemas, or connections with column-by-column diffs.
 - **Performance & Lock Auditing (`list_slow_queries`, `get_locks`)**: Real-time blocking dependency trees and slow query analysis (`pg_stat_statements` / `performance_schema`).
@@ -20,39 +21,42 @@ Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🛠️ Included Tools (31 Tools)
+## 🛠️ Included Tools (34 Tools)
 
 1. `list_connections`: Lists all active and configured database connections.
 2. `use_database`: Switches active connection or switches database on current server.
-3. `list_databases`: Lists all databases on the active server.
-4. `list_schemas`: Lists all schemas in the active PostgreSQL database.
-5. `describe_table`: Detailed schema inspection (columns, nullability, PKs, FKs, indexes). Auto-resolves cross-schema tables in PostgreSQL.
-6. `schema_overview`: Compact overview of all user tables and views.
-7. `compact_schema_overview`: Ultra-compact one-liner per table: schema.table (col: type PK, col2: FK->ref).
-8. `get_table_sample`: Returns sample rows and estimated row count with PII masking.
-9. `search_schema`: Case-insensitive regex search for table, view, or column names.
-10. `get_table_ddl`: Complete CREATE TABLE DDL reconstruction.
-11. `get_database_stats`: Table sizes, row estimates, index sizes, and total database size.
-12. `read_query`: Safe SELECT queries returning structured JSON with row counts.
-13. `execute_query`: Executes DML / DDL statements with transaction commit/rollback and `dry_run` support.
-14. `explain_query`: Generates EXPLAIN / EXPLAIN ANALYZE execution plan.
-15. `list_active_queries`: Lists running queries, connection duration, and process IDs.
-16. `analyze_table_indexes`: Table index analysis: PKs, missing FK indexes, unused indexes.
-17. `compare_schemas`: Schema diff between databases/schemas with generated migration SQL.
-18. `audit_database_health`: Unindexed FKs, unused indexes, bloated tables with SQL fixes.
-19. `generate_erd`: Entity-Relationship Diagram in GitHub/Mermaid markdown syntax from foreign keys.
-20. `diff_data`: Row-level data comparison with field-level diffs and key matching.
-21. `list_slow_queries`: Slow query analysis (`pg_stat_statements` / `performance_schema`).
-22. `get_locks`: Real-time blocking dependency trees and lock distributions.
-23. `export_table`: Streams table contents or SQL query results directly to CSV, JSON, or TSV on disk.
-24. `import_csv`: Batch imports CSV file into table with transaction safety and dry-run rollback.
-25. `add_connection`: Dynamically adds a new PostgreSQL or MySQL connection string at runtime.
-26. `create_database`: Creates a new database on the active server.
-27. `drop_database`: Safety-guarded DROP DATABASE (requires `confirmName` matching target name).
-28. `clone_database`: Fast database cloning using PostgreSQL TEMPLATE mechanism.
-29. `terminate_connections`: Terminates active connections to a specific database.
-30. `dump_database`: Dumps database to SQL file using native `pg_dump` or `mysqldump`.
-31. `restore_database`: Restores database from SQL dump file using native `psql` or `mysql`.
+3. `add_connection`: Dynamically adds a new PostgreSQL or MySQL connection string at runtime.
+4. `edit_connection`: Dynamically updates an existing connection URL, credentials, or alias name.
+5. `remove_connection`: Removes a saved connection from persistent configuration.
+6. `test_connection`: Verifies connectivity to an existing or ad-hoc database connection.
+7. `list_databases`: Lists all databases on the active server.
+8. `list_schemas`: Lists all schemas in the active PostgreSQL database.
+9. `describe_table`: Detailed schema inspection (columns, nullability, PKs, FKs, indexes). Auto-resolves cross-schema tables in PostgreSQL.
+10. `schema_overview`: Compact overview of all user tables and views.
+11. `compact_schema_overview`: Ultra-compact one-liner per table: schema.table (col: type PK, col2: FK->ref).
+12. `get_table_sample`: Returns sample rows and estimated row count with PII masking.
+13. `search_schema`: Case-insensitive regex search for table, view, or column names.
+14. `get_table_ddl`: Complete CREATE TABLE DDL reconstruction.
+15. `get_database_stats`: Table sizes, row estimates, index sizes, and total database size.
+16. `read_query`: Safe SELECT queries returning structured JSON with row counts.
+17. `execute_query`: Executes DML / DDL statements with transaction commit/rollback and `dry_run` support.
+18. `explain_query`: Generates EXPLAIN / EXPLAIN ANALYZE execution plan.
+19. `list_active_queries`: Lists running queries, connection duration, and process IDs.
+20. `analyze_table_indexes`: Table index analysis: PKs, missing FK indexes, unused indexes.
+21. `compare_schemas`: Schema diff between databases/schemas with generated migration SQL.
+22. `audit_database_health`: Unindexed FKs, unused indexes, bloated tables with SQL fixes.
+23. `generate_erd`: Entity-Relationship Diagram in GitHub/Mermaid markdown syntax from foreign keys.
+24. `diff_data`: Row-level data comparison with field-level diffs and key matching.
+25. `list_slow_queries`: Slow query analysis (`pg_stat_statements` / `performance_schema`).
+26. `get_locks`: Real-time blocking dependency trees and lock distributions.
+27. `export_table`: Streams table contents or SQL query results directly to CSV, JSON, or TSV on disk.
+28. `import_csv`: Batch imports CSV file into table with transaction safety and dry-run rollback.
+29. `create_database`: Creates a new database on the active server.
+30. `drop_database`: Safety-guarded DROP DATABASE (requires `confirmName` matching target name).
+31. `clone_database`: Fast database cloning using PostgreSQL TEMPLATE mechanism.
+32. `terminate_connections`: Terminates active connections to a specific database.
+33. `dump_database`: Dumps database to SQL file using native `pg_dump` or `mysqldump`.
+34. `restore_database`: Restores database from SQL dump file using native `psql` or `mysql`.
 
 ---
 
@@ -73,20 +77,19 @@ mws setup db
 mws add db
 ```
 
-### Manual Configuration Example
+### Manual Configuration Example (Zero-Env)
 In `%APPDATA%\Claude\claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
     "db": {
       "command": "python",
-      "args": ["-m", "mcp_win_stdio.db"],
-      "env": {
-        "SERVERS": "{\"postgres\":\"postgresql://postgres:password@localhost:5432/mydb\",\"mysql\":\"mysql://user:pass@localhost:3306/mydb\"}"
-      }
+      "args": ["-m", "mcp_win_stdio.db"]
     }
   }
 }
+```
+*Note: Connections are stored and managed dynamically in `~/.mcp-win-stdio/db_connections.json` using `add_connection` and `edit_connection`. No environment variables required in client configuration!*
 ```
 
 ---

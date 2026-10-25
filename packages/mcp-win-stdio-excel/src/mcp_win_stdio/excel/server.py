@@ -401,7 +401,7 @@ def preview_sheet(
         "columns": [c for c in df.columns],
         "column_types": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
         "format": format,
-        "rows": data if format != "tsv" else None,
+        "rows": data,
         "data": data,
     }
 
@@ -466,7 +466,7 @@ def query_rows(
         "returned_rows": len(paginated_df),
         "columns": [c for c in df.columns],
         "format": format,
-        "rows": data if format != "tsv" else None,
+        "rows": data,
         "data": data,
     }
 
@@ -487,6 +487,8 @@ def read_range(
     sheet_name: Optional[str] = None,
     start_row: int = 1,
     end_row: int = 50,
+    limit: Optional[int] = None,
+    nrows: Optional[int] = None,
     columns: Optional[List[str]] = None,
     header_row: Optional[int] = None,
     format: Literal["records", "compact", "tsv"] = "records",
@@ -500,6 +502,8 @@ def read_range(
         sheet_name: Sheet name or index.
         start_row: First row to read (1-indexed).
         end_row: Last row to read (1-indexed).
+        limit: Optional row limit count (shorthand that overrides end_row = start_row + limit - 1).
+        nrows: Alias for limit.
         columns: Specific columns to load.
         header_row: Row containing column headers (0-indexed).
         format: 'records', 'compact', or 'tsv'.
@@ -507,42 +511,54 @@ def read_range(
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
+    if limit is not None:
+        end_row = start_row + max(1, limit) - 1
+    elif nrows is not None:
+        end_row = start_row + max(1, nrows) - 1
+
     if start_row < 1:
         start_row = 1
     if end_row < start_row:
         raise ValueError(f"end_row ({end_row}) must be >= start_row ({start_row})")
 
+    requested_count = end_row - start_row + 1
     max_allowed = 300 if format == "tsv" else (200 if format == "compact" else 100)
-    nrows = min(end_row - start_row + 1, max_allowed)
+    fetch_rows = min(requested_count, max_allowed)
 
     h_idx = header_row if header_row is not None else 0
     if start_row <= (h_idx + 1):
-        df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows, usecols=columns, header=h_idx)
+        df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=fetch_rows, usecols=columns, header=h_idx)
     else:
         header_df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=0, usecols=columns, header=h_idx)
         df = pd.read_excel(
             file_path,
             sheet_name=sheet_name or 0,
             skiprows=range(h_idx + 1, start_row),
-            nrows=nrows,
+            nrows=fetch_rows,
             names=list(header_df.columns),
             usecols=columns,
         )
 
     data = _format_dataframe_output(df, format)
+    returned_count = len(df)
+    has_more = requested_count > max_allowed or returned_count == fetch_rows
+
     res_range: Dict[str, Any] = {
         "start_row": start_row,
-        "end_row": start_row + len(df) - 1,
-        "row_count": len(df),
+        "end_row": start_row + returned_count - 1 if returned_count > 0 else start_row,
+        "row_count": returned_count,
+        "requested_count": requested_count,
+        "has_more": has_more,
         "columns": [c for c in df.columns],
         "format": format,
-        "rows": data if format != "tsv" else None,
+        "rows": data,
         "data": data,
     }
-    if (end_row - start_row + 1) > max_allowed:
+
+    if requested_count > max_allowed:
         res_range["context_protection_notice"] = (
-            f"Requested {end_row - start_row + 1} rows capped at {max_allowed} to protect your LLM context window. "
-            f"Use start_row/end_row to page through specific slices or export_to_csv to process on disk."
+            f"Requested {requested_count} rows capped at {max_allowed} to protect your LLM context window. "
+            f"Use start_row={start_row + returned_count} to page through the next slice."
         )
     return res_range
 

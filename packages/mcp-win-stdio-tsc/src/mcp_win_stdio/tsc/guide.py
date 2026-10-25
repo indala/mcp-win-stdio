@@ -19,46 +19,69 @@ Safety & Standby Architecture:
   * Compiler Pre-Check: Verifies TypeScript compiler ('tsc') availability before
     scanning or watching files, returning clear installation guidance if missing.
 
-Available Tools (8 Tools):
+Available Tools (12 Tools):
 --------------------------------------------------------------------------------
-1.  get_tsc_errors
+1.  list_projects
+    - Lists all configured TypeScript projects (from ~/.mcp-win-stdio/tsc_projects.json
+      and active background watchers), indicating the active sticky project, watcher status,
+      error counts, and compiler binary.
+
+2.  use_project
+    - Switches the active default TypeScript project context by alias or directory path.
+      All subsequent diagnostic queries automatically target this project.
+    - Args: project (str)
+
+3.  add_project
+    - Registers and persists a new TypeScript project to ~/.mcp-win-stdio/tsc_projects.json.
+      Optionally starts background watchers and waits for initial compilation.
+    - Args: project_path (str), alias (optional str), auto_watch (bool), description (optional str)
+
+4.  remove_project
+    - Removes a registered project from ~/.mcp-win-stdio/tsc_projects.json and optionally
+      terminates background compiler processes.
+    - Args: project (str), stop_watcher (bool)
+
+5.  get_tsc_errors
     - Returns active TypeScript compilation errors from cache (0ms latency).
     - Context-window protected, paginated, and token-safe.
-    - Optional filters: project_path (str), tsconfig_path (str), error_code (str)
+    - Optional filters: project_path (alias or path), tsconfig_path (str), error_code (str)
 
-2.  suggest_error_fixes
+6.  suggest_error_fixes
     - Instant actionable fix recommendations, explanation, and code patterns
       for common TypeScript compiler errors (e.g. TS2304, TS2322, TS2339, TS2345).
     - Args: error_code (str), message (optional str)
 
-3.  get_error_category_breakdown
+7.  get_error_category_breakdown
     - High-level categorization of all active TypeScript errors into semantic groups:
       type_mismatch, missing_declaration, nullability, imports, jsx, config.
+    - Optional filter: project (str)
 
-4.  get_file_errors
+8.  get_file_errors
     - Returns TypeScript errors for a specific .ts / .tsx / .js / .jsx file.
-    - Args: file_path (str), limit (int), offset (int), max_message_chars (int)
+    - Args: file_path (str), project (optional str), limit (int), offset (int), max_message_chars (int)
 
-5.  get_error_summary
+9.  get_error_summary
     - Returns error counts per project and top 5 most common error codes (e.g. TS2322).
+    - Optional filter: project (str)
 
-6.  list_watched_projects
-    - Lists all active tsconfig.json files and current watcher statuses.
+10. list_watched_projects
+    - Granular list of all individual tsconfig.json files and current watcher statuses.
 
-7.  watch_project
-    - Dynamically verifies 'tsc', scans for tsconfig.json, and starts background
-      watchers for a target project directory without restarting the server.
+11. watch_project
+    - Dynamically verifies 'tsc', scans for tsconfig.json, registers project, and starts
+      background watchers without restarting the server.
     - Args: project_path (str)
 
-8.  restart_tsc_watcher
-    - Restarts all watchers and flushes diagnostics.
+12. restart_tsc_watcher
+    - Restarts all watchers across registered projects and flushes diagnostics.
 
 --------------------------------------------------------------------------------
-Environment Variables:
+Dynamic Multi-Project Configuration:
 --------------------------------------------------------------------------------
-* TSC_WATCH_DIR: Base directory to scan and watch for tsconfig.json files.
-  - If NOT set: Server stays in standby mode until 'watch_project' is called.
-  - Safety guard: Refuses to watch C:\\Users\\<user>, AppData, or root drive.
+* Registered projects are stored in ~/.mcp-win-stdio/tsc_projects.json (like ssh and git).
+* No mandatory environment variables needed!
+* Use 'add_project' to add folders and 'use_project' to switch active context.
+* Backward compatibility: TSC_WATCH_DIR is still supported as a fallback if present.
 
 --------------------------------------------------------------------------------
 Example Prompts for Claude:

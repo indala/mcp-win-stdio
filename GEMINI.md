@@ -4,6 +4,7 @@ This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite.
 
 ## 🛠️ Active Tools & Recommended Selection
 
+* **Unified On-Demand Gateway:** Use `mws` MCP (`list_servers`, `search_tools`, `call_tool`) to route and execute tools on-demand with zero context bloat.
 * **Spreadsheets & Excel:** Use `excel` MCP (`preview_sheet`, `update_cells`, `profile_sheet`).
 * **Word Documents:** Use `word` MCP for typography, layout, and document generation.
 * **Code Navigation:** Use `explorer` MCP (`get_directory_tree`, `fuzzy_find`, `grep_search`).

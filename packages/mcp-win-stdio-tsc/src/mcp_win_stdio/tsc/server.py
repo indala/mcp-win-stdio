@@ -6,6 +6,7 @@ diagnostic cache for instantaneous (0ms latency) TypeScript error inspection.
 """
 
 import atexit
+import json
 import ntpath
 import os
 import re
@@ -22,7 +23,21 @@ try:
 except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
+try:
+    from mcp_win_stdio.core.config import USER_DIR, ensure_workspace_dirs
+except Exception:
+    USER_DIR = Path.home() / ".mcp-win-stdio"
+
+    def ensure_workspace_dirs() -> Dict[str, Path]:
+        USER_DIR.mkdir(parents=True, exist_ok=True)
+        return {"root": USER_DIR}
+
 mcp = FastMCP("tsc-mcp")
+
+# Persistent TypeScript projects configuration
+TSC_CONFIG_DIR = USER_DIR
+TSC_PROJECTS_FILE = TSC_CONFIG_DIR / "tsc_projects.json"
+_ACTIVE_PROJECT: Optional[str] = None
 
 # Global in-memory cache and watcher state
 # tsconfig_path -> { "process": Popen, "thread": Thread, "project_dir": str, "errors": list, "pending_errors": list, "status": str, "last_updated": str }
@@ -99,17 +114,151 @@ def is_home_or_root_dir(p: Union[str, os.PathLike]) -> bool:
     return False
 
 
+def _load_tsc_projects() -> Dict[str, Any]:
+    """Load persistent TypeScript projects configuration from ~/.mcp-win-stdio/tsc_projects.json."""
+    ensure_workspace_dirs()
+    if not TSC_PROJECTS_FILE.exists():
+        return {"active_project": None, "projects": {}}
+    try:
+        with open(TSC_PROJECTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {"active_project": None, "projects": {}}
+            if "projects" not in data or not isinstance(data["projects"], dict):
+                data["projects"] = {}
+            return data
+    except Exception:
+        return {"active_project": None, "projects": {}}
+
+
+def _save_tsc_projects(data: Dict[str, Any]) -> None:
+    """Save persistent TypeScript projects configuration to ~/.mcp-win-stdio/tsc_projects.json."""
+    ensure_workspace_dirs()
+    try:
+        with open(TSC_PROJECTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def get_active_project_name() -> Optional[str]:
+    """Get the currently active sticky project alias or name."""
+    global _ACTIVE_PROJECT
+    if _ACTIVE_PROJECT:
+        return _ACTIVE_PROJECT
+    saved = _load_tsc_projects()
+    active = saved.get("active_project")
+    if active:
+        _ACTIVE_PROJECT = active
+        return active
+    return None
+
+
+def set_active_project_name(name: Optional[str]) -> None:
+    """Set the active sticky project alias and persist it."""
+    global _ACTIVE_PROJECT
+    _ACTIVE_PROJECT = name
+    saved = _load_tsc_projects()
+    saved["active_project"] = name
+    _save_tsc_projects(saved)
+
+
+def resolve_project_info(target: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Resolve project information by alias name, directory path, or active project context.
+    Returns dict with keys: 'alias', 'path', 'auto_watch', 'description', etc., or None.
+    """
+    saved = _load_tsc_projects()
+    projects = saved.get("projects", {})
+
+    if target:
+        clean = str(target).strip()
+        # 1. Match alias case-insensitively
+        for alias, info in projects.items():
+            if alias.lower() == clean.lower():
+                return info
+
+        # 2. Match registered path
+        norm_target = normalize_path(clean).lower()
+        for alias, info in projects.items():
+            if normalize_path(info.get("path", "")).lower() == norm_target:
+                return info
+
+        # 3. Direct directory path containing tsconfig.json
+        if os.path.isdir(clean):
+            abs_p = normalize_path(os.path.abspath(clean))
+            return {
+                "alias": Path(abs_p).name or "project",
+                "path": abs_p,
+                "auto_watch": True,
+                "description": "Ad-hoc project path",
+            }
+        return None
+
+    # No target passed -> resolve from active context
+    active_name = get_active_project_name()
+    if active_name and active_name in projects:
+        return projects[active_name]
+
+    # Environment variable fallback
+    env_dir = os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT")
+    if env_dir and os.path.isdir(env_dir) and not is_home_or_root_dir(env_dir):
+        abs_env = normalize_path(os.path.abspath(env_dir))
+        return {
+            "alias": Path(abs_env).name or "env-project",
+            "path": abs_env,
+            "auto_watch": True,
+            "description": "Environment variable project",
+        }
+
+    return None
+
+
+def stop_watching_project(target_dir_or_config: str) -> List[str]:
+    """Terminate and unregister background watchers for a given project directory or tsconfig path."""
+    norm_target = normalize_path(target_dir_or_config).lower()
+    stopped = []
+    with CACHE_LOCK:
+        for cfg_path, data in list(WATCHED_PROJECTS.items()):
+            p_dir = data.get("project_dir", "").lower()
+            c_path = cfg_path.lower()
+            if (
+                c_path == norm_target
+                or p_dir == norm_target
+                or p_dir.startswith(norm_target + "/")
+                or norm_target.startswith(p_dir + "/")
+            ):
+                proc = data.get("process")
+                if proc:
+                    try:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=1.0)
+                        except Exception:
+                            proc.kill()
+                    except Exception:
+                        pass
+                stopped.append(cfg_path)
+                WATCHED_PROJECTS.pop(cfg_path, None)
+    return stopped
+
+
 def get_default_watch_dir() -> Optional[str]:
     """
-    Get project directory from user environment variable (TSC_WATCH_DIR or PROJECT_ROOT) or stored config.
+    Get active project directory from dynamic ~/.mcp-win-stdio/tsc_projects.json or fallback.
     Returns None if not configured or if configured to a system/home/AppData directory.
     NOTE: Does NOT default to cwd or admin home to avoid unintended scans.
     """
-    env_dir = os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT")
-    if env_dir:
-        abs_env = os.path.abspath(env_dir)
-        if os.path.isdir(abs_env) and not is_home_or_root_dir(abs_env):
-            return abs_env
+    try:
+        active_name = get_active_project_name()
+        if active_name:
+            proj = resolve_project_info(active_name)
+            if proj and proj.get("path"):
+                p_path = proj["path"]
+                if os.path.isdir(p_path) and not is_home_or_root_dir(p_path):
+                    return p_path
+    except Exception:
+        pass
 
     # Check ~/.mcp-win-stdio/config.json
     try:
@@ -121,6 +270,27 @@ def get_default_watch_dir() -> Optional[str]:
             abs_stored = os.path.abspath(stored_dir)
             if os.path.isdir(abs_stored) and not is_home_or_root_dir(abs_stored):
                 return abs_stored
+    except Exception:
+        pass
+
+    # Legacy environment variable fallback only if dynamic config is empty
+    env_dir = (
+        os.environ.get("TSC_WATCH_DIR")
+        or os.environ.get("PROJECT_ROOT")
+        or os.environ.get("WORKSPACE_ROOT")
+        or os.environ.get("WORKSPACE_FOLDER")
+    )
+    if env_dir:
+        abs_env = os.path.abspath(env_dir)
+        if os.path.isdir(abs_env) and not is_home_or_root_dir(abs_env):
+            return abs_env
+
+    # Auto-detect IDE workspace from current process directory if it contains tsconfigs
+    try:
+        cwd = os.getcwd()
+        if os.path.isdir(cwd) and not is_home_or_root_dir(cwd):
+            if find_tsconfigs(cwd):
+                return os.path.abspath(cwd)
     except Exception:
         pass
 
@@ -190,7 +360,18 @@ def check_tsc_available(project_dir: Optional[str] = None) -> Dict[str, Any]:
 
 
 def normalize_path(p: str) -> str:
-    return os.path.abspath(p).replace("\\", "/")
+    """Normalize absolute filesystem path with forward slashes without mangling drive letters."""
+    if not p:
+        return ""
+    p_str = str(p).strip()
+    return os.path.abspath(p_str).replace("\\", "/")
+
+
+def normalize_relpath(p: str) -> str:
+    """Normalize relative path with forward slashes without expanding to cwd."""
+    if not p:
+        return ""
+    return str(p).strip().replace("\\", "/")
 
 
 def find_tsconfigs(base_dir: str, max_depth: int = 4) -> List[str]:
@@ -293,7 +474,7 @@ def parse_tsc_line(line: str, project_dir: str, root_dir: str) -> Optional[Dict[
 
     return {
         "file": normalize_path(abs_path),
-        "relative_path": normalize_path(rel_path),
+        "relative_path": normalize_relpath(rel_path),
         "line": int(line_num),
         "column": int(col_num),
         "severity": severity.lower(),
@@ -436,6 +617,11 @@ def start_watching_project(target_dir: str, cmd_base: Optional[List[str]] = None
 
     for cfg in configs:
         norm_cfg = normalize_path(cfg)
+        try:
+            rel_cfg = os.path.relpath(cfg, abs_root)
+        except Exception:
+            rel_cfg = os.path.basename(cfg)
+
         with CACHE_LOCK:
             if norm_cfg in WATCHED_PROJECTS and WATCHED_PROJECTS[norm_cfg].get("process"):
                 # Already watching
@@ -444,7 +630,7 @@ def start_watching_project(target_dir: str, cmd_base: Optional[List[str]] = None
             WATCHED_PROJECTS[norm_cfg] = {
                 "project_dir": normalize_path(os.path.dirname(cfg)),
                 "tsconfig_path": norm_cfg,
-                "relative_config": normalize_path(os.path.relpath(cfg, abs_root)),
+                "relative_config": normalize_relpath(rel_cfg),
                 "errors": [],
                 "status": "compiling",
                 "last_updated": datetime.now(timezone.utc).isoformat(),
@@ -475,15 +661,63 @@ def _cleanup_watchers():
 
 atexit.register(_cleanup_watchers)
 
-# Startup initialization:
-# ONLY start watching if user explicitly configured TSC_WATCH_DIR, PROJECT_ROOT, or stored config.
-# If not configured, the watcher starts in standby mode (waiting for user/Claude to call watch_project).
-# This avoids any scanning of C:\Users\admin or AppData when spawned by Claude.
-_initial_root = get_default_watch_dir()
-if _initial_root and os.path.isdir(_initial_root) and not is_home_or_root_dir(_initial_root):
-    _tsc_status = check_tsc_available(_initial_root)
-    if _tsc_status["available"]:
-        start_watching_project(_initial_root, cmd_base=_tsc_status["command"])
+def _initialize_projects_on_startup() -> None:
+    """Initialize watchers from dynamic config and environment fallbacks."""
+    try:
+        saved = _load_tsc_projects()
+        active = saved.get("active_project")
+        projects = saved.get("projects", {})
+
+        # 1. Fallback / migration: if TSC_WATCH_DIR or PROJECT_ROOT is set and not yet registered
+        env_dir = os.environ.get("TSC_WATCH_DIR") or os.environ.get("PROJECT_ROOT")
+        if env_dir:
+            abs_env = os.path.abspath(env_dir)
+            if os.path.isdir(abs_env) and not is_home_or_root_dir(abs_env):
+                norm_env = normalize_path(abs_env)
+                if not any(normalize_path(p.get("path", "")).lower() == norm_env.lower() for p in projects.values()):
+                    alias = Path(abs_env).name or "workspace"
+                    unique_alias = alias
+                    idx = 1
+                    while unique_alias in projects:
+                        unique_alias = f"{alias}-{idx}"
+                        idx += 1
+                    projects[unique_alias] = {
+                        "path": norm_env,
+                        "alias": unique_alias,
+                        "auto_watch": True,
+                        "description": "Configured via environment variable",
+                        "registered_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if not active:
+                        active = unique_alias
+                    saved["projects"] = projects
+                    saved["active_project"] = active
+                    _save_tsc_projects(saved)
+
+        if active and active in projects:
+            set_active_project_name(active)
+
+        # 2. Auto-watch registered projects
+        for alias, pinfo in projects.items():
+            if pinfo.get("auto_watch", True):
+                p_path = pinfo.get("path")
+                if p_path and os.path.isdir(p_path) and not is_home_or_root_dir(p_path):
+                    tsc_check = check_tsc_available(p_path)
+                    if tsc_check.get("available"):
+                        start_watching_project(p_path, cmd_base=tsc_check.get("command"))
+
+        # 3. Check ~/.mcp-win-stdio/config.json fallback
+        if not projects:
+            init_root = get_default_watch_dir()
+            if init_root and os.path.isdir(init_root) and not is_home_or_root_dir(init_root):
+                tsc_check = check_tsc_available(init_root)
+                if tsc_check.get("available"):
+                    start_watching_project(init_root, cmd_base=tsc_check.get("command"))
+    except Exception:
+        pass
+
+
+_initialize_projects_on_startup()
 
 
 def _format_tsc_error(err: Dict[str, Any], max_msg_chars: int = 300) -> Dict[str, Any]:
@@ -507,9 +741,341 @@ def _format_tsc_error(err: Dict[str, Any], max_msg_chars: int = 300) -> Dict[str
     return formatted
 
 
-# ==========================================
-# MCP TOOLS
-# ==========================================
+# ==============================================================================
+# 1. Project & Workspace Management Tools (Dynamic Config)
+# ==============================================================================
+
+
+@mcp.tool()
+def list_projects() -> Dict[str, Any]:
+    """
+    List all configured TypeScript projects (from ~/.mcp-win-stdio/tsc_projects.json and active watchers),
+    indicating the active sticky project, watcher status, error count, compiler, and tsconfig paths.
+    """
+    saved = _load_tsc_projects()
+    active_name = get_active_project_name()
+    projects_dict = saved.get("projects", {})
+
+    results = []
+    with CACHE_LOCK:
+        for alias, info in projects_dict.items():
+            p_path = info.get("path", "")
+            norm_p = normalize_path(p_path).lower() if p_path else ""
+
+            matched_cfgs = []
+            proj_errors = 0
+            status = "stopped"
+            last_updated = None
+
+            for cfg_path, data in WATCHED_PROJECTS.items():
+                d_proj = data.get("project_dir", "").lower()
+                if d_proj == norm_p or d_proj.startswith(norm_p + "/") or norm_p.startswith(d_proj + "/"):
+                    matched_cfgs.append(data.get("relative_config", cfg_path))
+                    proj_errors += len(data.get("errors", []))
+                    c_status = data.get("status", "unknown")
+                    if c_status == "compiling":
+                        status = "compiling"
+                    elif c_status == "ready" and status != "compiling":
+                        status = "ready"
+                    elif c_status.startswith("error") and status not in ("compiling", "ready"):
+                        status = c_status
+                    last_updated = data.get("last_updated") or last_updated
+
+            if not matched_cfgs and info.get("auto_watch", True):
+                status = "standby"
+
+            tsc_check = check_tsc_available(p_path) if p_path and os.path.exists(p_path) else {"type": "not_checked"}
+
+            results.append(
+                {
+                    "alias": alias,
+                    "path": p_path,
+                    "isActive": alias == active_name,
+                    "autoWatch": info.get("auto_watch", True),
+                    "description": info.get("description"),
+                    "status": status,
+                    "tsconfigCount": len(matched_cfgs),
+                    "tsconfigs": matched_cfgs,
+                    "errorCount": proj_errors,
+                    "compiler": tsc_check.get("type", "unknown"),
+                    "lastUpdated": last_updated,
+                }
+            )
+
+        # Ad-hoc watched projects not yet registered
+        for cfg_path, data in WATCHED_PROJECTS.items():
+            d_proj = data.get("project_dir", "")
+            norm_d = normalize_path(d_proj).lower()
+            already_covered = any(normalize_path(p.get("path", "")).lower() == norm_d for p in projects_dict.values())
+            if not already_covered:
+                alias = Path(d_proj).name or "adhoc"
+                results.append(
+                    {
+                        "alias": f"{alias} (unregistered)",
+                        "path": d_proj,
+                        "isActive": False,
+                        "autoWatch": False,
+                        "description": "Ad-hoc watched project",
+                        "status": data.get("status", "unknown"),
+                        "tsconfigCount": 1,
+                        "tsconfigs": [data.get("relative_config", cfg_path)],
+                        "errorCount": len(data.get("errors", [])),
+                        "compiler": "active",
+                        "lastUpdated": data.get("last_updated"),
+                    }
+                )
+
+    if not results:
+        return {
+            "activeProject": active_name,
+            "totalProjects": 0,
+            "projects": [],
+            "status": "standby",
+            "message": "No TypeScript projects are currently registered. Call add_project(project_path, alias='...') to register and monitor a project.",
+        }
+
+    return {
+        "activeProject": active_name,
+        "totalProjects": len(results),
+        "status": "standby" if not results else "active",
+        "projects": results,
+    }
+
+
+@mcp.tool()
+def use_project(project: str) -> Dict[str, Any]:
+    """
+    Switch the active default TypeScript project context. All subsequent diagnostic queries
+    (get_tsc_errors, get_file_errors, get_error_summary) will target this project automatically
+    when project is not specified.
+
+    Args:
+        project: Project alias name (e.g. 'frontend', 'web') or filesystem directory path to switch to.
+    """
+    clean_target = project.strip()
+    saved = _load_tsc_projects()
+    projects = saved.get("projects", {})
+
+    matched_alias = None
+    for alias in projects:
+        if alias.lower() == clean_target.lower():
+            matched_alias = alias
+            break
+
+    if not matched_alias:
+        norm_target = normalize_path(clean_target).lower()
+        for alias, info in projects.items():
+            if normalize_path(info.get("path", "")).lower() == norm_target:
+                matched_alias = alias
+                break
+
+    if not matched_alias and os.path.isdir(clean_target):
+        abs_p = os.path.abspath(clean_target)
+        if not is_home_or_root_dir(abs_p):
+            cfgs = find_tsconfigs(abs_p)
+            if cfgs:
+                alias = Path(abs_p).name or "project"
+                idx = 1
+                unique_alias = alias
+                while unique_alias in projects:
+                    unique_alias = f"{alias}-{idx}"
+                    idx += 1
+                matched_alias = unique_alias
+                projects[matched_alias] = {
+                    "path": normalize_path(abs_p),
+                    "alias": matched_alias,
+                    "auto_watch": True,
+                    "description": "Auto-registered on use_project",
+                    "registered_at": datetime.now(timezone.utc).isoformat(),
+                }
+                saved["projects"] = projects
+                tsc_check = check_tsc_available(abs_p)
+                if tsc_check.get("available"):
+                    start_watching_project(abs_p, cmd_base=tsc_check.get("command"))
+
+    if not matched_alias:
+        return {
+            "success": False,
+            "error": f"Project '{project}' not found in registered projects.",
+            "available_projects": list(projects.keys()),
+            "guidance": "Use add_project(project_path, alias='...') to register a new project folder.",
+        }
+
+    set_active_project_name(matched_alias)
+    info = projects[matched_alias]
+    return {
+        "success": True,
+        "message": f"Active TypeScript project switched to '{matched_alias}' ({info.get('path')}).",
+        "activeProject": matched_alias,
+        "path": info.get("path"),
+    }
+
+
+@mcp.tool()
+def add_project(
+    project_path: str,
+    alias: Optional[str] = None,
+    auto_watch: bool = True,
+    description: Optional[str] = None,
+    wait_for_initial_compile: bool = True,
+    timeout_seconds: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Register and persist a new TypeScript project to ~/.mcp-win-stdio/tsc_projects.json.
+    Optionally starts background compiler watchers immediately and waits for initial compilation.
+
+    Args:
+        project_path: Local filesystem directory path to the TypeScript project or tsconfig.json.
+        alias: Friendly alias name for switching (e.g. 'web', 'api', 'admin'). Defaults to directory name.
+        auto_watch: If True, immediately verifies tsc and starts background watching (default True).
+        description: Friendly description or notes for this project.
+        wait_for_initial_compile: If True, waits up to timeout_seconds for initial compilation (default True).
+        timeout_seconds: Maximum seconds to wait for initial compile (default 30.0).
+    """
+    if not os.path.exists(project_path):
+        return {"success": False, "error": f"Path not found: {project_path}"}
+
+    if os.path.isfile(project_path):
+        project_path = os.path.dirname(project_path)
+
+    abs_project = os.path.abspath(project_path)
+
+    if is_home_or_root_dir(abs_project):
+        return {
+            "success": False,
+            "error": f"Refusing to register system, user home, or AppData directory: '{abs_project}'. Please specify a specific project directory.",
+            "guidance": "Provide the path to your project folder (e.g. 'Z:/projects/my-app').",
+        }
+
+    key = alias.strip() if alias else Path(abs_project).name or "project"
+
+    saved = _load_tsc_projects()
+    projects = saved.get("projects", {})
+
+    project_entry = {
+        "path": normalize_path(abs_project),
+        "alias": key,
+        "auto_watch": auto_watch,
+        "description": description.strip() if description else None,
+        "registered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    projects[key] = project_entry
+    saved["projects"] = projects
+
+    if not saved.get("active_project"):
+        saved["active_project"] = key
+        set_active_project_name(key)
+
+    _save_tsc_projects(saved)
+
+    tsc_check = check_tsc_available(abs_project)
+    configs: List[str] = []
+    compilation_completed = True
+    elapsed_s = 0.0
+    total_errors = 0
+
+    if auto_watch:
+        if not tsc_check.get("available"):
+            return {
+                "success": True,
+                "registered": True,
+                "alias": key,
+                "path": normalize_path(abs_project),
+                "watcher_started": False,
+                "warning": tsc_check.get("error"),
+                "guidance": tsc_check.get("guidance"),
+                "message": f"Project '{key}' registered in config, but watcher was not started: {tsc_check.get('error')}",
+            }
+
+        configs = start_watching_project(abs_project, cmd_base=tsc_check.get("command"))
+        if wait_for_initial_compile and configs:
+            start_t = time.time()
+            compilation_completed = wait_for_projects_compilation(configs, timeout=timeout_seconds)
+            elapsed_s = round(time.time() - start_t, 2)
+
+        with CACHE_LOCK:
+            for cfg in configs:
+                norm_cfg = normalize_path(cfg)
+                if norm_cfg in WATCHED_PROJECTS:
+                    total_errors += len(WATCHED_PROJECTS[norm_cfg].get("errors", []))
+
+    return {
+        "success": True,
+        "alias": key,
+        "path": normalize_path(abs_project),
+        "isActive": get_active_project_name() == key,
+        "auto_watch": auto_watch,
+        "found_tsconfigs": configs,
+        "compiler_type": tsc_check.get("type"),
+        "compiler_command": " ".join(tsc_check.get("command", [])) if tsc_check.get("command") else None,
+        "compilation_completed": compilation_completed,
+        "elapsed_seconds": elapsed_s,
+        "total_errors": total_errors,
+        "message": f"Project '{key}' registered successfully ({len(configs)} configuration(s) found, {total_errors} errors).",
+    }
+
+
+@mcp.tool()
+def remove_project(
+    project: str,
+    stop_watcher: bool = True,
+) -> Dict[str, Any]:
+    """
+    Remove a saved TypeScript project configuration from ~/.mcp-win-stdio/tsc_projects.json.
+
+    Args:
+        project: Alias or directory path of the project to remove.
+        stop_watcher: If True, terminates active background compiler processes for this project (default True).
+    """
+    clean_target = project.strip()
+    saved = _load_tsc_projects()
+    projects = saved.get("projects", {})
+
+    target_alias = None
+    if clean_target in projects:
+        target_alias = clean_target
+    else:
+        norm_target = normalize_path(clean_target).lower()
+        for k, pinfo in projects.items():
+            if k.lower() == clean_target.lower() or normalize_path(pinfo.get("path", "")).lower() == norm_target:
+                target_alias = k
+                break
+
+    if not target_alias:
+        return {
+            "success": False,
+            "error": f"Project '{project}' not found in registered projects.",
+            "available_projects": list(projects.keys()),
+        }
+
+    pinfo = projects.pop(target_alias)
+    stopped_configs = []
+    if stop_watcher and pinfo.get("path"):
+        stopped_configs = stop_watching_project(pinfo["path"])
+
+    saved["projects"] = projects
+    active = saved.get("active_project")
+    new_active = active
+    if active == target_alias:
+        new_active = next(iter(projects.keys())) if projects else None
+        saved["active_project"] = new_active
+        set_active_project_name(new_active)
+
+    _save_tsc_projects(saved)
+
+    return {
+        "success": True,
+        "message": f"Project '{target_alias}' removed successfully.",
+        "removedProject": target_alias,
+        "path": pinfo.get("path"),
+        "stopped_configs": stopped_configs,
+        "newActiveProject": new_active,
+    }
+
+
+# ==============================================================================
+# 2. Diagnostic Query & Fix Tools
+# ==============================================================================
 
 
 @mcp.tool()
@@ -521,7 +1087,7 @@ def get_tsc_errors(
     offset: int = 0,
     max_message_chars: int = 300,
     wait_if_compiling: bool = True,
-    wait_timeout: float = 15.0,
+    wait_timeout: float = 45.0,
 ) -> Dict[str, Any]:
     """
     Get active TypeScript compiler errors across watched projects (0ms latency from memory cache).
@@ -538,6 +1104,25 @@ def get_tsc_errors(
         wait_if_compiling: If True, waits up to wait_timeout seconds if projects are currently compiling their initial pass (default True).
         wait_timeout: Maximum seconds to wait if a project is actively compiling (default 15.0).
     """
+    # Resolve effective project target (alias, active project, or path filter)
+    active_alias = get_active_project_name()
+    active_path = None
+    if active_alias:
+        pinfo = resolve_project_info(active_alias)
+        if pinfo and pinfo.get("path"):
+            active_path = pinfo.get("path")
+
+    effective_project_path = project_path
+    if not effective_project_path and not tsconfig_path:
+        if active_path:
+            effective_project_path = active_path
+    elif effective_project_path and effective_project_path.strip().lower() in ("all", "*"):
+        effective_project_path = None
+    elif effective_project_path:
+        pinfo = resolve_project_info(effective_project_path)
+        if pinfo and pinfo.get("path"):
+            effective_project_path = pinfo.get("path")
+
     # 1. If wait_if_compiling is enabled, check if matching projects are compiling and wait on their ready events
     if wait_if_compiling:
         events_to_wait = []
@@ -548,10 +1133,10 @@ def get_tsc_errors(
                     norm_cfg_abs = normalize_path(tsconfig_path).lower()
                     if cfg_path.lower() != norm_cfg_abs and norm_cfg_filter not in cfg_path.lower():
                         continue
-                if project_path:
-                    p_filter = project_path.replace("\\", "/").rstrip("/").lower()
-                    p_abs = normalize_path(project_path).lower()
-                    proj_dir = data["project_dir"].lower()
+                if effective_project_path:
+                    p_filter = effective_project_path.replace("\\", "/").rstrip("/").lower()
+                    p_abs = normalize_path(effective_project_path).lower()
+                    proj_dir = str(data["project_dir"]).replace("\\", "/").rstrip("/").lower()
                     if (
                         p_filter not in proj_dir
                         and p_abs != proj_dir
@@ -578,9 +1163,10 @@ def get_tsc_errors(
                 "returned_errors": 0,
                 "offset": offset,
                 "limit": limit,
+                "active_project": active_alias,
                 "projects": [],
                 "errors": [],
-                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first, or configure TSC_WATCH_DIR.",
+                "warning": "No TypeScript projects are currently being watched. Call 'add_project(project_path)' or 'watch_project(project_path)' with your project directory.",
             }
 
         all_errors = []
@@ -596,10 +1182,10 @@ def get_tsc_errors(
                 if cfg_path.lower() != norm_cfg_abs and norm_cfg_filter not in cfg_path.lower():
                     continue
 
-            if project_path:
-                p_filter = project_path.replace("\\", "/").rstrip("/").lower()
-                p_abs = normalize_path(project_path).lower()
-                proj_dir = data["project_dir"].lower()
+            if effective_project_path:
+                p_filter = effective_project_path.replace("\\", "/").rstrip("/").lower()
+                p_abs = normalize_path(effective_project_path).lower()
+                proj_dir = str(data["project_dir"]).replace("\\", "/").rstrip("/").lower()
                 if (
                     p_filter not in proj_dir
                     and p_abs != proj_dir
@@ -648,6 +1234,7 @@ def get_tsc_errors(
             "returned_errors": len(display_errors),
             "offset": safe_offset,
             "limit": safe_limit,
+            "active_project": active_alias,
             "has_more": has_more,
             "truncated": has_more,
             "error_codes_breakdown": dict(sorted(code_counts.items(), key=lambda x: x[1], reverse=True)[:10]),
@@ -788,14 +1375,31 @@ def suggest_error_fixes(error_code: str, message: Optional[str] = None) -> Dict[
 
 
 @mcp.tool()
-def get_error_category_breakdown() -> Dict[str, Any]:
+def get_error_category_breakdown(
+    project: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     [Advanced Tool] Get an architectural aggregate breakdown of active errors grouped by semantic category
     (Missing Imports, Type Mismatches, Property Errors, Nullability, Syntax) to plan refactors.
+
+    Args:
+        project: Optional project alias or path to filter errors by. Defaults to active project or all.
     """
+    active_alias = get_active_project_name()
+    target_path = None
+    if project:
+        pinfo = resolve_project_info(project)
+        target_path = pinfo.get("path") if pinfo else normalize_path(project).lower()
+
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
-            return {"success": True, "total_errors": 0, "categories": {}, "message": "No active projects watched."}
+            return {
+                "success": True,
+                "total_errors": 0,
+                "categories": {},
+                "active_project": active_alias,
+                "message": "No active projects watched.",
+            }
 
         categories: Dict[str, List[Dict[str, Any]]] = {
             "missing_imports_or_types": [],
@@ -807,7 +1411,18 @@ def get_error_category_breakdown() -> Dict[str, Any]:
         }
 
         total = 0
-        for data in WATCHED_PROJECTS.values():
+        for cfg_path, data in WATCHED_PROJECTS.items():
+            if target_path:
+                norm_target = normalize_path(target_path).lower()
+                p_dir = data.get("project_dir", "").lower()
+                if (
+                    norm_target not in p_dir
+                    and norm_target != p_dir
+                    and not p_dir.startswith(norm_target + "/")
+                    and not norm_target.startswith(p_dir + "/")
+                ):
+                    continue
+
             for e in data.get("errors", []):
                 total += 1
                 c = e.get("code", "")
@@ -842,6 +1457,7 @@ def get_error_category_breakdown() -> Dict[str, Any]:
         return {
             "success": True,
             "total_errors": total,
+            "active_project": active_alias,
             "category_summary": {k: v["count"] for k, v in capped_cats.items()},
             "details": capped_cats,
         }
@@ -850,6 +1466,7 @@ def get_error_category_breakdown() -> Dict[str, Any]:
 @mcp.tool()
 def get_file_errors(
     file_path: str,
+    project: Optional[str] = None,
     limit: int = 30,
     offset: int = 0,
     max_message_chars: int = 300,
@@ -859,10 +1476,17 @@ def get_file_errors(
 
     Args:
         file_path: Relative or absolute path to the TypeScript/JavaScript file.
+        project: Optional project alias or path filter. Defaults to active project context if set.
         limit: Max errors to return in this batch (default 30, max 100).
         offset: Starting offset for pagination (default 0).
         max_message_chars: Maximum character length for individual error messages (default 300).
     """
+    active_alias = get_active_project_name()
+    target_path = None
+    if project:
+        pinfo = resolve_project_info(project)
+        target_path = pinfo.get("path") if pinfo else normalize_path(project).lower()
+
     with CACHE_LOCK:
         if not WATCHED_PROJECTS:
             return {
@@ -871,9 +1495,10 @@ def get_file_errors(
                 "returned_errors": 0,
                 "offset": offset,
                 "limit": limit,
+                "active_project": active_alias,
                 "has_errors": False,
                 "errors": [],
-                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first.",
+                "warning": "No TypeScript projects are currently being watched. Call 'add_project(project_path)' or 'watch_project(project_path)' with your project directory first.",
             }
 
         norm_file = normalize_path(file_path).lower()
@@ -881,6 +1506,17 @@ def get_file_errors(
         file_errors = []
 
         for cfg_path, data in WATCHED_PROJECTS.items():
+            if target_path:
+                norm_target = normalize_path(target_path).lower()
+                p_dir = data.get("project_dir", "").lower()
+                if (
+                    norm_target not in p_dir
+                    and norm_target != p_dir
+                    and not p_dir.startswith(norm_target + "/")
+                    and not norm_target.startswith(p_dir + "/")
+                ):
+                    continue
+
             for err in data.get("errors", []):
                 err_file = err.get("file", "").lower()
                 err_rel = err.get("relative_path", "").lower()
@@ -905,6 +1541,7 @@ def get_file_errors(
         "returned_errors": len(display_errs),
         "offset": safe_offset,
         "limit": safe_limit,
+        "active_project": active_alias,
         "has_errors": total_file_errs > 0,
         "has_more": has_more,
         "truncated": has_more,
@@ -923,21 +1560,39 @@ def get_file_errors(
 
 @mcp.tool()
 def get_error_summary(
+    project: Optional[str] = None,
     wait_if_compiling: bool = True,
-    wait_timeout: float = 15.0,
+    wait_timeout: float = 45.0,
 ) -> Dict[str, Any]:
     """
-    Get high-level summary of TypeScript errors across all projects without full diagnostic lists.
+    Get high-level summary of TypeScript errors across projects without full diagnostic lists.
     Synchronizes with background compiler passes to avoid returning inaccurate 0-error states while compiling.
 
     Args:
+        project: Optional project alias or path to filter summary. Defaults to all or active project.
         wait_if_compiling: If True, waits up to wait_timeout seconds if projects are currently compiling their initial pass (default True).
         wait_timeout: Maximum seconds to wait if a project is actively compiling (default 15.0).
     """
+    active_alias = get_active_project_name()
+    target_path = None
+    if project:
+        pinfo = resolve_project_info(project)
+        target_path = pinfo.get("path") if pinfo else normalize_path(project).lower()
+
     if wait_if_compiling:
         events_to_wait = []
         with CACHE_LOCK:
             for data in WATCHED_PROJECTS.values():
+                if target_path:
+                    norm_target = normalize_path(target_path).lower()
+                    p_dir = data.get("project_dir", "").lower()
+                    if (
+                        norm_target not in p_dir
+                        and norm_target != p_dir
+                        and not p_dir.startswith(norm_target + "/")
+                        and not norm_target.startswith(p_dir + "/")
+                    ):
+                        continue
                 if data.get("status") == "compiling":
                     ev = data.get("ready_event")
                     if ev and not ev.is_set():
@@ -955,7 +1610,8 @@ def get_error_summary(
                 "total_errors": 0,
                 "projects_count": 0,
                 "projects": {},
-                "warning": "No TypeScript projects are currently being watched. Call 'watch_project(project_path)' with your project directory first, or configure TSC_WATCH_DIR.",
+                "active_project": active_alias,
+                "warning": "No TypeScript projects are currently being watched. Call 'add_project(project_path)' or 'watch_project(project_path)' with your project directory first.",
             }
 
         summary = {}
@@ -964,6 +1620,17 @@ def get_error_summary(
         compiling_count = 0
 
         for cfg_path, data in WATCHED_PROJECTS.items():
+            if target_path:
+                norm_target = normalize_path(target_path).lower()
+                p_dir = data.get("project_dir", "").lower()
+                if (
+                    norm_target not in p_dir
+                    and norm_target != p_dir
+                    and not p_dir.startswith(norm_target + "/")
+                    and not norm_target.startswith(p_dir + "/")
+                ):
+                    continue
+
             errs = data.get("errors", [])
             count = len(errs)
             total += count
@@ -982,7 +1649,8 @@ def get_error_summary(
 
         result: Dict[str, Any] = {
             "total_errors": total,
-            "projects_count": len(WATCHED_PROJECTS),
+            "projects_count": len(summary),
+            "active_project": active_alias,
             "projects": summary,
             "most_common_error_codes": sorted(error_by_code.items(), key=lambda x: x[1], reverse=True)[:5],
         }
@@ -993,11 +1661,17 @@ def get_error_summary(
         return result
 
 
+# ==============================================================================
+# 3. Watcher Management & Backward Compatibility Tools
+# ==============================================================================
+
+
 @mcp.tool()
 def list_watched_projects() -> Dict[str, Any]:
     """
     List all active TypeScript projects and tsconfig.json files currently being monitored.
     """
+    active_alias = get_active_project_name()
     with CACHE_LOCK:
         projects = []
         for cfg_path, data in WATCHED_PROJECTS.items():
@@ -1015,16 +1689,18 @@ def list_watched_projects() -> Dict[str, Any]:
 
         if not projects:
             return {
+                "active_project": active_alias,
                 "watched_projects_count": 0,
                 "projects": [],
                 "status": "standby",
                 "message": (
                     "Watcher is currently in standby mode (no projects being monitored). "
-                    "Define TSC_WATCH_DIR in your MCP environment or call watch_project(project_path) to start monitoring."
+                    "Call add_project(project_path, alias='...') or watch_project(project_path) to start monitoring."
                 ),
             }
 
         return {
+            "active_project": active_alias,
             "watched_projects_count": len(projects),
             "projects": projects,
         }
@@ -1038,91 +1714,20 @@ def watch_project(
 ) -> Dict[str, Any]:
     """
     Dynamically add and watch a new TypeScript project or directory without restarting the MCP server.
-    First verifies TypeScript compiler availability, scans for tsconfig.json files, and waits for the initial compilation pass.
+    First verifies TypeScript compiler availability, scans for tsconfig.json files, registers project
+    to ~/.mcp-win-stdio/tsc_projects.json, and waits for the initial compilation pass.
 
     Args:
         project_path: Path to project directory or tsconfig.json.
         wait_for_initial_compile: If True, waits up to timeout_seconds for initial compilation to complete before returning (default True).
         timeout_seconds: Maximum seconds to wait for initial compilation (default 30.0).
     """
-    if not os.path.exists(project_path):
-        return {"success": False, "error": f"Path not found: {project_path}"}
-
-    # If user or LLM passed a file path, resolve to its containing directory
-    if os.path.isfile(project_path):
-        project_path = os.path.dirname(project_path)
-
-    abs_project = os.path.abspath(project_path)
-
-    # 1. Safety check: prevent crawling user home, root drive, or AppData
-    if is_home_or_root_dir(abs_project):
-        return {
-            "success": False,
-            "error": f"Refusing to watch system, user home, or AppData directory: '{abs_project}'. Please specify a specific project directory.",
-            "guidance": "Provide the path to your project folder (e.g. 'C:/Users/admin/projects/my-app').",
-        }
-
-    # 2. Check for tsc FIRST before scanning files
-    tsc_check = check_tsc_available(abs_project)
-    if not tsc_check["available"]:
-        return {
-            "success": False,
-            "error": tsc_check["error"],
-            "guidance": tsc_check["guidance"],
-            "project_path": normalize_path(abs_project),
-        }
-
-    # 3. Scan for tsconfig.json and start watchers
-    configs = start_watching_project(abs_project, cmd_base=tsc_check["command"])
-    if not configs:
-        return {
-            "success": False,
-            "project_path": normalize_path(abs_project),
-            "found_tsconfigs": [],
-            "error": f"No tsconfig.json found in '{abs_project}' (searched up to 4 directories deep). Make sure this directory contains a TypeScript project.",
-        }
-
-    start_t = time.time()
-    compilation_completed = True
-    if wait_for_initial_compile:
-        compilation_completed = wait_for_projects_compilation(configs, timeout=timeout_seconds)
-
-    elapsed_s = round(time.time() - start_t, 2)
-
-    total_errors = 0
-    project_details = []
-    with CACHE_LOCK:
-        for cfg in configs:
-            norm_cfg = normalize_path(cfg)
-            if norm_cfg in WATCHED_PROJECTS:
-                p_data = WATCHED_PROJECTS[norm_cfg]
-                err_cnt = len(p_data.get("errors", []))
-                total_errors += err_cnt
-                project_details.append(
-                    {
-                        "tsconfig": p_data.get("relative_config", cfg),
-                        "status": p_data.get("status"),
-                        "error_count": err_cnt,
-                        "compile_duration_s": p_data.get("compile_duration_s"),
-                    }
-                )
-
-    return {
-        "success": True,
-        "project_path": normalize_path(abs_project),
-        "found_tsconfigs": configs,
-        "compiler_type": tsc_check.get("type"),
-        "compiler_command": " ".join(tsc_check.get("command", [])),
-        "compilation_completed": compilation_completed,
-        "elapsed_seconds": elapsed_s,
-        "total_errors": total_errors,
-        "projects": project_details,
-        "message": (
-            f"Verified 'tsc' ({tsc_check.get('type')}) and compiled {len(configs)} configuration(s) in {elapsed_s}s ({total_errors} errors found)."
-            if compilation_completed
-            else f"Started background watchers for {len(configs)} configuration(s). Compilation continuing in background."
-        ),
-    }
+    return add_project(
+        project_path=project_path,
+        auto_watch=True,
+        wait_for_initial_compile=wait_for_initial_compile,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 @mcp.tool()
@@ -1132,8 +1737,8 @@ def restart_tsc_watcher(
 ) -> Dict[str, Any]:
     """
     Restart all active background TypeScript watchers and recompile all projects.
-    Remembers and preserves all currently watched projects, and waits for compilation passes to finish (by default)
-    to guarantee accurate diagnostic results.
+    Preserves all currently watched projects and registered projects in ~/.mcp-win-stdio/tsc_projects.json,
+    waiting for compilation passes to finish (by default) to guarantee accurate diagnostic results.
 
     Args:
         wait_for_initial_compile: If True, waits up to timeout_seconds for all projects to complete compilation before returning (default True).
@@ -1147,11 +1752,19 @@ def restart_tsc_watcher(
             if p and os.path.isdir(p):
                 watched_dirs.add(p)
 
+    # Also load all registered auto_watch projects from tsc_projects.json
+    saved = _load_tsc_projects()
+    for alias, pinfo in saved.get("projects", {}).items():
+        if pinfo.get("auto_watch", True) and pinfo.get("path"):
+            p = pinfo["path"]
+            if os.path.isdir(p) and not is_home_or_root_dir(p):
+                watched_dirs.add(p)
+
     _cleanup_watchers()
     with CACHE_LOCK:
         WATCHED_PROJECTS.clear()
 
-    # If no projects were actively watched, check default watch dir
+    # If no projects were actively watched, check default watch dir fallback
     if not watched_dirs:
         default_root = get_default_watch_dir()
         if default_root and os.path.isdir(default_root):
@@ -1161,7 +1774,7 @@ def restart_tsc_watcher(
         return {
             "success": True,
             "restarted_configs": [],
-            "message": "Flushed watcher cache. Watcher is in standby mode. Set TSC_WATCH_DIR or call watch_project(project_path) to start monitoring a project.",
+            "message": "Flushed watcher cache. Watcher is in standby mode. Call add_project(project_path) or watch_project(project_path) to start monitoring a project.",
         }
 
     # 2. Re-start watching across all project roots
@@ -1197,7 +1810,8 @@ def restart_tsc_watcher(
                 total_errors += err_cnt
                 project_summaries.append(
                     {
-                        "tsconfig": p_data.get("relative_config", cfg),
+                        "tsconfig": p_data.get("tsconfig_path", cfg),
+                        "relative_config": p_data.get("relative_config"),
                         "project_dir": p_data.get("project_dir"),
                         "status": p_data.get("status"),
                         "error_count": err_cnt,

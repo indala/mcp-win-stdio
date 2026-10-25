@@ -7,6 +7,7 @@ Part of mcp-win-stdio.
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -22,7 +23,7 @@ except (ImportError, ModuleNotFoundError):
 
 from mcp_win_stdio.rag.crawler import AsyncPlaywrightCrawler, get_domain_hash
 from mcp_win_stdio.rag.ingest import parse_github_url, scan_local_codebase, stream_github_repo_in_memory
-from mcp_win_stdio.rag.store import COMMON_STOPWORDS, RAGVectorStore, _stem_token
+from mcp_win_stdio.rag.store import COMMON_STOPWORDS, RAGVectorStore
 
 mcp = FastMCP("rag-mcp")
 
@@ -59,6 +60,39 @@ def _get_all_stores() -> List[Tuple[str, RAGVectorStore]]:
             if db_file.exists():
                 stores.append((d.name, RAGVectorStore(db_file)))
     return stores
+
+
+def _get_collection_stores(collection: str) -> List[Tuple[str, RAGVectorStore]]:
+    """Resolve a collection alias or source URL to its indexed stores."""
+    db_path = _get_collection_dir(collection) / "vector_store.db"
+    if db_path.exists():
+        return [(db_path.parent.name, RAGVectorStore(db_path))]
+
+    target = collection.casefold()
+    matches = []
+    for name, store in _get_all_stores():
+        metadata = store.get_metadata()
+        identifiers = (name, metadata.get("collection_name"), metadata.get("source_uri"), metadata.get("target_url"))
+        if any(isinstance(value, str) and value.casefold() == target for value in identifiers):
+            matches.append((name, store))
+    return matches
+
+
+def _find_chunk_contexts(
+    chunk_id: int, target_url_or_collection: Optional[str]
+) -> List[Tuple[str, RAGVectorStore, dict]]:
+    """Find a chunk in requested collections and retain its collection identity."""
+    if target_url_or_collection and target_url_or_collection.lower() not in ("all", "*", ""):
+        stores = _get_collection_stores(target_url_or_collection)
+    else:
+        stores = _get_all_stores()
+
+    matches = []
+    for name, store in stores:
+        context = store.get_chunk_context(chunk_id, window=0)
+        if context:
+            matches.append((name, store, context))
+    return matches
 
 
 # =============================================================================
@@ -442,20 +476,17 @@ def query_knowledge_base(
         )
 
     raw_words = [w.lower() for w in re.findall(r"[a-zA-Z0-9_]+", query)]
-    sig_terms = [w for w in raw_words if len(w) > 2 and w not in COMMON_STOPWORDS]
-
+    sig_terms = list(dict.fromkeys(w for w in raw_words if len(w) > 2 and w not in COMMON_STOPWORDS))
     top3_candidates = all_results[: min(3, len(all_results))]
-    top3_content = " ".join(f"{r.get('section', '')} {r.get('snippet', '')}" for r in top3_candidates).lower()
-
     if sig_terms:
-        global_matched = []
-        global_missing = []
-        for t in sig_terms:
-            st = _stem_token(t)
-            if (t in top3_content) or (st in top3_content):
-                global_matched.append(t)
-            else:
-                global_missing.append(t)
+        global_matched = list(
+            dict.fromkeys(
+                term
+                for candidate in top3_candidates
+                for term in candidate.get("query_coverage", {}).get("matched", [])
+            )
+        )
+        global_missing = [term for term in sig_terms if term not in global_matched]
         global_coverage = len(global_matched) / len(sig_terms)
     else:
         global_matched = []
@@ -466,6 +497,26 @@ def query_knowledge_base(
     top_score = top_hit.get("similarity_score", 0.0)
     top_cov = top_hit.get("query_coverage", {})
     rank1_coverage = top_cov.get("coverage_ratio", 1.0)
+
+    if sig_terms and global_coverage < 0.25:
+        return json.dumps(
+            {
+                "query": query,
+                "target_collection": target_url_or_collection or "all",
+                "total_results": 0,
+                "confidence": "none",
+                "confidence_score": 0.0,
+                "confidence_note": "No indexed passages matched enough of the query's key terms to return reliable results.",
+                "missing_query_terms": global_missing,
+                "results": [],
+                "suggestions": [
+                    "Try a shorter query using the main concept or exact code symbol.",
+                    "Check that the relevant source is indexed with list_rag_collections().",
+                    "Use filter_path only after confirming the collection contains the expected files.",
+                ],
+            },
+            indent=2,
+        )
 
     # Calibrate confidence using multi-chunk global coverage, rank-1 match, and score
     coverage_factor = (rank1_coverage * 0.35) + (global_coverage * 0.65)
@@ -528,7 +579,7 @@ def query_knowledge_base(
             "token_control": {
                 "compact_mode": True,
                 "max_chars_per_snippet": max_chars_per_snippet,
-                "tip": "Snippets are compact to conserve context tokens. Call get_chunk_context(chunk_id=<id>, window=1) to retrieve the full code block or surrounding context.",
+                "tip": "Snippets are compact to conserve context tokens. Call get_chunk_context with the chunk_id and collection from the selected result to retrieve full context safely.",
             },
         }
         return json.dumps(resp_obj, indent=2)
@@ -558,23 +609,29 @@ def find_related_chunks(chunk_id: int, target_url_or_collection: Optional[str] =
         target_url_or_collection: Optional collection alias to narrow lookup.
         top_k: Maximum number of related chunks to return (default: 5).
     """
-    stores = _get_all_stores()
-    if target_url_or_collection and target_url_or_collection.lower() not in ("all", "*", ""):
-        col_dir = _get_collection_dir(target_url_or_collection)
-        db_path = col_dir / "vector_store.db"
-        if db_path.exists():
-            store = RAGVectorStore(db_path)
-            related = store.find_related(chunk_id, top_k=top_k, collection=target_url_or_collection)
-            return json.dumps({"source_chunk_id": chunk_id, "related_chunks": related}, indent=2)
+    matches = _find_chunk_contexts(chunk_id, target_url_or_collection)
+    if len(matches) > 1:
+        return json.dumps(
+            {
+                "error": f"Chunk ID {chunk_id} exists in multiple collections.",
+                "collections": [context["collection"] or name for name, _, context in matches],
+                "hint": "Pass target_url_or_collection using the collection field from the search result.",
+            },
+            indent=2,
+        )
+    if not matches:
+        return json.dumps({"error": f"Chunk ID {chunk_id} not found in the requested collection(s)."}, indent=2)
 
-    for col_name, store in stores:
-        related = store.find_related(chunk_id, top_k=top_k)
-        if related:
-            return json.dumps(
-                {"source_chunk_id": chunk_id, "collection": col_name, "related_chunks": related}, indent=2
-            )
-
-    return json.dumps({"error": f"Chunk ID {chunk_id} not found to compute related items."}, indent=2)
+    name, store, context = matches[0]
+    related = store.find_related(chunk_id, top_k=top_k, collection=context["collection"] or None)
+    return json.dumps(
+        {
+            "source_chunk_id": chunk_id,
+            "collection": context["collection"] or name,
+            "related_chunks": related,
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -586,27 +643,31 @@ def get_chunk_context(chunk_id: int, target_url_or_collection: Optional[str] = N
 
     Args:
         chunk_id: The ID of the chunk to inspect (from query_knowledge_base results).
-        target_url_or_collection: Optional collection name to narrow down lookup. If omitted, searches across collections.
+        target_url_or_collection: Collection field from the search result. Required when chunk IDs occur in multiple collections.
         window: Number of adjacent chunks before and after to include (default 0 for just the target chunk; e.g. 1 returns previous, current, and next chunks).
     """
-    if target_url_or_collection and target_url_or_collection.lower() not in ("all", "*", ""):
-        col_dir = _get_collection_dir(target_url_or_collection)
-        db_path = col_dir / "vector_store.db"
-        if db_path.exists():
-            store = RAGVectorStore(db_path)
-            res = store.get_chunk_context(chunk_id, window=window)
-            if res:
-                return json.dumps({"status": "success", "chunk": res}, indent=2)
+    matches = _find_chunk_contexts(chunk_id, target_url_or_collection)
+    if len(matches) > 1:
+        return json.dumps(
+            {
+                "error": f"Chunk ID {chunk_id} exists in multiple collections.",
+                "collections": [context["collection"] or name for name, _, context in matches],
+                "hint": "Pass target_url_or_collection using the collection field from the search result.",
+            },
+            indent=2,
+        )
+    if not matches:
+        return json.dumps(
+            {"error": f"Chunk with id {chunk_id} not found in the requested collection(s)."},
+            indent=2,
+        )
 
-    for col_name, store in _get_all_stores():
-        res = store.get_chunk_context(chunk_id, window=window)
-        if res:
-            return json.dumps({"status": "success", "chunk": res}, indent=2)
-
-    return json.dumps(
-        {"error": f"Chunk with id {chunk_id} not found. Ensure the ID matches a chunk_id from query_knowledge_base."},
-        indent=2,
-    )
+    name, store, context = matches[0]
+    chunk = store.get_chunk_context(chunk_id, window=window, collection=context["collection"] or None)
+    if chunk:
+        chunk["collection_name"] = name
+        return json.dumps({"status": "success", "chunk": chunk}, indent=2)
+    return json.dumps({"error": f"Chunk with id {chunk_id} not found in collection '{name}'."}, indent=2)
 
 
 @mcp.tool()
@@ -658,6 +719,9 @@ def list_rag_collections() -> str:
                 "collection_name": col_name,
                 "target_url": meta.get("target_url") or meta.get("source_uri", "N/A"),
                 "is_single_page_doc": meta.get("is_single_page_doc") == "true",
+                "collection_type": meta.get("collection_type"),
+                "is_temp": bool(meta.get("is_temp", 0)),
+                "expires_at": meta.get("expires_at") or None,
                 "total_chunks": meta.get("total_chunks", 0),
                 "total_files_or_pages": meta.get("total_files") or meta.get("total_pages", 0),
                 "total_sections": meta.get("total_sections", 0),
@@ -707,24 +771,37 @@ def prune_rag_cache(max_total_mb: float = 500.0, purge_temp_only: bool = False) 
         max_total_mb: Maximum allowed total cache size in megabytes before LRU purging (default 500.0 MB).
         purge_temp_only: If True, only cleans expired ephemeral collections without touching permanent ones.
     """
+    if not math.isfinite(max_total_mb) or max_total_mb < 0:
+        return json.dumps({"status": "error", "error": "max_total_mb must be a finite, non-negative number."}, indent=2)
+
     stores = _get_all_stores()
     if not stores:
         return json.dumps({"message": "No collections found to prune.", "freed_mb": 0.0}, indent=2)
 
     freed_bytes = 0
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
     stores_info = []
 
     for col_name, store in stores:
-        try:
-            st = store.db_path.stat()
-            size = st.st_size
-            mtime = st.st_mtime
-            stores_info.append(
-                {"name": col_name, "store": store, "dir": store.db_path.parent, "size": size, "mtime": mtime}
-            )
-        except Exception:
-            pass
+        path = store.db_path.parent
+        size = sum(file.stat().st_size for file in path.rglob("*") if file.is_file())
+        metadata = store.get_metadata()
+        expires_at = metadata.get("expires_at")
+        expired = False
+        if metadata.get("is_temp") and expires_at:
+            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            expired = expiry <= now
+        stores_info.append(
+            {
+                "name": col_name,
+                "dir": path,
+                "size": size,
+                "mtime": store.db_path.stat().st_mtime,
+                "expired": expired,
+            }
+        )
 
     # Sort oldest modified first for LRU
     stores_info.sort(key=lambda x: x["mtime"])
@@ -733,25 +810,43 @@ def prune_rag_cache(max_total_mb: float = 500.0, purge_temp_only: bool = False) 
     max_bytes = max_total_mb * 1024 * 1024
 
     deleted_cols = []
+    expired_cols = []
+    errors = []
+
+    for item in stores_info:
+        if not item["expired"]:
+            continue
+        try:
+            shutil.rmtree(item["dir"])
+        except OSError as exc:
+            errors.append(f"{item['name']}: {exc}")
+            continue
+        freed_bytes += item["size"]
+        total_bytes -= item["size"]
+        expired_cols.append(item["name"])
+        deleted_cols.append(item["name"])
 
     if not purge_temp_only and total_bytes > max_bytes:
-        for s in stores_info:
-            if total_bytes <= max_bytes:
-                break
+        for item in stores_info:
+            if item["expired"] or total_bytes <= max_bytes:
+                continue
             try:
-                shutil.rmtree(s["dir"])
-                freed_bytes += s["size"]
-                total_bytes -= s["size"]
-                deleted_cols.append(s["name"])
-            except Exception:
-                pass
+                shutil.rmtree(item["dir"])
+            except OSError as exc:
+                errors.append(f"{item['name']}: {exc}")
+                continue
+            freed_bytes += item["size"]
+            total_bytes -= item["size"]
+            deleted_cols.append(item["name"])
 
     return json.dumps(
         {
-            "status": "success",
+            "status": "partial" if errors else "success",
             "freed_mb": round(freed_bytes / (1024 * 1024), 2),
             "remaining_usage_mb": round(total_bytes / (1024 * 1024), 2),
             "deleted_collections": deleted_cols,
+            "expired_collections_deleted": expired_cols,
+            "errors": errors,
             "message": f"Pruned {len(deleted_cols)} collections, freeing {round(freed_bytes / (1024 * 1024), 2)} MB.",
         },
         indent=2,

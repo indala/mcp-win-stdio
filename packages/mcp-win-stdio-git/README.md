@@ -1,21 +1,21 @@
 # mcp-win-stdio-git
 
-Unified Git & GitHub Model Context Protocol (MCP) server for Windows & Claude Desktop: **33 tools** seamlessly unifying local Git repository management and remote GitHub CLI (`gh`) operations with hybrid synergy workflows.
+Unified Git & GitHub Model Context Protocol (MCP) server for Windows & Claude Desktop: **46 tools** seamlessly unifying local Git repository management and remote GitHub CLI (`gh`) operations with hybrid synergy workflows.
 
 Part of the **`mcp-win-stdio`** Windows-optimized suite.
 
 ---
 
-## 🚀 Features (33 Tools)
+## 🚀 Features (46 Tools)
 
-- **Local Git Suite (20 Tools)**:
+- **Local Git Suite (27 Tools)**:
   - Repository initialization (`git_init`) and bookmark management (`use_repo`, `list_repos`, `add_repo`, `remove_repo`, `rename_alias`).
   - Remotes management (`git_remote`: list, add, set-url, remove, get-url).
   - Safe file restoration (`git_restore`) and guarded destructive reset (`git_reset`).
-  - Branching (`git_branch`), staging & commits with untracked safeguards (`git_commit`), paginated chunked diffs (`git_diff`), commit logs (`git_log`), stashing (`git_stash`), remote sync (`git_sync`), blame (`git_blame`), tags (`git_tag`), cherry-pick (`git_cherry_pick`), clean (`git_clean_untracked`), regex search (`git_grep`), and config (`git_config`).
+  - Branching (`git_branch`), staging & commits with untracked safeguards (`git_commit`), status (`git_status`), paginated chunked diffs (`git_diff`), commit logs (`git_log`), stashing (`git_stash`), remote sync (`git_sync`), blame (`git_blame`), tags (`git_tag`), cherry-pick (`git_cherry_pick`), clean (`git_clean_untracked`), regex search (`git_grep`), and config (`git_config`).
   - Isolated background workspaces via `git_worktree`.
   - In-progress merge and rebase conflict detection & resolution (`git_conflict_resolve`).
-- **Remote GitHub CLI Suite (10 Tools)**:
+- **Remote GitHub CLI Suite (16 Tools)**:
   - Pull requests (`gh_pr_list`, `gh_pr_view`, `gh_pr_diff`, `gh_pr_checkout`, `gh_pr_action`, `gh_pr_checks`, `gh_pr_review_comments`).
   - Releases (`gh_release_list`, `gh_release_create`).
   - Issue tracking (`gh_issue_list`, `gh_issue_view`, `gh_issue_create`, `gh_issue_comment`).

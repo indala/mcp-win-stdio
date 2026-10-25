@@ -685,14 +685,41 @@ def test_db_server_database_confusion():
         # e) switching to metrics_db by database name
         res_metrics = use_database(database="metrics_db")
         assert res_metrics["success"] is True
-        assert res_metrics["activeConnection"] == "analytics_server"
         assert res_metrics["database"] == "metrics_db"
 
-        print("[PASS] DB server vs database confusion & alias resolution tests passed.")
+        # 5. Test edit_connection
+        from mcp_win_stdio.db.server import edit_connection
+        from mcp_win_stdio.excel_db.server import _get_db_config
+
+        # Rename showreel to showreel_renamed and update URL
+        res_edit = edit_connection(
+            name="showreel",
+            new_name="showreel_renamed",
+            new_url="postgresql://postgres:pass@localhost:5432/showreel_renamed",
+            setActive=True,
+        )
+        assert res_edit["success"] is True
+        assert res_edit["name"] == "showreel_renamed"
+        assert res_edit["database"] == "showreel_renamed"
+        assert res_edit["isActive"] is True
+        assert "showreel_renamed" in _RAW_CONFIG
+        assert "showreel" not in _RAW_CONFIG
+
+        # Verify excel-db shares the exact same db_connections config!
+        resolved_by_excel = _get_db_config("showreel_renamed")
+        assert "showreel_renamed" in resolved_by_excel
+
+        # Verify active default in excel-db resolves to showreel_renamed
+        resolved_default = _get_db_config()
+        assert "showreel_renamed" in resolved_default
+
+        print("[PASS] DB server vs database confusion, alias resolution & edit_connection tests passed.")
     finally:
         _RAW_CONFIG.pop("showreel", None)
+        _RAW_CONFIG.pop("showreel_renamed", None)
         _RAW_CONFIG.pop("analytics_server", None)
         _CONNECTION_REGISTRY.pop("showreel", None)
+        _CONNECTION_REGISTRY.pop("showreel_renamed", None)
         _CONNECTION_REGISTRY.pop("analytics_server", None)
         if old_env is None:
             os.environ.pop("CONFIG_FILE", None)
@@ -801,6 +828,136 @@ def test_tsc_filter_improvements():
     finally:
         with CACHE_LOCK:
             WATCHED_PROJECTS.pop("E:/repos/my-app/tsconfig.json", None)
+
+
+def test_tsc_dynamic_project_management(tmp_path):
+    """Test dynamic TypeScript project configuration (list_projects, use_project, add_project, remove_project)."""
+    import json
+    from unittest.mock import patch
+
+    from mcp_win_stdio.tsc.server import (
+        CACHE_LOCK,
+        WATCHED_PROJECTS,
+        add_project,
+        get_active_project_name,
+        get_tsc_errors,
+        list_projects,
+        remove_project,
+        set_active_project_name,
+        use_project,
+    )
+
+    mock_config_file = tmp_path / "tsc_projects.json"
+    fake_proj1 = tmp_path / "web-app"
+    fake_proj1.mkdir()
+    (fake_proj1 / "tsconfig.json").write_text("{}", encoding="utf-8")
+
+    fake_proj2 = tmp_path / "api-service"
+    fake_proj2.mkdir()
+    (fake_proj2 / "tsconfig.json").write_text("{}", encoding="utf-8")
+
+    WATCHED_PROJECTS.clear()
+    with (
+        patch("mcp_win_stdio.tsc.server.TSC_PROJECTS_FILE", mock_config_file),
+        patch("mcp_win_stdio.tsc.server._ACTIVE_PROJECT", None),
+        patch("mcp_win_stdio.tsc.server.is_home_or_root_dir", return_value=False),
+    ):
+        # 1. Initially empty
+        res_empty = list_projects()
+        assert res_empty["status"] == "standby"
+        assert res_empty["totalProjects"] == 0
+
+        # 2. Add first project
+        res_add1 = add_project(str(fake_proj1), alias="web", auto_watch=False)
+        assert res_add1["success"] is True
+        assert res_add1["alias"] == "web"
+        assert res_add1["isActive"] is True
+        assert get_active_project_name() == "web"
+
+        # 3. Add second project
+        res_add2 = add_project(str(fake_proj2), alias="api", auto_watch=False)
+        assert res_add2["success"] is True
+        assert res_add2["alias"] == "api"
+
+        # 4. List projects
+        res_list = list_projects()
+        assert res_list["totalProjects"] == 2
+        assert res_list["activeProject"] == "web"
+        aliases = [p["alias"] for p in res_list["projects"]]
+        assert "web" in aliases
+        assert "api" in aliases
+
+        # 5. Switch active project via use_project
+        res_use = use_project("api")
+        assert res_use["success"] is True
+        assert res_use["activeProject"] == "api"
+        assert get_active_project_name() == "api"
+
+        # 6. Test get_tsc_errors defaults to active project
+        with CACHE_LOCK:
+            WATCHED_PROJECTS[str(fake_proj1 / "tsconfig.json")] = {
+                "relative_config": "tsconfig.json",
+                "project_dir": str(fake_proj1),
+                "status": "ready",
+                "last_updated": "2026-10-01T12:00:00Z",
+                "errors": [
+                    {
+                        "file": str(fake_proj1 / "src" / "App.tsx"),
+                        "relative_path": "src/App.tsx",
+                        "line": 1,
+                        "column": 1,
+                        "severity": "error",
+                        "code": "TS2322",
+                        "message": "Type error in web",
+                    }
+                ],
+            }
+            WATCHED_PROJECTS[str(fake_proj2 / "tsconfig.json")] = {
+                "relative_config": "tsconfig.json",
+                "project_dir": str(fake_proj2),
+                "status": "ready",
+                "last_updated": "2026-10-01T12:00:00Z",
+                "errors": [
+                    {
+                        "file": str(fake_proj2 / "src" / "Index.ts"),
+                        "relative_path": "src/Index.ts",
+                        "line": 1,
+                        "column": 1,
+                        "severity": "error",
+                        "code": "TS2304",
+                        "message": "Type error in api",
+                    }
+                ],
+            }
+
+        try:
+            # Active project is "api" -> should return only api's error
+            errs_active = get_tsc_errors()
+            assert errs_active["active_project"] == "api"
+            assert errs_active["total_errors"] == 1
+            assert errs_active["errors"][0]["code"] == "TS2304"
+
+            # Query web by alias
+            errs_web = get_tsc_errors(project_path="web")
+            assert errs_web["total_errors"] == 1
+            assert errs_web["errors"][0]["code"] == "TS2322"
+
+            # Query all projects
+            errs_all = get_tsc_errors(project_path="all")
+            assert errs_all["total_errors"] == 2
+
+            # 7. Remove project
+            res_rem = remove_project("api")
+            assert res_rem["success"] is True
+            assert res_rem["removedProject"] == "api"
+            # Active should automatically shift to remaining project
+            assert res_rem["newActiveProject"] == "web"
+        finally:
+            with CACHE_LOCK:
+                WATCHED_PROJECTS.pop(str(fake_proj1 / "tsconfig.json"), None)
+                WATCHED_PROJECTS.pop(str(fake_proj2 / "tsconfig.json"), None)
+
+    print("[PASS] TSC dynamic project management (list_projects, use_project, add_project, remove_project) passed.")
 
 
 def test_excel_styling_and_layout():

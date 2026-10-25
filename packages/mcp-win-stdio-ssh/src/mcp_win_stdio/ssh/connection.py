@@ -14,9 +14,9 @@ from typing import Any, Dict, List, Optional
 import paramiko
 from paramiko.config import SSHConfig
 
-from mcp_win_stdio.core.config import INDALA_DIR, ensure_workspace_dirs
+from mcp_win_stdio.core.config import USER_DIR, ensure_workspace_dirs
 
-SSH_CONFIG_DIR = INDALA_DIR
+SSH_CONFIG_DIR = USER_DIR
 HOSTS_CONFIG_FILE = SSH_CONFIG_DIR / "ssh_hosts.json"
 SSH_USER_DIR = Path.home() / ".ssh"
 SYSTEM_SSH_CONFIG = SSH_USER_DIR / "config"
@@ -237,8 +237,8 @@ def create_ssh_client(
     key_filename = None
     if key_path and Path(key_path).expanduser().exists():
         key_filename = str(Path(key_path).expanduser())
-    else:
-        # Check default keys
+    elif not pwd:
+        # Check default keys ONLY if no explicit password was configured
         default_keys = _find_default_keys()
         if default_keys:
             key_filename = default_keys[0]
@@ -260,8 +260,8 @@ def create_ssh_client(
         "port": port,
         "username": username,
         "timeout": timeout,
-        "allow_agent": True,
-        "look_for_keys": True,
+        "allow_agent": False if pwd else True,
+        "look_for_keys": False if pwd else True,
     }
 
     if sock:

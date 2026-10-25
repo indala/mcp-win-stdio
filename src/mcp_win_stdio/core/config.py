@@ -8,16 +8,26 @@ from typing import Any, Dict
 
 # Standard single-source directory: ~/.mcp-win-stdio/
 USER_HOME = Path.home()
-INDALA_DIR = USER_HOME / ".mcp-win-stdio"
-PLUGINS_DIR = INDALA_DIR / "plugins"
-LOGS_DIR = INDALA_DIR / "logs"
-EXPORTS_DIR = INDALA_DIR / "exports"
-CONFIG_FILE = INDALA_DIR / "config.json"
+USER_DIR = USER_HOME / ".mcp-win-stdio"
+INDALA_DIR = USER_DIR  # Backwards compatibility alias
+PLUGINS_DIR = USER_DIR / "plugins"
+LOGS_DIR = USER_DIR / "logs"
+EXPORTS_DIR = USER_DIR / "exports"
+KEYS_DIR = USER_DIR / "keys"
+WORKFLOWS_DIR = USER_DIR / "workflows"
+CONFIG_FILE = USER_DIR / "config.json"
+DB_CONNECTIONS_FILE = USER_DIR / "db_connections.json"
+SSH_HOSTS_FILE = USER_DIR / "ssh_hosts.json"
+GIT_REPOS_FILE = USER_DIR / "git_repos.json"
+TSC_PROJECTS_FILE = USER_DIR / "tsc_projects.json"
+RAG_DATA_DIR = USER_DIR / "rag_stores"
+SERVER_CUSTOM_FILE = USER_DIR / "server_custom.json"
+SERVER_CACHE_FILE = USER_DIR / "server_cache.json"
 
 
 def ensure_workspace_dirs() -> Dict[str, Path]:
     """Ensure all core directories exist and return paths."""
-    for d in (INDALA_DIR, PLUGINS_DIR, LOGS_DIR, EXPORTS_DIR):
+    for d in (USER_DIR, PLUGINS_DIR, LOGS_DIR, EXPORTS_DIR, KEYS_DIR, WORKFLOWS_DIR):
         d.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
         default_config = {
@@ -29,10 +39,11 @@ def ensure_workspace_dirs() -> Dict[str, Path]:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(default_config, f, indent=2)
     return {
-        "root": INDALA_DIR,
+        "root": USER_DIR,
         "plugins": PLUGINS_DIR,
         "logs": LOGS_DIR,
         "exports": EXPORTS_DIR,
+        "keys": KEYS_DIR,
         "config": CONFIG_FILE,
     }
 
