@@ -9,7 +9,6 @@ from typing import Any, Dict
 # Standard single-source directory: ~/.mcp-win-stdio/
 USER_HOME = Path.home()
 USER_DIR = USER_HOME / ".mcp-win-stdio"
-INDALA_DIR = USER_DIR  # Backwards compatibility alias
 PLUGINS_DIR = USER_DIR / "plugins"
 LOGS_DIR = USER_DIR / "logs"
 EXPORTS_DIR = USER_DIR / "exports"
