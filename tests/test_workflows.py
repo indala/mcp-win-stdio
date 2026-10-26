@@ -324,9 +324,45 @@ def test_workflow_error_handling_and_recovery():
 
     res = run_workflow(wf_def, call_tool_fn=mock_caller)
     assert res["status"] == "completed_with_errors"
+    assert res["steps_successful"] == 1
+    assert res["steps_failed"] == 1
     assert len(res["trace"]) == 2
     assert res["trace"][0]["status"] == "error"
     assert "recovery" in res["trace"][0]
     assert res["trace"][0]["recovery"]["status"] == "success"
     assert res["trace"][1]["status"] == "success"
+
+    # Test when recovery itself fails
+    wf_def_fail_rec = {
+        "title": "Double Failure Workflow",
+        "steps": [
+            {
+                "id": "step1",
+                "server": "db",
+                "tool": "read_query",
+                "arguments": {"query": "bad query"},
+                "continue_on_error": True,
+                "on_failure": {
+                    "server": "ssh",
+                    "tool": "ssh_exec",
+                    "arguments": {"command": "reboot"},
+                },
+            }
+        ],
+    }
+
+    def failing_caller(server, tool, args):
+        if tool == "read_query":
+            return {"isError": True, "error": "syntax error"}
+        raise ConnectionResetError("SSH host unreachable")
+
+    res_fail = run_workflow(wf_def_fail_rec, call_tool_fn=failing_caller)
+    assert res_fail["status"] == "completed_with_errors"
+    assert res_fail["steps_failed"] == 1
+    # Both original error and recovery error are preserved
+    step_rec = res_fail["trace"][0]
+    assert step_rec["output"]["error"] == "syntax error"
+    assert step_rec["recovery"]["status"] == "recovery_failed"
+    assert "SSH host unreachable" in step_rec["recovery"]["error"]
+
 

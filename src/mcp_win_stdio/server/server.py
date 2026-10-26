@@ -42,20 +42,17 @@ from .process_pool import GLOBAL_POOL
 # The MCP server name is "mws"
 mcp = FastMCP("mws")
 
-# Sticky active server context across calls
-_ACTIVE_SERVER: Optional[str] = None
-
 
 @mcp.tool()
-def use_server(server: str) -> Dict[str, Any]:
+def use_server(server: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Switch or declare the active MCP server context for subsequent tool calls.
     Once set, agents can execute tools without providing the 'server' parameter.
 
     Args:
         server: Target MCP server name (e.g. 'db', 'excel', 'git', 'ssh', 'rag', 'word', 'tsc', 'arch').
+        session_id: Optional session identifier for isolated multi-client context stacks.
     """
-    global _ACTIVE_SERVER
     clean = server.lower().strip()
     available = discover_available_servers()
     if clean not in available:
@@ -63,10 +60,11 @@ def use_server(server: str) -> Dict[str, Any]:
             "success": False,
             "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
         }
-    _ACTIVE_SERVER = clean
-    GLOBAL_CONTEXT.set("server", clean)
+    session = GLOBAL_CONTEXT.get_session(session_id)
+    session.set("server", clean)
     return {
         "success": True,
+        "session_id": session.session_id,
         "message": f"Active server set to '{clean}'. Subsequent tool calls without 'server' will default to '{clean}'.",
         "active_server": clean,
     }
@@ -99,7 +97,6 @@ def manage_context(
       - 'workspace':     Active project/workspace directory.
       - 'workbook':      Active Excel workbook file.
     """
-    global _ACTIVE_SERVER
     act = action.lower().strip()
     session = GLOBAL_CONTEXT.get_session(session_id)
 
@@ -116,8 +113,6 @@ def manage_context(
         if not type or value is None:
             return {"status": "error", "error": "Both 'type' and 'value' are required for 'set'."}
         session.set(type, value)
-        if type.lower().strip() == "server" and (not session_id or session_id == "default"):
-            _ACTIVE_SERVER = value.lower().strip()
         return {
             "status": "success",
             "session_id": session.session_id,
@@ -128,8 +123,6 @@ def manage_context(
         if not type or value is None:
             return {"status": "error", "error": "Both 'type' and 'value' are required for 'push'."}
         session.push(type, value)
-        if type.lower().strip() == "server" and (not session_id or session_id == "default"):
-            _ACTIVE_SERVER = value.lower().strip()
         return {
             "status": "success",
             "session_id": session.session_id,
@@ -142,8 +135,6 @@ def manage_context(
             return {"status": "error", "error": "'type' is required for 'pop'."}
         removed = session.pop(type)
         new_active = session.get(type)
-        if type.lower().strip() == "server" and (not session_id or session_id == "default"):
-            _ACTIVE_SERVER = new_active
         return {
             "status": "success",
             "session_id": session.session_id,
@@ -153,8 +144,6 @@ def manage_context(
         }
     elif act == "clear":
         session.clear(type)
-        if (not type or type.lower().strip() == "server") and (not session_id or session_id == "default"):
-            _ACTIVE_SERVER = None
         return {
             "status": "success",
             "session_id": session.session_id,
@@ -258,8 +247,6 @@ def call_tool(
         tool: Alias for tool_name.
         session_id: Optional session identifier for isolated multi-client context stacks.
     """
-    global _ACTIVE_SERVER
-
     # Accept 'tool' if tool_name is not explicitly passed
     raw_tool = tool_name or tool
     target_tool = str(raw_tool or "").strip()
@@ -290,7 +277,7 @@ def call_tool(
         }
 
     # 3. If target_server is still missing, check active server context from session
-    active_ctx_server = session.get("server") or _ACTIVE_SERVER
+    active_ctx_server = session.get("server")
     if not target_server:
         if active_ctx_server and active_ctx_server in available_servers:
             candidates = find_servers_for_tool(target_tool)

@@ -307,6 +307,13 @@ def run_workflow(
 
             def _dry_run_resolver(val: Any) -> Any:
                 if isinstance(val, str):
+                    exact = re.fullmatch(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}", val.strip())
+                    if exact:
+                        expr = exact.group(1).strip()
+                        if expr.startswith("steps."):
+                            return f"<unresolved_runtime_output: {expr}>"
+                        return resolve_template_value(val, context)
+
                     def _mark_unresolved(m: re.Match) -> str:
                         expr = m.group(1).strip()
                         if expr.startswith("steps."):
@@ -432,10 +439,14 @@ def run_workflow(
 
         if is_error and not continue_on_err and halt_on_failure:
             total_duration = round((time.perf_counter() - start_time) * 1000, 2)
+            successful_steps = sum(1 for s in execution_trace if s.get("status") == "success")
+            failed_steps = sum(1 for s in execution_trace if s.get("status") == "error")
             return {
                 "workflow": wf_name,
                 "status": "halted_on_error",
                 "failed_step": step_id,
+                "steps_successful": successful_steps,
+                "steps_failed": failed_steps,
                 "steps_completed": idx,
                 "total_steps": len(steps),
                 "duration_ms": total_duration,
@@ -444,11 +455,15 @@ def run_workflow(
             }
 
     total_duration = round((time.perf_counter() - start_time) * 1000, 2)
-    has_any_error = any(s.get("status") == "error" for s in execution_trace)
+    successful_steps = sum(1 for s in execution_trace if s.get("status") == "success")
+    failed_steps = sum(1 for s in execution_trace if s.get("status") == "error")
+    has_any_error = failed_steps > 0
     return {
         "workflow": wf_name,
         "status": "completed_with_errors" if has_any_error else "success",
         "steps_completed": len(steps),
+        "steps_successful": successful_steps,
+        "steps_failed": failed_steps,
         "total_steps": len(steps),
         "duration_ms": total_duration,
         "trace": execution_trace,
