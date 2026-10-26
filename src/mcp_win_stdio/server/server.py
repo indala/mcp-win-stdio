@@ -10,6 +10,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
+from mcp_win_stdio.core.context import GLOBAL_CONTEXT
 from mcp_win_stdio.core.workflows import (
     delete_workflow as core_delete_workflow,
 )
@@ -63,11 +64,107 @@ def use_server(server: str) -> Dict[str, Any]:
             "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
         }
     _ACTIVE_SERVER = clean
+    GLOBAL_CONTEXT.set("server", clean)
     return {
         "success": True,
         "message": f"Active server set to '{clean}'. Subsequent tool calls without 'server' will default to '{clean}'.",
         "active_server": clean,
     }
+
+
+@mcp.tool()
+def manage_context(
+    action: str = "get",
+    type: Optional[str] = None,
+    value: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Manage scoped session context stacks (server, db_connection, ssh_host, workspace, workbook).
+    Context values are automatically injected into subsequent tool calls, eliminating argument repetition.
+    Independent stacks ensure changing a database connection never alters an SSH host or workspace.
+    Sessions are completely isolated by 'session_id' to prevent cross-agent interference.
+
+    Actions:
+      - 'get':    Get active context value for a type, or snapshot of all if type is omitted.
+      - 'set':    Set or replace active value for a context type.
+      - 'push':   Push a new temporary value onto stack (preserves previous value for later pop).
+      - 'pop':    Pop active value from stack, restoring previous context.
+      - 'clear':  Clear a specific context stack or all stacks.
+
+    Supported Types:
+      - 'server':        Active MCP server namespace (e.g. 'db', 'excel', 'ssh', 'git', 'arch').
+      - 'db_connection': Active database connection alias (e.g. 'postgres_prod', 'ijitest').
+      - 'ssh_host':      Active remote SSH host alias (e.g. 'hostinger-prod', 'staging').
+      - 'workspace':     Active project/workspace directory.
+      - 'workbook':      Active Excel workbook file.
+    """
+    global _ACTIVE_SERVER
+    act = action.lower().strip()
+    session = GLOBAL_CONTEXT.get_session(session_id)
+
+    if act == "get":
+        if not type:
+            return {"status": "success", "session_id": session.session_id, "contexts": session.snapshot()}
+        return {
+            "status": "success",
+            "session_id": session.session_id,
+            "type": type,
+            "active": session.get(type),
+        }
+    elif act == "set":
+        if not type or value is None:
+            return {"status": "error", "error": "Both 'type' and 'value' are required for 'set'."}
+        session.set(type, value)
+        if type.lower().strip() == "server" and (not session_id or session_id == "default"):
+            _ACTIVE_SERVER = value.lower().strip()
+        return {
+            "status": "success",
+            "session_id": session.session_id,
+            "message": f"Context '{type}' set to '{value}'.",
+            "active": value,
+        }
+    elif act == "push":
+        if not type or value is None:
+            return {"status": "error", "error": "Both 'type' and 'value' are required for 'push'."}
+        session.push(type, value)
+        if type.lower().strip() == "server" and (not session_id or session_id == "default"):
+            _ACTIVE_SERVER = value.lower().strip()
+        return {
+            "status": "success",
+            "session_id": session.session_id,
+            "message": f"Context '{type}' pushed '{value}' onto stack.",
+            "active": value,
+            "depth": len(session._stacks.get(type.lower().strip(), [])),
+        }
+    elif act == "pop":
+        if not type:
+            return {"status": "error", "error": "'type' is required for 'pop'."}
+        removed = session.pop(type)
+        new_active = session.get(type)
+        if type.lower().strip() == "server" and (not session_id or session_id == "default"):
+            _ACTIVE_SERVER = new_active
+        return {
+            "status": "success",
+            "session_id": session.session_id,
+            "popped": removed,
+            "active": new_active,
+            "message": f"Context '{type}' popped '{removed}'. Restored previous context: '{new_active}'.",
+        }
+    elif act == "clear":
+        session.clear(type)
+        if (not type or type.lower().strip() == "server") and (not session_id or session_id == "default"):
+            _ACTIVE_SERVER = None
+        return {
+            "status": "success",
+            "session_id": session.session_id,
+            "message": f"Context '{type}' cleared." if type else "All contexts cleared.",
+        }
+    else:
+        return {
+            "status": "error",
+            "error": f"Unknown action '{action}'. Supported actions: 'get', 'set', 'push', 'pop', 'clear'.",
+        }
 
 
 @mcp.tool()
@@ -138,33 +235,38 @@ def call_tool(
     server: Optional[str] = None,
     tool_name: Optional[str] = None,
     arguments: Optional[Dict[str, Any]] = None,
-    **kwargs: Any,
+    tool: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Any:
     """
-    Execute a tool dynamically on a target MCP server with smart auto-routing and sticky context.
+    Execute a tool dynamically on a target MCP server with smart auto-routing and context stack inheritance.
     Spawns the child server process on-demand if not already running,
     forwards the execution, and returns structured results with context protection.
     Automatically normalizes parameter aliases and camelCase names.
 
-    Smart Routing & Sticky Server:
+    Smart Routing & Context Stack:
     - If 'server' is omitted, 'call_tool' automatically routes using the active server or tool catalog.
-    - When a server is accessed, it automatically becomes the active server for following calls.
+    - Contextual parameters ('connection', 'host', 'workspace', 'workbook') are auto-injected from session context.
     - Supports dot notation (e.g. 'db.read_query', 'excel.preview_sheet').
-    - If parameters are passed as top-level kwargs, they are automatically merged into 'arguments'.
+    - Accepts either 'tool_name' or 'tool'.
+    - Sessions are isolated by 'session_id' to prevent multi-agent crosstalk.
 
     Args:
         server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
         tool_name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info').
         arguments: Dictionary of arguments matching the tool's parameter schema.
+        tool: Alias for tool_name.
+        session_id: Optional session identifier for isolated multi-client context stacks.
     """
     global _ACTIVE_SERVER
 
-    # Accept 'tool' in kwargs if tool_name is not explicitly passed
-    raw_tool = tool_name or kwargs.pop("tool", None)
+    # Accept 'tool' if tool_name is not explicitly passed
+    raw_tool = tool_name or tool
     target_tool = str(raw_tool or "").strip()
     target_server = (server or "").lower().strip()
 
     available_servers = discover_available_servers()
+    session = GLOBAL_CONTEXT.get_session(session_id)
 
     # 1. Handle dot notation (e.g. 'db.read_query' or 'excel.preview_sheet')
     if "." in target_tool:
@@ -187,13 +289,13 @@ def call_tool(
             "error": "Missing 'tool_name' parameter. Please specify the name of the tool to execute.",
         }
 
-    # 3. If target_server is still missing, check active server context, then global auto-discovery
+    # 3. If target_server is still missing, check active server context from session
+    active_ctx_server = session.get("server") or _ACTIVE_SERVER
     if not target_server:
-        # If sticky active server is set and implements target_tool, use it
-        if _ACTIVE_SERVER and _ACTIVE_SERVER in available_servers:
-            active_tools = [t.get("name") for t in catalog_describe_tool(_ACTIVE_SERVER, target_tool) or []] if False else find_servers_for_tool(target_tool)
-            if _ACTIVE_SERVER in active_tools:
-                target_server = _ACTIVE_SERVER
+        if active_ctx_server and active_ctx_server in available_servers:
+            candidates = find_servers_for_tool(target_tool)
+            if active_ctx_server in candidates:
+                target_server = active_ctx_server
 
         # Otherwise resolve via unique global catalog match
         if not target_server:
@@ -201,14 +303,14 @@ def call_tool(
             if len(candidates) == 1:
                 target_server = candidates[0]
             elif len(candidates) > 1:
-                if _ACTIVE_SERVER in candidates:
-                    target_server = _ACTIVE_SERVER
+                if active_ctx_server in candidates:
+                    target_server = active_ctx_server
                 else:
                     return {
                         "isError": True,
                         "error": f"Tool '{target_tool}' exists on multiple servers: {candidates}. Please specify 'server' or call use_server().",
                         "candidate_servers": candidates,
-                        "active_server": _ACTIVE_SERVER,
+                        "active_server": active_ctx_server,
                     }
             else:
                 return {
@@ -216,23 +318,26 @@ def call_tool(
                     "error": f"Tool '{target_tool}' was not found on any registered MCP server. Use search_tools('{target_tool}') to find available tools.",
                 }
 
-    # 4. Merge arguments and extra kwargs
-    merged_args: Dict[str, Any] = {}
-    if isinstance(arguments, dict):
-        merged_args.update(arguments)
-    if kwargs:
-        merged_args.update(kwargs)
+    # 4. Context resolution: auto-inject contextual params (connection, host, workspace, workbook)
+    meta = catalog_describe_tool(target_server, target_tool)
+    expected_params = []
+    if meta and isinstance(meta.get("parameters"), dict):
+        expected_params = list(meta["parameters"].get("properties", {}).keys())
 
-    norm_args = normalize_arguments(target_server, target_tool, merged_args)
+    merged_args = dict(arguments or {})
+    resolved_args, injected = session.resolve_arguments(
+        server=target_server,
+        tool_name=target_tool,
+        arguments=merged_args,
+        expected_params=expected_params,
+    )
+
+    norm_args = normalize_arguments(target_server, target_tool, resolved_args)
     proc = GLOBAL_POOL.get_or_spawn(target_server)
     res = proc.call_tool(target_tool, norm_args)
 
-    # 5. Make accessed server the sticky active server for future calls
-    _ACTIVE_SERVER = target_server
-
     # If tool call failed, enrich with schema guidance to enable immediate self-correction
     if isinstance(res, dict) and res.get("isError"):
-        meta = catalog_describe_tool(target_server, target_tool)
         if meta:
             params = meta.get("parameters", {})
             sig = generate_compact_signature(target_tool, params)
@@ -307,20 +412,23 @@ def save_workflow(
 def run_workflow(
     name: str,
     parameters: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
 ) -> Dict[str, Any]:
     """
     Execute a saved multi-step composite workflow in a single atomic invocation.
-    Pipes variables and step outputs forward, halts safely on failure, and returns
-    a full execution trace with timing metrics.
+    Pipes variables and step outputs forward, halts safely on failure, supports
+    recovery steps, dry_run previews, and returns a full execution trace with timing metrics.
 
     Args:
         name: Name of the workflow to execute.
         parameters: Optional dictionary of parameter values to pass into the workflow.
+        dry_run: If True, resolves variables and returns the projected execution plan without invoking tools.
     """
     return core_run_workflow(
         name_or_def=name,
         parameters=parameters,
         call_tool_fn=lambda s, t, a: call_tool(s, t, a),
+        dry_run=dry_run,
     )
 
 

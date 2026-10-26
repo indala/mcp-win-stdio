@@ -4,7 +4,9 @@ This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite.
 
 ## 🛠️ Active Tools & Recommended Selection
 
-* **Unified On-Demand Gateway:** Use `mws` MCP (`list_servers`, `search_tools`, `call_tool`) to route and execute tools on-demand with zero context bloat.
+* **Unified On-Demand Gateway:** Use `mws` MCP (`list_servers`, `search_tools`, `call_tool`, `manage_context`, `run_workflow`) to route and execute tools on-demand with zero context bloat.
+  - Set active targets once via `manage_context(action="set", type="db_connection", value="mydb")` or `manage_context(type="ssh_host", value="myhost")`.
+  - In `call_tool`, `server` and target connections/hosts are auto-injected from session context!
 * **Spreadsheets & Excel:** Use `excel` MCP (`preview_sheet`, `update_cells`, `profile_sheet`).
 * **Word Documents:** Use `word` MCP for typography, layout, and document generation.
 * **Code Navigation:** Use `explorer` MCP (`get_directory_tree`, `fuzzy_find`, `grep_search`).

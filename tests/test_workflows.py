@@ -242,3 +242,91 @@ def test_cli_workflow_commands(capsys):
             assert "deleted" in captured_del.lower()
         finally:
             os.chdir(old_cwd)
+
+
+def test_workflow_dry_run_and_output_piping():
+    wf_def = {
+        "title": "Build and Deploy",
+        "parameters": {"env": {"type": "string", "default": "staging"}},
+        "steps": [
+            {
+                "id": "get_sha",
+                "server": "git",
+                "tool": "git_log",
+                "arguments": {"limit": 1},
+            },
+            {
+                "id": "deploy",
+                "server": "ssh",
+                "tool": "ssh_exec",
+                "arguments": {
+                    "command": "deploy.sh --env {{ env }} --commit {{ steps.get_sha.output.sha }}"
+                },
+            },
+        ],
+    }
+
+    # 1. Test dry_run execution
+    dry_res = run_workflow(wf_def, parameters={"env": "production"}, dry_run=True)
+    assert dry_res["status"] == "dry_run_plan"
+    assert dry_res["dry_run"] is True
+    assert len(dry_res["plan"]) == 2
+    assert "deploy.sh --env production" in dry_res["plan"][1]["resolved_arguments"]["command"]
+    assert "<unresolved_runtime_output: steps.get_sha.output.sha>" in dry_res["plan"][1]["resolved_arguments"]["command"]
+
+    # 2. Test actual piping with mock caller
+    def mock_caller(server, tool, args):
+        if tool == "git_log":
+            return {"sha": "c0ffee123", "author": "developer"}
+        if tool == "ssh_exec":
+            return {"stdout": f"Successfully executed {args['command']}"}
+        return {}
+
+    run_res = run_workflow(wf_def, parameters={"env": "prod"}, call_tool_fn=mock_caller)
+    assert run_res["status"] == "success"
+    assert len(run_res["trace"]) == 2
+    # Check that {{ steps.get_sha.output.sha }} resolved to c0ffee123
+    assert "deploy.sh --env prod --commit c0ffee123" in run_res["trace"][1]["output"]["stdout"]
+
+
+def test_workflow_error_handling_and_recovery():
+    # Test on_failure recovery step and continue_on_error
+    wf_def = {
+        "title": "Fault Tolerant Workflow",
+        "steps": [
+            {
+                "id": "step_fail",
+                "server": "db",
+                "tool": "read_query",
+                "arguments": {"query": "SELECT * FROM missing_table"},
+                "continue_on_error": True,
+                "on_failure": {
+                    "server": "db",
+                    "tool": "read_query",
+                    "arguments": {"query": "SELECT 'recovered' as status"},
+                },
+            },
+            {
+                "id": "step_followup",
+                "server": "explorer",
+                "tool": "workspace_summary",
+                "arguments": {"path": "."},
+            },
+        ],
+    }
+
+    def mock_caller(server, tool, args):
+        if "missing_table" in args.get("query", ""):
+            return {"isError": True, "error": "relation missing_table does not exist"}
+        if "recovered" in args.get("query", ""):
+            return {"status": "success", "recovered": True}
+        return {"summary": "workspace ok"}
+
+    res = run_workflow(wf_def, call_tool_fn=mock_caller)
+    assert res["status"] == "completed_with_errors"
+    assert len(res["trace"]) == 2
+    assert res["trace"][0]["status"] == "error"
+    assert "recovery" in res["trace"][0]
+    assert res["trace"][0]["recovery"]["status"] == "success"
+    assert res["trace"][1]["status"] == "success"
+

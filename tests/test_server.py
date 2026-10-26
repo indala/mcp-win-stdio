@@ -243,3 +243,39 @@ def test_server_workflow_tools():
             assert deleted["deleted"] is True
         finally:
             os.chdir(old_cwd)
+
+
+def test_manage_context_and_stack_injection():
+    """Verify manage_context tool and context stack resolution in call_tool."""
+    from mcp_win_stdio.core.context import GLOBAL_CONTEXT
+    from mcp_win_stdio.server.server import manage_context
+
+    GLOBAL_CONTEXT.clear()
+
+    # 1. Set and get context
+    res = manage_context(action="set", type="db_connection", value="test_pg_db")
+    assert res["status"] == "success"
+    assert res["active"] == "test_pg_db"
+
+    check = manage_context(action="get", type="db_connection")
+    assert check["active"] == "test_pg_db"
+
+    # 2. Push temporary override
+    res_push = manage_context(action="push", type="db_connection", value="temp_analytics")
+    assert res_push["status"] == "success"
+    assert res_push["active"] == "temp_analytics"
+    assert res_push["depth"] == 2
+
+    # 3. Pop restores previous
+    res_pop = manage_context(action="pop", type="db_connection")
+    assert res_pop["status"] == "success"
+    assert res_pop["popped"] == "temp_analytics"
+    assert res_pop["active"] == "test_pg_db"
+
+    # 4. Snapshot contains all contexts
+    snap = manage_context(action="get")
+    assert "contexts" in snap
+    assert snap["contexts"]["db_connection"]["active"] == "test_pg_db"
+
+    GLOBAL_CONTEXT.clear()
+
