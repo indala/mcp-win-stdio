@@ -197,8 +197,10 @@ def test_run_workflow_halt_on_error():
     assert res["steps_failed"] == 1
     assert res["steps_skipped"] == 1
     assert res["steps_executed"] == 1
-    assert len(res["trace"]) == 1
+    assert len(res["trace"]) == 2
     assert res["trace"][0]["status"] == "error"
+    assert res["trace"][1]["status"] == "skipped"
+    assert res["trace"][1]["step_id"] == "step2"
 
 
 def test_cli_workflow_commands(capsys):
@@ -369,4 +371,111 @@ def test_workflow_error_handling_and_recovery():
     assert step_rec["recovery"]["status"] == "recovery_failed"
     assert "SSH host unreachable" in step_rec["recovery"]["error"]
 
+
+def test_workflow_failure_at_first_middle_and_final_steps():
+    """Verify exact trace and counter accounting for failure at first, middle, and final steps."""
+    wf_template = {
+        "title": "Three Step Workflow",
+        "steps": [
+            {"id": "step1", "server": "db", "tool": "read_query", "halt_on_failure": True},
+            {"id": "step2", "server": "ssh", "tool": "ssh_exec", "halt_on_failure": True},
+            {"id": "step3", "server": "excel", "tool": "preview_sheet", "halt_on_failure": True},
+        ],
+    }
+
+    # Case 1: Failure at First Step
+    def caller_fail_step1(server, tool, args):
+        if tool == "read_query":
+            return {"isError": True, "error": "Query failed"}
+        return {"status": "success"}
+
+    res1 = run_workflow(wf_template, call_tool_fn=caller_fail_step1)
+    assert res1["status"] == "halted_on_error"
+    assert res1["failed_step"] == "step1"
+    assert res1["total_steps"] == 3
+    assert res1["steps_completed"] == 0
+    assert res1["steps_successful"] == 0
+    assert res1["steps_failed"] == 1
+    assert res1["steps_skipped"] == 2
+    assert res1["steps_executed"] == 1
+    assert len(res1["trace"]) == 3
+    assert res1["trace"][0]["step_id"] == "step1"
+    assert res1["trace"][0]["status"] == "error"
+    assert res1["trace"][1]["step_id"] == "step2"
+    assert res1["trace"][1]["status"] == "skipped"
+    assert res1["trace"][2]["step_id"] == "step3"
+    assert res1["trace"][2]["status"] == "skipped"
+
+    # Case 2: Failure at Middle Step
+    def caller_fail_step2(server, tool, args):
+        if tool == "ssh_exec":
+            return {"isError": True, "error": "Command failed"}
+        return {"status": "success"}
+
+    res2 = run_workflow(wf_template, call_tool_fn=caller_fail_step2)
+    assert res2["status"] == "halted_on_error"
+    assert res2["failed_step"] == "step2"
+    assert res2["total_steps"] == 3
+    assert res2["steps_completed"] == 1
+    assert res2["steps_successful"] == 1
+    assert res2["steps_failed"] == 1
+    assert res2["steps_skipped"] == 1
+    assert res2["steps_executed"] == 2
+    assert len(res2["trace"]) == 3
+    assert res2["trace"][0]["step_id"] == "step1"
+    assert res2["trace"][0]["status"] == "success"
+    assert res2["trace"][1]["step_id"] == "step2"
+    assert res2["trace"][1]["status"] == "error"
+    assert res2["trace"][2]["step_id"] == "step3"
+    assert res2["trace"][2]["status"] == "skipped"
+
+    # Case 3: Failure at Final Step
+    def caller_fail_step3(server, tool, args):
+        if tool == "preview_sheet":
+            return {"isError": True, "error": "Sheet missing"}
+        return {"status": "success"}
+
+    res3 = run_workflow(wf_template, call_tool_fn=caller_fail_step3)
+    assert res3["status"] == "halted_on_error"
+    assert res3["failed_step"] == "step3"
+    assert res3["total_steps"] == 3
+    assert res3["steps_completed"] == 2
+    assert res3["steps_successful"] == 2
+    assert res3["steps_failed"] == 1
+    assert res3["steps_skipped"] == 0
+    assert res3["steps_executed"] == 3
+    assert len(res3["trace"]) == 3
+    assert res3["trace"][0]["step_id"] == "step1"
+    assert res3["trace"][0]["status"] == "success"
+    assert res3["trace"][1]["step_id"] == "step2"
+    assert res3["trace"][1]["status"] == "success"
+    assert res3["trace"][2]["step_id"] == "step3"
+    assert res3["trace"][2]["status"] == "error"
+
+
+def test_workflow_accounting_executed_equals_successful_plus_failed():
+    """Verify steps_executed strictly equals successful + failed steps, and unknown status does not inflate count."""
+    wf_def = {
+        "title": "Strict Accounting Workflow",
+        "steps": [
+            {"id": "step1", "server": "db", "tool": "read_query"},
+            {"id": "step2", "server": "ssh", "tool": "ssh_exec", "continue_on_error": True},
+            {"id": "step3", "server": "excel", "tool": "preview_sheet"},
+        ],
+    }
+
+    # Step 1 succeeds, Step 2 fails, Step 3 succeeds
+    def mock_caller(server, tool, args):
+        if tool == "ssh_exec":
+            return {"isError": True, "error": "command failed"}
+        return {"status": "success"}
+
+    res = run_workflow(wf_def, call_tool_fn=mock_caller)
+    assert res["steps_successful"] == 2
+    assert res["steps_failed"] == 1
+    assert res["steps_skipped"] == 0
+    # Exact invariant: steps_executed == steps_successful + steps_failed
+    assert res["steps_executed"] == res["steps_successful"] + res["steps_failed"]
+    assert res["steps_executed"] == 3
+    assert res["steps_completed"] == 2
 

@@ -370,14 +370,15 @@ def run_workflow(
         on_failure_action = step.get("on_failure")
         summarize_out = step.get("summarize_output", False)
 
-        # Interpolate variables into step arguments
-        resolved_args = resolve_template_value(raw_args, context)
-
         step_start = time.perf_counter()
+        is_error = False
         try:
+            # Interpolate variables into step arguments
+            resolved_args = resolve_template_value(raw_args, context)
             result = caller(server, tool, resolved_args)
         except Exception as e:
             result = {"isError": True, "error": str(e)}
+            is_error = True
         step_duration = round((time.perf_counter() - step_start) * 1000, 2)
 
         # Check for error
@@ -438,10 +439,24 @@ def run_workflow(
             context["steps"][step_id] = {"output": result}
 
         if is_error and not continue_on_err and halt_on_failure:
+            # Explicitly append skipped records for all remaining unexecuted steps
+            for skip_idx in range(idx + 1, len(steps)):
+                skip_step = steps[skip_idx]
+                skip_id = skip_step.get("id") or f"step_{skip_idx + 1}"
+                execution_trace.append({
+                    "step_id": skip_id,
+                    "step_index": skip_idx + 1,
+                    "server": skip_step.get("server", "").lower().strip(),
+                    "tool": skip_step.get("tool", "").strip(),
+                    "status": "skipped",
+                    "output": None,
+                })
+
             total_duration = round((time.perf_counter() - start_time) * 1000, 2)
             successful_steps = sum(1 for s in execution_trace if s.get("status") == "success")
             failed_steps = sum(1 for s in execution_trace if s.get("status") == "error")
-            skipped_steps = len(steps) - len(execution_trace)
+            skipped_steps = sum(1 for s in execution_trace if s.get("status") == "skipped")
+            executed_steps = successful_steps + failed_steps
             return {
                 "workflow": wf_name,
                 "status": "halted_on_error",
@@ -450,7 +465,7 @@ def run_workflow(
                 "steps_successful": successful_steps,
                 "steps_failed": failed_steps,
                 "steps_skipped": skipped_steps,
-                "steps_executed": len(execution_trace),
+                "steps_executed": executed_steps,
                 "total_steps": len(steps),
                 "duration_ms": total_duration,
                 "error": result,
@@ -460,7 +475,8 @@ def run_workflow(
     total_duration = round((time.perf_counter() - start_time) * 1000, 2)
     successful_steps = sum(1 for s in execution_trace if s.get("status") == "success")
     failed_steps = sum(1 for s in execution_trace if s.get("status") == "error")
-    skipped_steps = len(steps) - len(execution_trace)
+    skipped_steps = sum(1 for s in execution_trace if s.get("status") == "skipped")
+    executed_steps = successful_steps + failed_steps
     has_any_error = failed_steps > 0
     return {
         "workflow": wf_name,
@@ -469,7 +485,7 @@ def run_workflow(
         "steps_successful": successful_steps,
         "steps_failed": failed_steps,
         "steps_skipped": skipped_steps,
-        "steps_executed": len(execution_trace),
+        "steps_executed": executed_steps,
         "total_steps": len(steps),
         "duration_ms": total_duration,
         "trace": execution_trace,

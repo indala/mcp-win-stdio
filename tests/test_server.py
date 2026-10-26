@@ -284,3 +284,240 @@ def test_manage_context_and_stack_injection():
 
     GLOBAL_CONTEXT.clear()
 
+
+def test_tool_schemas_anti_spoofing():
+    """Verify public tools do NOT accept caller-supplied session_id."""
+    import inspect
+
+    from mcp_win_stdio.server.server import call_tool, manage_context, use_server
+
+    for fn in (use_server, manage_context, call_tool):
+        sig = inspect.signature(fn)
+        assert "session_id" not in sig.parameters
+
+
+def test_transport_session_isolation():
+    """Verify distinct transport contexts resolve to isolated session environments."""
+    from unittest.mock import MagicMock
+
+    from mcp_win_stdio.core.context import GLOBAL_CONTEXT
+    from mcp_win_stdio.server.server import manage_context
+
+    GLOBAL_CONTEXT.clear()
+
+    # Client A context
+    ctx_a = MagicMock()
+    conn_a = MagicMock()
+    conn_a.session_id = "client_alpha"
+    sess_a = MagicMock()
+    sess_a._connection = conn_a
+    ctx_a.request_context.session = sess_a
+
+    # Client B context
+    ctx_b = MagicMock()
+    conn_b = MagicMock()
+    conn_b.session_id = "client_beta"
+    sess_b = MagicMock()
+    sess_b._connection = conn_b
+    ctx_b.request_context.session = sess_b
+
+    # Client A sets database to db_alpha
+    res_a = manage_context(action="set", type="db_connection", value="db_alpha", ctx=ctx_a)
+    assert res_a["status"] == "success"
+    assert res_a["session_id"] == "client_alpha"
+
+    # Client B sets database to db_beta
+    res_b = manage_context(action="set", type="db_connection", value="db_beta", ctx=ctx_b)
+    assert res_b["status"] == "success"
+    assert res_b["session_id"] == "client_beta"
+
+    # Verify Client A sees db_alpha
+    res_a_db = manage_context(action="get", type="db_connection", ctx=ctx_a)
+    assert res_a_db["active"] == "db_alpha"
+
+    # Verify Client B sees db_beta
+    res_b_db = manage_context(action="get", type="db_connection", ctx=ctx_b)
+    assert res_b_db["active"] == "db_beta"
+
+    # Verify stdio / default session is untouched
+    res_def = manage_context(action="get", type="workspace", ctx=None)
+    assert res_def["active"] is None
+
+    GLOBAL_CONTEXT.clear()
+
+
+def test_missing_transport_identity_fails_safely():
+    """Verify transport call without identifiable session fails safely with RuntimeError."""
+    import pytest
+
+    from mcp_win_stdio.server.server import manage_context
+
+    anon_ctx = object()
+    with pytest.raises(RuntimeError, match="Unable to resolve trusted transport identity"):
+        manage_context(action="set", type="ssh_host", value="isolated-box", ctx=anon_ctx)
+
+
+def test_spoofed_headers_are_rejected():
+    """Verify raw request headers cannot be used to spoof another client's session ID."""
+    import pytest
+
+    from mcp_win_stdio.server.server import manage_context
+
+    # An attacker provides an untrusted context containing spoofed headers
+    class SpoofedContext:
+        headers = {"mcp-session-id": "victim_session_id"}
+        request_context = None
+        session = None
+
+    spoofed_ctx = SpoofedContext()
+
+    with pytest.raises(RuntimeError, match="Unable to resolve trusted transport identity"):
+        manage_context(action="get", type="workspace", ctx=spoofed_ctx)
+
+
+def test_session_enumeration_protection():
+    """Verify manage_context(action='list_sessions') returns only the calling client's session info."""
+    from unittest.mock import MagicMock
+
+    from mcp_win_stdio.core.context import GLOBAL_CONTEXT
+    from mcp_win_stdio.server.server import manage_context
+
+    GLOBAL_CONTEXT.clear()
+
+    # Pre-populate session alpha and session beta
+    GLOBAL_CONTEXT.set("workspace", "/repo/alpha", session_id="alpha_sid")
+    GLOBAL_CONTEXT.set("workspace", "/repo/beta", session_id="beta_sid")
+
+    # Client A calls list_sessions
+    ctx_a = MagicMock()
+    conn_a = MagicMock()
+    conn_a.session_id = "alpha_sid"
+    sess_a = MagicMock()
+    sess_a._connection = conn_a
+    ctx_a.request_context.session = sess_a
+
+    res = manage_context(action="list_sessions", ctx=ctx_a)
+    assert res["status"] == "success"
+    sessions = res["sessions"]
+    # Only caller's session is returned
+    assert len(sessions) == 1
+    assert sessions[0]["session_id"] == "alpha_sid"
+    # Beta's session is NOT visible
+    assert all(s["session_id"] != "beta_sid" for s in sessions)
+
+    GLOBAL_CONTEXT.clear()
+
+
+def test_transport_session_persistence_across_multiple_calls():
+    """Verify real transport connection state persists session context across multiple tool calls."""
+    from unittest.mock import MagicMock
+
+    from mcp_win_stdio.core.context import GLOBAL_CONTEXT
+    from mcp_win_stdio.server.server import manage_context
+
+    GLOBAL_CONTEXT.clear()
+
+    # Real transport connection with state dict
+    conn = MagicMock()
+    conn.session_id = None
+    conn.state = {}
+    sess = MagicMock()
+    sess._connection = conn
+
+    # FastMCP creates a Context for request 1
+    ctx1 = MagicMock()
+    ctx1.request_context.session = sess
+
+    # Request 1 sets context
+    res1 = manage_context(action="set", type="workspace", value="/persistent/project", ctx=ctx1)
+    assert res1["status"] == "success"
+
+    # FastMCP creates a new Context instance for request 2, but shares the same connection session
+    ctx2 = MagicMock()
+    ctx2.request_context.session = sess
+
+    # Request 2 gets context and verifies it persisted
+    res2 = manage_context(action="get", type="workspace", ctx=ctx2)
+    assert res2["status"] == "success"
+    assert res2["active"] == "/persistent/project"
+
+    GLOBAL_CONTEXT.clear()
+
+
+def test_e2e_mcp_transport_session_isolation_and_persistence():
+    """
+    End-to-end integration test verifying that real MCP ClientSession invocations
+    over the transport share context across calls on the same connection,
+    while a concurrent client on a separate connection is strictly isolated.
+    """
+    import json
+
+    import anyio
+    from mcp.client.session import ClientSession
+    from mcp.shared.memory import create_client_server_memory_streams
+
+    from mcp_win_stdio.server.server import mcp
+
+    async def scenario():
+        # Client 1 connects
+        async with create_client_server_memory_streams() as (c1_stream, s1_stream):
+            async with anyio.create_task_group() as tg1:
+                tg1.start_soon(
+                    mcp._lowlevel_server.run,
+                    s1_stream[0],
+                    s1_stream[1],
+                    mcp._lowlevel_server.create_initialization_options(),
+                )
+                async with ClientSession(c1_stream[0], c1_stream[1]) as session1:
+                    await session1.initialize()
+                    # Client 1 sets its workspace
+                    r1 = await session1.call_tool("manage_context", {"action": "set", "type": "workspace", "value": "/client1/ws"})
+                    data1 = json.loads(r1.content[0].text)
+                    assert data1["status"] == "success"
+                    c1_sid = data1["session_id"]
+                    assert c1_sid.startswith("mcp_conn_")
+
+                    # Client 1 calls manage_context a second time: context persisted and session_id identical
+                    r1_persisted = await session1.call_tool("manage_context", {"action": "get", "type": "workspace"})
+                    data1_p = json.loads(r1_persisted.content[0].text)
+                    assert data1_p["status"] == "success"
+                    assert data1_p["session_id"] == c1_sid
+                    assert data1_p["active"] == "/client1/ws"
+
+                    # Client 2 connects concurrently over a separate transport connection
+                    async with create_client_server_memory_streams() as (c2_stream, s2_stream):
+                        async with anyio.create_task_group() as tg2:
+                            tg2.start_soon(
+                                mcp._lowlevel_server.run,
+                                s2_stream[0],
+                                s2_stream[1],
+                                mcp._lowlevel_server.create_initialization_options(),
+                            )
+                            async with ClientSession(c2_stream[0], c2_stream[1]) as session2:
+                                await session2.initialize()
+                                # Client 2 must have an empty initial workspace (no leak from client 1)
+                                r2_init = await session2.call_tool("manage_context", {"action": "get", "type": "workspace"})
+                                data2_init = json.loads(r2_init.content[0].text)
+                                assert data2_init["status"] == "success"
+                                c2_sid = data2_init["session_id"]
+                                assert c2_sid != c1_sid
+                                assert data2_init["active"] is None
+
+                                # Client 2 sets its own workspace
+                                r2_set = await session2.call_tool("manage_context", {"action": "set", "type": "workspace", "value": "/client2/ws"})
+                                data2_set = json.loads(r2_set.content[0].text)
+                                assert data2_set["status"] == "success"
+                                assert data2_set["session_id"] == c2_sid
+                                assert data2_set["active"] == "/client2/ws"
+                            tg2.cancel_scope.cancel()
+
+                    # Re-verify Client 1 context was NOT overwritten by Client 2
+                    r1_recheck = await session1.call_tool("manage_context", {"action": "get", "type": "workspace"})
+                    data1_recheck = json.loads(r1_recheck.content[0].text)
+                    assert data1_recheck["status"] == "success"
+                    assert data1_recheck["session_id"] == c1_sid
+                    assert data1_recheck["active"] == "/client1/ws"
+                tg1.cancel_scope.cancel()
+
+    anyio.run(scenario)
+

@@ -3,6 +3,8 @@ FastMCP Server definition for mws.
 Universal Dynamic On-Demand MCP Gateway & Tool Router.
 """
 
+import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 try:
@@ -51,35 +53,47 @@ from .process_pool import GLOBAL_POOL
 mcp = FastMCP("mws")
 
 
-def _resolve_session_id(ctx: Any = None, explicit_id: Optional[str] = None) -> str:
+def _resolve_session_id(ctx: Any = None) -> str:
     """
-    Resolves session ID strictly following precedence:
-    1. Explicit caller-provided session_id argument.
-    2. Active transport-level session (ctx.session or ctx.headers).
-    3. Default session ("default").
+    Resolves session ID strictly from trusted transport identity:
+    1. Active transport-level session or connection:
+       - Checks connection.session_id (if available on the transport).
+       - Checks connection.state dict for persistent per-connection identifier.
+       - Checks ctx.session attributes (session_id, id).
+    2. Fallback to 'default' session ONLY when ctx is None (standard single-client stdio mode).
+    3. If ctx is provided but has no transport identity, raises RuntimeError to prevent
+       cross-client pollution or session spoofing.
+    Caller-supplied session IDs and unvalidated request headers are never accepted.
     """
-    if explicit_id and explicit_id.strip():
-        return explicit_id.strip()
     if ctx is not None:
         try:
-            if hasattr(ctx, "session") and ctx.session is not None:
-                sess = ctx.session
-                if hasattr(sess, "session_id") and sess.session_id:
-                    return str(sess.session_id)
-                return f"transport_{id(sess)}"
-            if hasattr(ctx, "headers") and ctx.headers:
-                hdr_sid = ctx.headers.get("mcp-session-id") or ctx.headers.get("x-session-id")
-                if hdr_sid:
-                    return str(hdr_sid)
+            # 1. Inspect request_context and underlying connection
+            req_ctx = getattr(ctx, "request_context", None) or getattr(ctx, "_request_context", None)
+            sess = getattr(req_ctx, "session", None) if req_ctx is not None else getattr(ctx, "session", None)
+            if sess is not None:
+                conn = getattr(sess, "_connection", None)
+                if conn is not None:
+                    if getattr(conn, "session_id", None):
+                        return str(conn.session_id)
+                    if hasattr(conn, "state") and isinstance(conn.state, dict):
+                        if "_mws_session_id" not in conn.state:
+                            conn.state["_mws_session_id"] = f"mcp_conn_{uuid.uuid4().hex[:12]}"
+                        return str(conn.state["_mws_session_id"])
         except Exception:
             pass
+
+        raise RuntimeError(
+            "Unable to resolve trusted transport identity from request context. "
+            "Multi-client requests must have a valid transport session or connection."
+        )
+
+    # Only when ctx is None (stdio CLI or single-agent local mode) do we use "default"
     return "default"
 
 
 @mcp.tool()
 def use_server(
     server: str,
-    session_id: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
@@ -88,7 +102,6 @@ def use_server(
 
     Args:
         server: Target MCP server name (e.g. 'db', 'excel', 'git', 'ssh', 'rag', 'word', 'tsc', 'arch').
-        session_id: Optional session identifier for isolated multi-client context stacks.
     """
     clean = server.lower().strip()
     available = discover_available_servers()
@@ -97,7 +110,7 @@ def use_server(
             "success": False,
             "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
         }
-    sid = _resolve_session_id(ctx, session_id)
+    sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
     session.set("server", clean)
     return {
@@ -113,14 +126,13 @@ def manage_context(
     action: str = "get",
     type: Optional[str] = None,
     value: Optional[str] = None,
-    session_id: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Manage scoped session context stacks (server, db_connection, ssh_host, workspace, workbook).
     Context values are automatically injected into subsequent tool calls, eliminating argument repetition.
     Independent stacks ensure changing a database connection never alters an SSH host or workspace.
-    Sessions are completely isolated by 'session_id' (or auto-resolved transport session) to prevent cross-agent interference.
+    Session identity is securely derived from the transport connection to prevent cross-agent interference.
 
     Actions:
       - 'get':           Get active context value for a type, or snapshot of all if type is omitted.
@@ -138,11 +150,23 @@ def manage_context(
       - 'workbook':      Active Excel workbook file.
     """
     act = action.lower().strip()
-    if act == "list_sessions":
-        return {"status": "success", "sessions": GLOBAL_CONTEXT.list_sessions()}
-
-    sid = _resolve_session_id(ctx, session_id)
+    sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
+
+    if act == "list_sessions":
+        now = time.time()
+        idle = now - session.last_accessed_at
+        return {
+            "status": "success",
+            "sessions": [
+                {
+                    "session_id": session.session_id,
+                    "is_active": idle <= GLOBAL_CONTEXT.active_lease_seconds,
+                    "idle_seconds": round(idle, 1),
+                    "created_seconds_ago": round(now - session.created_at, 1),
+                }
+            ],
+        }
 
     if act == "get":
         if not type:
@@ -269,7 +293,6 @@ def call_tool(
     tool_name: Optional[str] = None,
     arguments: Optional[Dict[str, Any]] = None,
     tool: Optional[str] = None,
-    session_id: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Any:
     """
@@ -283,14 +306,13 @@ def call_tool(
     - Contextual parameters ('connection', 'host', 'workspace', 'workbook') are auto-injected from session context.
     - Supports dot notation (e.g. 'db.read_query', 'excel.preview_sheet').
     - Accepts either 'tool_name' or 'tool'.
-    - Sessions are isolated by 'session_id' (or auto-resolved transport session) to prevent multi-agent crosstalk.
+    - Sessions are isolated via transport-level session identity to prevent multi-agent crosstalk.
 
     Args:
         server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
         tool_name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info').
         arguments: Dictionary of arguments matching the tool's parameter schema.
         tool: Alias for tool_name.
-        session_id: Optional session identifier for isolated multi-client context stacks.
     """
     # Accept 'tool' if tool_name is not explicitly passed
     raw_tool = tool_name or tool
@@ -298,7 +320,7 @@ def call_tool(
     target_server = (server or "").lower().strip()
 
     available_servers = discover_available_servers()
-    sid = _resolve_session_id(ctx, session_id)
+    sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
 
     # 1. Handle dot notation (e.g. 'db.read_query' or 'excel.preview_sheet')

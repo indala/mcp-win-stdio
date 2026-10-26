@@ -117,7 +117,7 @@ def test_concurrent_session_access_and_pruning():
         return sid, val
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        results = list(executor.map(worker, range(15)))
+        results = list(executor.map(worker, range(10)))
 
     for sid, val in results:
         expected_db = f"db_{sid.split('_')[1]}"
@@ -131,5 +131,121 @@ def test_concurrent_session_access_and_pruning():
     reg.get_session("new_session")
     # Expired sessions should be pruned
     assert len(reg._sessions) <= 10
+
+
+def test_lease_protected_session_lifecycle():
+    """Verify active sessions under lease are never evicted, and capacity limits are enforced safely."""
+    import time
+
+    import pytest
+
+    reg = ContextManager(max_sessions=3, max_idle_seconds=3600.0, active_lease_seconds=10.0)
+
+    # Fill capacity with 3 active sessions
+    reg.set("workspace", "/path/1", session_id="s1")
+    reg.set("workspace", "/path/2", session_id="s2")
+    reg.set("workspace", "/path/3", session_id="s3")
+
+    sessions_meta = reg.list_sessions()
+    assert len(sessions_meta) == 3
+    for sm in sessions_meta:
+        assert sm["is_active"] is True
+        assert "idle_seconds" in sm
+        assert "created_seconds_ago" in sm
+
+    # Attempting to allocate when all 3 are active under lease must raise RuntimeError
+    with pytest.raises(RuntimeError, match="Maximum active sessions limit"):
+        reg.get_session("s4")
+
+    # Manually age session 's1' beyond the 10.0s active lease
+    reg._sessions["s1"].last_accessed_at = time.time() - 15.0
+
+    # Listing sessions now shows s1 as not active
+    meta_map = {m["session_id"]: m for m in reg.list_sessions()}
+    assert meta_map["s1"]["is_active"] is False
+    assert meta_map["s2"]["is_active"] is True
+
+    # Now allocating s4 should safely evict inactive session 's1'
+    s4 = reg.get_session("s4")
+    assert s4.session_id == "s4"
+    assert "s1" not in reg._sessions
+    assert "s2" in reg._sessions
+    assert "s3" in reg._sessions
+    assert "s4" in reg._sessions
+
+
+def test_full_capacity_regression_existing_sessions_accessible():
+    """Verify existing sessions remain fully operational when registry is at capacity."""
+    import pytest
+
+    reg = ContextManager(max_sessions=3, max_idle_seconds=3600.0, active_lease_seconds=600.0)
+    reg.set("workspace", "/project/alpha", session_id="alpha")
+    reg.set("workspace", "/project/beta", session_id="beta")
+    reg.set("workspace", "/project/gamma", session_id="gamma")
+
+    # Creating a new session must be rejected
+    with pytest.raises(RuntimeError, match="Maximum active sessions limit"):
+        reg.get_session("delta")
+
+    # Accessing and modifying existing sessions must succeed without raising RuntimeError
+    assert reg.get("workspace", session_id="alpha") == "/project/alpha"
+    reg.set("workspace", "/project/alpha_v2", session_id="alpha")
+    assert reg.get("workspace", session_id="alpha") == "/project/alpha_v2"
+
+    snap = reg.snapshot(session_id="beta")
+    assert snap["workspace"]["active"] == "/project/beta"
+    assert len(reg._sessions) == 3
+
+
+def test_concurrent_creation_at_capacity():
+    """Verify concurrent creation attempts at capacity maintain capacity invariant without evicting active sessions."""
+    import concurrent.futures
+
+    reg = ContextManager(max_sessions=3, max_idle_seconds=3600.0, active_lease_seconds=600.0)
+    reg.set("workspace", "/initial/1", session_id="init_1")
+    reg.set("workspace", "/initial/2", session_id="init_2")
+    reg.set("workspace", "/initial/3", session_id="init_3")
+
+    errors = []
+
+    def try_create(idx):
+        try:
+            reg.get_session(f"new_{idx}")
+            return "created"
+        except RuntimeError as e:
+            errors.append(str(e))
+            return "rejected"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(try_create, range(10)))
+
+    assert all(r == "rejected" for r in results)
+    assert len(errors) == 10
+    assert all("Maximum active sessions limit" in err for err in errors)
+
+    # Invariant holds: exactly 3 initial sessions, none evicted
+    assert len(reg._sessions) == 3
+    assert set(reg._sessions.keys()) == {"init_1", "init_2", "init_3"}
+
+
+def test_expired_session_pruned_on_retrieval():
+    """Verify that retrieving a session past max_idle_seconds prunes it and returns a clean session."""
+    import time
+
+    reg = ContextManager(max_sessions=3, max_idle_seconds=60.0, active_lease_seconds=30.0)
+
+    # 1. Populate session with context
+    reg.set("workspace", "/old/workspace", session_id="exp_sid")
+    assert reg.get("workspace", session_id="exp_sid") == "/old/workspace"
+
+    # 2. Advance time beyond max_idle_seconds
+    reg._sessions["exp_sid"].last_accessed_at = time.time() - 120.0
+
+    # 3. Retrieving exp_sid must prune the expired session and allocate a fresh one
+    fresh = reg.get_session("exp_sid")
+    assert fresh.session_id == "exp_sid"
+    # Old context stack must be discarded
+    assert fresh.get("workspace") is None
+    assert reg.get("workspace", session_id="exp_sid") is None
 
 

@@ -167,52 +167,83 @@ class SessionContext:
 class ContextRegistry:
     """
     Registry managing isolated SessionContexts for different clients / session IDs.
-    Guarantees thread-safe access, LRU lifecycle pruning, and strict session isolation.
+    Guarantees thread-safe access, lease-protected lifecycle management, and strict session isolation.
+    Active sessions under lease are never evicted to satisfy capacity limits.
     """
 
-    def __init__(self, max_sessions: int = 100, max_idle_seconds: float = 7200.0) -> None:
+    def __init__(
+        self,
+        max_sessions: int = 100,
+        max_idle_seconds: float = 7200.0,
+        active_lease_seconds: float = 1800.0,
+    ) -> None:
         self._lock = threading.RLock()
         self._sessions: Dict[str, SessionContext] = {}
         self.max_sessions = max_sessions
         self.max_idle_seconds = max_idle_seconds
+        self.active_lease_seconds = min(active_lease_seconds, max_idle_seconds)
 
-    def _prune_if_needed(self) -> None:
-        now = time.time()
-        # 1. Prune expired sessions older than max_idle_seconds (skip 'default')
+    def _prune_expired(self, now: float) -> None:
+        """Remove sessions that have exceeded max_idle_seconds."""
         expired = [
             sid
             for sid, s in self._sessions.items()
-            if sid != "default" and (now - s.last_accessed_at) > self.max_idle_seconds
+            if (now - s.last_accessed_at) > self.max_idle_seconds
         ]
         for sid in expired:
             del self._sessions[sid]
 
-        # 2. If still exceeding max_sessions, prune oldest idle sessions
-        if len(self._sessions) > self.max_sessions:
-            candidates = sorted(
-                [(sid, s.last_accessed_at) for sid, s in self._sessions.items() if sid != "default"],
+    def _evict_idle_for_capacity(self, now: float) -> None:
+        """Evict non-active sessions beyond active_lease_seconds to free up capacity."""
+        if len(self._sessions) >= self.max_sessions:
+            evictable = sorted(
+                [
+                    (sid, s.last_accessed_at)
+                    for sid, s in self._sessions.items()
+                    if (now - s.last_accessed_at) > self.active_lease_seconds
+                ],
                 key=lambda x: x[1],
             )
-            to_remove = len(self._sessions) - self.max_sessions
-            for sid, _ in candidates[:to_remove]:
+            to_remove = len(self._sessions) - self.max_sessions + 1
+            for sid, _ in evictable[:to_remove]:
                 del self._sessions[sid]
 
     def get_session(self, session_id: Optional[str] = None) -> SessionContext:
         sid = (session_id or "default").strip()
+        now = time.time()
         with self._lock:
-            self._prune_if_needed()
-            if sid not in self._sessions:
-                self._sessions[sid] = SessionContext(session_id=sid)
+            # 1. Prune all expired sessions first; expired sessions are never reused
+            self._prune_expired(now)
+
+            # 2. Return existing active/non-expired session if already present
+            if sid in self._sessions:
+                return self._sessions[sid]
+
+            # 3. New session creation: if at capacity, attempt to evict sessions past active lease
+            if len(self._sessions) >= self.max_sessions:
+                self._evict_idle_for_capacity(now)
+
+            # 4. If still at capacity, reject the new session without altering existing sessions
+            if len(self._sessions) >= self.max_sessions:
+                raise RuntimeError(
+                    f"Maximum active sessions limit ({self.max_sessions}) reached. "
+                    "All existing sessions are active under lease. Try again later."
+                )
+
+            self._sessions[sid] = SessionContext(session_id=sid)
             return self._sessions[sid]
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         now = time.time()
         with self._lock:
+            self._prune_expired(now)
             results = []
             for sid, s in self._sessions.items():
+                idle = now - s.last_accessed_at
                 results.append({
                     "session_id": sid,
-                    "idle_seconds": round(now - s.last_accessed_at, 1),
+                    "is_active": idle <= self.active_lease_seconds,
+                    "idle_seconds": round(idle, 1),
                     "created_seconds_ago": round(now - s.created_at, 1),
                 })
             return results
