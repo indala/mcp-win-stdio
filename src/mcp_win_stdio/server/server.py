@@ -6,9 +6,17 @@ Universal Dynamic On-Demand MCP Gateway & Tool Router.
 from typing import Any, Dict, List, Optional
 
 try:
+    from mcp.server.mcpserver import Context
     from mcp.server.mcpserver import MCPServer as FastMCP
 except (ImportError, ModuleNotFoundError):
-    from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
+    try:
+        from mcp.server.fastmcp import (
+            Context,  # type: ignore[import-not-found]
+            FastMCP,  # type: ignore[import-not-found]
+        )
+    except (ImportError, ModuleNotFoundError):
+        Context = Any  # type: ignore[assignment]
+        from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
 
 from mcp_win_stdio.core.context import GLOBAL_CONTEXT
 from mcp_win_stdio.core.workflows import (
@@ -43,8 +51,37 @@ from .process_pool import GLOBAL_POOL
 mcp = FastMCP("mws")
 
 
+def _resolve_session_id(ctx: Any = None, explicit_id: Optional[str] = None) -> str:
+    """
+    Resolves session ID strictly following precedence:
+    1. Explicit caller-provided session_id argument.
+    2. Active transport-level session (ctx.session or ctx.headers).
+    3. Default session ("default").
+    """
+    if explicit_id and explicit_id.strip():
+        return explicit_id.strip()
+    if ctx is not None:
+        try:
+            if hasattr(ctx, "session") and ctx.session is not None:
+                sess = ctx.session
+                if hasattr(sess, "session_id") and sess.session_id:
+                    return str(sess.session_id)
+                return f"transport_{id(sess)}"
+            if hasattr(ctx, "headers") and ctx.headers:
+                hdr_sid = ctx.headers.get("mcp-session-id") or ctx.headers.get("x-session-id")
+                if hdr_sid:
+                    return str(hdr_sid)
+        except Exception:
+            pass
+    return "default"
+
+
 @mcp.tool()
-def use_server(server: str, session_id: Optional[str] = None) -> Dict[str, Any]:
+def use_server(
+    server: str,
+    session_id: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
     """
     Switch or declare the active MCP server context for subsequent tool calls.
     Once set, agents can execute tools without providing the 'server' parameter.
@@ -60,7 +97,8 @@ def use_server(server: str, session_id: Optional[str] = None) -> Dict[str, Any]:
             "success": False,
             "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
         }
-    session = GLOBAL_CONTEXT.get_session(session_id)
+    sid = _resolve_session_id(ctx, session_id)
+    session = GLOBAL_CONTEXT.get_session(sid)
     session.set("server", clean)
     return {
         "success": True,
@@ -76,19 +114,21 @@ def manage_context(
     type: Optional[str] = None,
     value: Optional[str] = None,
     session_id: Optional[str] = None,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Manage scoped session context stacks (server, db_connection, ssh_host, workspace, workbook).
     Context values are automatically injected into subsequent tool calls, eliminating argument repetition.
     Independent stacks ensure changing a database connection never alters an SSH host or workspace.
-    Sessions are completely isolated by 'session_id' to prevent cross-agent interference.
+    Sessions are completely isolated by 'session_id' (or auto-resolved transport session) to prevent cross-agent interference.
 
     Actions:
-      - 'get':    Get active context value for a type, or snapshot of all if type is omitted.
-      - 'set':    Set or replace active value for a context type.
-      - 'push':   Push a new temporary value onto stack (preserves previous value for later pop).
-      - 'pop':    Pop active value from stack, restoring previous context.
-      - 'clear':  Clear a specific context stack or all stacks.
+      - 'get':           Get active context value for a type, or snapshot of all if type is omitted.
+      - 'set':           Set or replace active value for a context type.
+      - 'push':          Push a new temporary value onto stack (preserves previous value for later pop).
+      - 'pop':           Pop active value from stack, restoring previous context.
+      - 'clear':         Clear a specific context stack or all stacks.
+      - 'list_sessions': List all active client sessions and their idle durations.
 
     Supported Types:
       - 'server':        Active MCP server namespace (e.g. 'db', 'excel', 'ssh', 'git', 'arch').
@@ -98,7 +138,11 @@ def manage_context(
       - 'workbook':      Active Excel workbook file.
     """
     act = action.lower().strip()
-    session = GLOBAL_CONTEXT.get_session(session_id)
+    if act == "list_sessions":
+        return {"status": "success", "sessions": GLOBAL_CONTEXT.list_sessions()}
+
+    sid = _resolve_session_id(ctx, session_id)
+    session = GLOBAL_CONTEXT.get_session(sid)
 
     if act == "get":
         if not type:
@@ -152,7 +196,7 @@ def manage_context(
     else:
         return {
             "status": "error",
-            "error": f"Unknown action '{action}'. Supported actions: 'get', 'set', 'push', 'pop', 'clear'.",
+            "error": f"Unknown action '{action}'. Supported actions: 'get', 'set', 'push', 'pop', 'clear', 'list_sessions'.",
         }
 
 
@@ -226,6 +270,7 @@ def call_tool(
     arguments: Optional[Dict[str, Any]] = None,
     tool: Optional[str] = None,
     session_id: Optional[str] = None,
+    ctx: Optional[Context] = None,
 ) -> Any:
     """
     Execute a tool dynamically on a target MCP server with smart auto-routing and context stack inheritance.
@@ -238,7 +283,7 @@ def call_tool(
     - Contextual parameters ('connection', 'host', 'workspace', 'workbook') are auto-injected from session context.
     - Supports dot notation (e.g. 'db.read_query', 'excel.preview_sheet').
     - Accepts either 'tool_name' or 'tool'.
-    - Sessions are isolated by 'session_id' to prevent multi-agent crosstalk.
+    - Sessions are isolated by 'session_id' (or auto-resolved transport session) to prevent multi-agent crosstalk.
 
     Args:
         server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
@@ -253,7 +298,8 @@ def call_tool(
     target_server = (server or "").lower().strip()
 
     available_servers = discover_available_servers()
-    session = GLOBAL_CONTEXT.get_session(session_id)
+    sid = _resolve_session_id(ctx, session_id)
+    session = GLOBAL_CONTEXT.get_session(sid)
 
     # 1. Handle dot notation (e.g. 'db.read_query' or 'excel.preview_sheet')
     if "." in target_tool:

@@ -193,6 +193,10 @@ def test_run_workflow_halt_on_error():
     assert res["status"] == "halted_on_error"
     assert res["failed_step"] == "step1"
     assert res["steps_completed"] == 0
+    assert res["steps_successful"] == 0
+    assert res["steps_failed"] == 1
+    assert res["steps_skipped"] == 1
+    assert res["steps_executed"] == 1
     assert len(res["trace"]) == 1
     assert res["trace"][0]["status"] == "error"
 

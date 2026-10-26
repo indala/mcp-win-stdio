@@ -103,3 +103,33 @@ def test_multi_session_context_isolation():
     # Verify default session is unaffected
     assert ctx.get("db_connection") is None
 
+
+def test_concurrent_session_access_and_pruning():
+    """Verify thread-safe concurrent session access and LRU lifecycle pruning."""
+    import concurrent.futures
+
+    reg = ContextManager(max_sessions=10, max_idle_seconds=0.1)
+
+    def worker(idx):
+        sid = f"worker_{idx}"
+        reg.set("db_connection", f"db_{idx}", session_id=sid)
+        val = reg.get("db_connection", session_id=sid)
+        return sid, val
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        results = list(executor.map(worker, range(15)))
+
+    for sid, val in results:
+        expected_db = f"db_{sid.split('_')[1]}"
+        assert val == expected_db
+
+    # Sleep slightly to trigger max_idle_seconds expiration
+    import time
+    time.sleep(0.15)
+
+    # Access a new session to trigger prune
+    reg.get_session("new_session")
+    # Expired sessions should be pruned
+    assert len(reg._sessions) <= 10
+
+

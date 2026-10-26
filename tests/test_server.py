@@ -277,5 +277,10 @@ def test_manage_context_and_stack_injection():
     assert "contexts" in snap
     assert snap["contexts"]["db_connection"]["active"] == "test_pg_db"
 
+    # 5. List active sessions
+    sess_list = manage_context(action="list_sessions")
+    assert sess_list["status"] == "success"
+    assert any(s["session_id"] == "default" for s in sess_list["sessions"])
+
     GLOBAL_CONTEXT.clear()
 
