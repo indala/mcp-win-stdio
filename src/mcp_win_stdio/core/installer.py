@@ -137,6 +137,78 @@ def generate_claude_cli_command(server_name: str, env_vars: Optional[Dict[str, s
     return f'claude mcp add -s user {env_flags}{server_name} -- "{python_exe}" {" ".join(args)}'
 
 
+def unlock_running_executable() -> Optional[Path]:
+    """
+    On Windows, running executables (.exe) are locked by the OS kernel against deletion/overwriting.
+    However, Windows NTFS allows a running executable to be RENAMED within the same directory.
+    This helper safely renames mws.exe to mws.exe.deleteme_<pid> so that pip/uv can
+    install or uninstall the new executable without hitting 'Access is denied (os error 5)'.
+    """
+    if sys.platform != "win32":
+        return None
+
+    candidates: List[Path] = []
+    # 1. which mws
+    w = shutil.which("mws")
+    if w:
+        candidates.append(Path(w).resolve())
+    # 2. Python Scripts directory
+    py_dir = Path(sys.executable).resolve().parent
+    candidates.append(py_dir / "Scripts" / "mws.exe")
+    candidates.append(py_dir / "mws.exe")
+    # 3. sys.argv[0]
+    if sys.argv and sys.argv[0].lower().endswith(".exe"):
+        candidates.append(Path(sys.argv[0]).resolve())
+
+    for exe_path in candidates:
+        if exe_path.exists() and exe_path.is_file():
+            try:
+                old_path = exe_path.with_name(f"{exe_path.name}.deleteme_{os.getpid()}")
+                if old_path.exists():
+                    try:
+                        old_path.unlink()
+                    except Exception:
+                        pass
+                exe_path.rename(old_path)
+                return old_path
+            except Exception:
+                pass
+    return None
+
+
+def cleanup_old_executables() -> None:
+    """Clean up any leftover .deleteme_* or .old files from previous updates."""
+    if sys.platform != "win32":
+        return
+    py_dir = Path(sys.executable).resolve().parent
+    search_dirs = [py_dir / "Scripts", py_dir]
+    for d in search_dirs:
+        if d.exists():
+            for p in d.glob("mws.exe.deleteme_*"):
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+            old_p = d / "mws.exe.old"
+            if old_p.exists():
+                try:
+                    old_p.unlink()
+                except Exception:
+                    pass
+
+
+def schedule_detached_deletion(target_file: Path) -> None:
+    """Schedule a file to be deleted 2 seconds after process termination on Windows."""
+    if sys.platform != "win32" or not target_file.exists():
+        return
+    cmd = f'timeout /t 2 /nobreak >nul & if exist "{target_file}" del /f /q "{target_file}"'
+    try:
+        flags = 0x00000008 | 0x08000000  # DETACHED_PROCESS | CREATE_NO_WINDOW
+        subprocess.Popen(["cmd.exe", "/c", cmd], creationflags=flags, close_fds=True)
+    except Exception:
+        pass
+
+
 def install_pip_dependencies(packages: List[str], upgrade: bool = False) -> Tuple[bool, str]:
     """Install required Python packages using the best available package manager (uv or pip)."""
     if not packages:
@@ -155,12 +227,36 @@ def install_pip_dependencies(packages: List[str], upgrade: bool = False) -> Tupl
     print(f"\n==> 📦 Installing packages via {mgr_name}: {', '.join(packages)}...")
     cmd = cmd_base + packages
 
+    # On Windows, if updating mcp-win-stdio or mws, unlock the running executable first
+    renamed_exe: Optional[Path] = None
+    if upgrade and any("mcp-win-stdio" in p for p in packages):
+        renamed_exe = unlock_running_executable()
+
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0:
+            if renamed_exe:
+                schedule_detached_deletion(renamed_exe)
+            cleanup_old_executables()
             return True, "Dependencies installed successfully."
         else:
-            return False, f"Package manager error:\n{res.stderr or res.stdout}"
+            # If install failed and original exe wasn't replaced, restore backup
+            if renamed_exe and renamed_exe.exists():
+                orig_exe = renamed_exe.with_name("mws.exe")
+                if not orig_exe.exists():
+                    try:
+                        renamed_exe.rename(orig_exe)
+                    except Exception:
+                        pass
+            err_msg = res.stderr or res.stdout
+            if "os error 5" in err_msg or "Access is denied" in err_msg:
+                err_msg += (
+                    "\n\n💡 Tip: To bypass Windows executable file locking, run using python directly:\n"
+                    f"    python -m mcp_win_stdio update\n"
+                    f"    # or\n"
+                    f'    uv pip install --upgrade "{packages[0]}"'
+                )
+            return False, f"Package manager error:\n{err_msg}"
     except Exception as e:
         return False, f"Failed to run installer: {str(e)}"
 
@@ -283,11 +379,33 @@ def uninstall_pip_packages(packages: List[str]) -> Tuple[bool, str]:
     print(f"\n==> 🧹 Removing packages via {mgr_name}: {', '.join(packages)}...")
     cmd = cmd_base + packages
 
+    # On Windows, if uninstalling mcp-win-stdio (self), unlock running executable first
+    renamed_exe: Optional[Path] = None
+    if any(p == "mcp-win-stdio" for p in packages):
+        renamed_exe = unlock_running_executable()
+
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode == 0:
+            if renamed_exe:
+                schedule_detached_deletion(renamed_exe)
             return True, "Packages uninstalled successfully."
         else:
-            return False, f"Package manager uninstall error:\n{res.stderr or res.stdout}"
+            if renamed_exe and renamed_exe.exists():
+                orig_exe = renamed_exe.with_name("mws.exe")
+                if not orig_exe.exists():
+                    try:
+                        renamed_exe.rename(orig_exe)
+                    except Exception:
+                        pass
+            err_msg = res.stderr or res.stdout
+            if "os error 5" in err_msg or "Access is denied" in err_msg:
+                err_msg += (
+                    "\n\n💡 Tip: To bypass Windows executable file locking during uninstallation, run:\n"
+                    f"    python -m mcp_win_stdio uninstall self\n"
+                    f"    # or\n"
+                    f"    uv pip uninstall {' '.join(packages)} -y"
+                )
+            return False, f"Package manager uninstall error:\n{err_msg}"
     except Exception as e:
         return False, f"Failed to run package uninstall: {str(e)}"

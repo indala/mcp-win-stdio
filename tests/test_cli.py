@@ -49,10 +49,10 @@ def test_discovery():
     assert servers["db"]["tools_count"] == 34
     assert servers["git"]["tools_count"] == 46
     assert servers["ssh"]["tools_count"] == 34
-    assert servers["rag"]["tools_count"] == 10
+    assert servers["rag"]["tools_count"] == 11
     assert servers["excel-db"]["tools_count"] == 9
     assert servers["arch"]["tools_count"] == 5
-    assert servers["server"]["tools_count"] == 10
+    assert servers["server"]["tools_count"] == 11
     print("[PASS] Discovery test passed for all 11 servers.")
 
 
@@ -169,8 +169,9 @@ def test_rag_tool_registration():
         "list_rag_collections",
         "delete_rag_collection",
         "prune_rag_cache",
+        "rag_status",
     }
-    assert len(tools) == 10
+    assert len(tools) == 11
 
 
 def test_updater():

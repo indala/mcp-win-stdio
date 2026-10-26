@@ -317,11 +317,16 @@ def get_server_catalog(
     }
 
 
-def search_tools(query: str, server: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+def search_tools(
+    query: str,
+    server: Optional[str] = None,
+    limit: int = 10,
+    detail: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Dynamically search all tools across all servers or within a specific server.
     Matches tool names, descriptions, and parameter properties.
-    Returns full schemas and compact signatures for matching tools.
+    Returns compact signatures by default (saving context tokens), or full schemas when detail=True.
     """
     available = discover_available_servers()
     targets = [server.lower()] if server and server.lower() in available else list(available.keys())
@@ -357,14 +362,16 @@ def search_tools(query: str, server: Optional[str] = None, limit: int = 10) -> L
                     score += 10
 
             if score > 0:
-                results.append({
+                item: Dict[str, Any] = {
                     "score": score,
                     "server": srv,
                     "tool": name,
                     "signature": generate_compact_signature(name, params),
                     "description": desc,
-                    "parameters": params,
-                })
+                }
+                if detail:
+                    item["parameters"] = params
+                results.append(item)
 
     # Sort by relevance score descending
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -375,6 +382,19 @@ def search_tools(query: str, server: Optional[str] = None, limit: int = 10) -> L
         r.pop("score", None)
 
     return top_results
+
+
+def find_servers_for_tool(tool_name: str) -> List[str]:
+    """Find all servers that implement a given tool name."""
+    clean_name = tool_name.lower().strip()
+    available = discover_available_servers()
+    matches: List[str] = []
+    for srv in available.keys():
+        for t in get_server_tools(srv):
+            if t.get("name", "").lower() == clean_name:
+                matches.append(srv)
+                break
+    return matches
 
 
 def describe_tool(server: str, tool_name: str) -> Optional[Dict[str, Any]]:

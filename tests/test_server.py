@@ -29,6 +29,7 @@ from mcp_win_stdio.server.server import (
     run_workflow,
     save_workflow,
     stop_server,
+    use_server,
 )
 
 
@@ -68,17 +69,23 @@ def test_server_catalog():
 
 
 def test_search_tools():
-    """Verify natural language search across tools returning complete schemas."""
-    # Search for SQL / query tools
+    """Verify natural language search across tools returning compact signatures and full schemas."""
+    # 1. Search for SQL / query tools with default compact mode
     matches = search_tools(query="safe select query json sql", server="db", limit=5)
     assert len(matches) > 0
     top_tool = matches[0]
     assert top_tool["server"] == "db"
     assert top_tool["tool"] == "read_query"
-    assert "parameters" in top_tool
-    assert "sql" in top_tool["parameters"]["properties"]
+    assert "signature" in top_tool
+    assert "parameters" not in top_tool
 
-    # Cross-server search
+    # 2. Detailed search returns complete JSON schema
+    detailed_matches = search_tools(query="safe select query json sql", server="db", limit=5, detail=True)
+    assert len(detailed_matches) > 0
+    assert "parameters" in detailed_matches[0]
+    assert "sql" in detailed_matches[0]["parameters"]["properties"]
+
+    # 3. Cross-server search
     ts_matches = search_tools(query="typescript error suggestions", limit=5)
     assert any(m["server"] == "tsc" for m in ts_matches)
 
@@ -119,6 +126,33 @@ def test_process_pool_lazy_spawn_and_proxy():
     stop_res = stop_server("db")
     assert stop_res["stopped"] is True
     assert len(GLOBAL_POOL.get_active_sessions()) == 0
+
+
+def test_call_tool_smart_routing():
+    """Verify smart routing infers server when omitted, supports use_server, dot-notation, and merges kwargs."""
+    GLOBAL_POOL.shutdown_all()
+
+    # 1. Explicit use_server switches context
+    ctx = use_server("db")
+    assert ctx["success"] is True
+    assert ctx["active_server"] == "db"
+
+    # 2. Call list_connections without specifying server='db'
+    res = call_tool(tool_name="list_connections")
+    assert res is not None
+    assert "content" in res
+
+    # 3. Call via dot-notation: 'db.list_connections'
+    dot_res = call_tool(tool_name="db.list_connections")
+    assert dot_res is not None
+    assert "content" in dot_res
+
+    # 4. Unknown tool returns helpful error with available hints
+    bad_res = call_tool(tool_name="unknown_tool_12345")
+    assert bad_res.get("isError") is True
+    assert "not found" in bad_res.get("error", "")
+
+    GLOBAL_POOL.shutdown_all()
 
 
 def test_server_meta_tools_api():

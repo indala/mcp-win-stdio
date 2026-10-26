@@ -10,10 +10,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from mcp_win_stdio.explorer import __version__
 from mcp_win_stdio.explorer.guide import print_guide
 from mcp_win_stdio.explorer.server import mcp
-
-from mcp_win_stdio.explorer import __version__
 
 
 def get_claude_desktop_config_path() -> Path | None:

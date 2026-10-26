@@ -83,13 +83,13 @@ def _is_db_url(url: Any) -> bool:
 
 def _fetch_all(cur: Any) -> List[Any]:
     """Safely fetch all rows from cursor as a list of dictionaries/records."""
-    rows = _fetch_all(cur)
+    rows = cur.fetchall()
     return list(rows) if rows else []
 
 
 def _fetch_one(cur: Any) -> Dict[str, Any]:
     """Safely fetch single row from cursor as a dictionary."""
-    row = _fetch_one(cur)
+    row = cur.fetchone()
     return dict(row) if row else {}
 
 
@@ -229,10 +229,12 @@ def _init_config() -> None:
             _ACTIVE_CONNECTION = matched
         elif _RAW_CONFIG:
             _ACTIVE_CONNECTION = next(iter(_RAW_CONFIG.keys()))
+            _save_active_connection(_ACTIVE_CONNECTION)
         else:
             _ACTIVE_CONNECTION = None
     elif _RAW_CONFIG:
         _ACTIVE_CONNECTION = next(iter(_RAW_CONFIG.keys()))
+        _save_active_connection(_ACTIVE_CONNECTION)
 
     # Pre-register all raw configs in connection registry
     for k, v in list(_RAW_CONFIG.items()):

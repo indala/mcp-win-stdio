@@ -54,7 +54,9 @@ from mcp_win_stdio.core.environment import (
     get_candidate_script_dirs,
     is_in_path,
 )
+from mcp_win_stdio.core.external_updater import spawn_external_updater
 from mcp_win_stdio.core.installer import (
+    cleanup_old_executables,
     generate_claude_cli_command,
     generate_claude_desktop_snippet,
     get_claude_cli_config_path,
@@ -123,21 +125,43 @@ def print_dashboard() -> None:
 
 
 def print_server_list() -> None:
-    """Print a focused inventory of built-in servers and custom plugins."""
+    """Print a clean, beautifully formatted inventory of built-in servers and custom plugins."""
+    import textwrap
+
     servers = list_available_servers()
-    print("\nMCP Server Inventory")
-    print("=" * 100)
-    print(f"{'SERVER':<16} {'STATUS':<16} {'TOOLS':<8} {'TYPE':<12} DESCRIPTION")
-    print("-" * 100)
+    term_width = min(shutil.get_terminal_size(fallback=(80, 24)).columns, 88)
+
+    print("\n" + "=" * term_width)
+    print(f"   📦  MCP Server Inventory ({len(servers)} Available)")
+    print("=" * term_width)
+
     for name, server in servers.items():
-        status = "Installed" if server.get("is_installed") else "Not installed"
+        is_inst = server.get("is_installed", False)
+        status_badge = "[Installed]" if is_inst else "[Not Installed]"
+        bullet = "●" if is_inst else "○"
         tools = str(server.get("tools_count", "?"))
         server_type = "Plugin" if not server.get("is_builtin") else "Built-in"
-        description = server.get("description", "").replace("\n", " ").strip()
-        print(f"{name:<16} {status:<16} {tools:<8} {server_type:<12} {description}")
-    print("-" * 100)
-    print(f"{len(servers)} server(s) found. Run 'mws' for the home dashboard or 'mws status' for project setup.")
-    print()
+
+        print(f"\n  {bullet} {name:<14} {status_badge:<16} • {tools} tools • {server_type}")
+
+        # Clean description without redundant "XX tools: " prefix
+        raw_desc = server.get("description", "").strip().replace("\n", " ")
+        cleaned_desc = re.sub(r"^\d+\s+(?:meta-)?tools:\s*", "", raw_desc, flags=re.IGNORECASE)
+
+        wrapped_lines = textwrap.wrap(cleaned_desc, width=max(term_width - 6, 40))
+        for line in wrapped_lines:
+            print(f"    {line}")
+
+        if not is_inst:
+            print(f"    → Install: mws install {name}")
+
+    print("\n" + "-" * term_width)
+    print(f" Total: {len(servers)} servers available. All accessible via 'mws server'.")
+    print(" 💡 Tips:")
+    print("   • Run 'mws' for the interactive home dashboard.")
+    print("   • Run 'mws guide <server>' for tool documentation and copy-paste configs.")
+    print("   • Run 'mws server' to start the unified on-demand gateway.")
+    print("=" * term_width + "\n")
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -553,13 +577,20 @@ def cmd_update(args: argparse.Namespace) -> None:
         print(f"✅ Core CLI is on the latest version: v{__version__} (PyPI: v{latest or __version__})")
 
     if target == "all":
-        ok, msg = install_pip_dependencies(["mcp-win-stdio[all]"], upgrade=True)
+        pkg_target = "mcp-win-stdio[all]"
     elif target in ("core", "mws", "mcp-win-stdio"):
-        ok, msg = install_pip_dependencies(["mcp-win-stdio"], upgrade=True)
+        pkg_target = "mcp-win-stdio"
     else:
         srv = get_server_info(target)
-        pkg = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
-        ok, msg = install_pip_dependencies([pkg], upgrade=True)
+        pkg_target = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
+
+    # On Windows interactive terminals, hand off core/all update to external updater service
+    # to release executable locks on mws.exe before package upgrade
+    if sys.platform == "win32" and target in ("all", "core", "mws", "mcp-win-stdio") and sys.stdin.isatty():
+        spawn_external_updater("update", [pkg_target])
+        return
+
+    ok, msg = install_pip_dependencies([pkg_target], upgrade=True)
 
     if ok:
         print("\n✅ Update completed successfully!\n")
@@ -618,6 +649,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         print(f"\n==> 🧹 Completely uninstalling mws suite ({len(all_installed)} packages found):")
         for p in all_installed:
             print(f"   • {p}")
+
+        if sys.platform == "win32" and sys.stdin.isatty():
+            spawn_external_updater("uninstall", all_installed)
+            return
 
         ok_pip, msg_pip = uninstall_pip_packages(all_installed)
         if ok_pip:
@@ -1996,6 +2031,7 @@ def cmd_workflow(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """CLI entry point."""
+    cleanup_old_executables()
     parser = argparse.ArgumentParser(
         prog="mcp-win-stdio",
         description="Windows-optimized Model Context Protocol suite & setup orchestrator.",

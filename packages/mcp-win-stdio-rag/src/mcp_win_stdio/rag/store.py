@@ -193,10 +193,10 @@ class RAGVectorStore:
 
     @contextlib.contextmanager
     def _get_connection(self):
-        conn = sqlite3.connect(self.db_path, timeout=60.0)
+        conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=60000;")
+        conn.execute("PRAGMA busy_timeout=10000;")
         try:
             with conn:
                 yield conn
@@ -828,6 +828,10 @@ class RAGVectorStore:
 
         if not candidate_rows:
             return []
+
+        # Cap candidates to top 150 to keep sub-100ms vector re-ranking
+        if len(candidate_rows) > 150:
+            candidate_rows = candidate_rows[:150]
 
         c_ids, urls, anchor_urls, file_paths, section_titles, line_starts, line_ends, chunk_indices, texts = zip(
             *candidate_rows

@@ -5,6 +5,7 @@ Manages lazy-spawning, health-monitoring, and idle-reaping of child MCP server p
 
 import atexit
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -29,11 +30,19 @@ class MCPProcess:
         self._lock = threading.Lock()
 
         # Start child process with unbuffered line-based stdio
+        env = os.environ.copy()
+        existing_pp = env.get("PYTHONPATH", "")
+        extra_paths = [p for p in sys.path if "packages" in p or "src" in p]
+        if extra_paths:
+            combined = os.pathsep.join(extra_paths)
+            env["PYTHONPATH"] = f"{combined}{os.pathsep}{existing_pp}" if existing_pp else combined
+
         self.proc = subprocess.Popen(
             [self.command, *self.args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
             text=True,
             bufsize=1,
             encoding="utf-8",

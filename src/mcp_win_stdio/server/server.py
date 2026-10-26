@@ -27,6 +27,8 @@ from .catalog import (
     describe_tool as catalog_describe_tool,
 )
 from .catalog import (
+    discover_available_servers,
+    find_servers_for_tool,
     generate_compact_signature,
     get_server_catalog,
     normalize_arguments,
@@ -38,6 +40,34 @@ from .process_pool import GLOBAL_POOL
 
 # The MCP server name is "mws"
 mcp = FastMCP("mws")
+
+# Sticky active server context across calls
+_ACTIVE_SERVER: Optional[str] = None
+
+
+@mcp.tool()
+def use_server(server: str) -> Dict[str, Any]:
+    """
+    Switch or declare the active MCP server context for subsequent tool calls.
+    Once set, agents can execute tools without providing the 'server' parameter.
+
+    Args:
+        server: Target MCP server name (e.g. 'db', 'excel', 'git', 'ssh', 'rag', 'word', 'tsc', 'arch').
+    """
+    global _ACTIVE_SERVER
+    clean = server.lower().strip()
+    available = discover_available_servers()
+    if clean not in available:
+        return {
+            "success": False,
+            "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
+        }
+    _ACTIVE_SERVER = clean
+    return {
+        "success": True,
+        "message": f"Active server set to '{clean}'. Subsequent tool calls without 'server' will default to '{clean}'.",
+        "active_server": clean,
+    }
 
 
 @mcp.tool()
@@ -67,18 +97,23 @@ def list_servers(
 
 
 @mcp.tool()
-def search_tools(query: str, server: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+def search_tools(
+    query: str,
+    server: Optional[str] = None,
+    limit: int = 10,
+    detail: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Search for tools across all available MCP servers using natural language keywords.
-    Returns complete JSON parameter schemas and docstrings for only the matching tools,
-    saving thousands of tokens compared to loading all tools eagerly.
+    Returns compact signatures by default (saving context tokens), or full schemas when detail=True.
 
     Args:
         query: Search keywords (e.g. 'read excel range', 'postgres table ddl', 'git branch').
-        server: Optional server filter (e.g. 'excel', 'db', 'git', 'ssh', 'tsc').
+        server: Optional server filter (e.g. 'excel', 'db', 'git', 'ssh', 'tsc', 'arch').
         limit: Maximum number of matching tools to return (default: 10).
+        detail: If True, includes full JSON parameter schemas. Default False returns compact signatures.
     """
-    return catalog_search_tools(query=query, server=server, limit=limit)
+    return catalog_search_tools(query=query, server=server, limit=limit, detail=detail)
 
 
 @mcp.tool()
@@ -87,7 +122,7 @@ def describe_tool(server: str, tool_name: str) -> Dict[str, Any]:
     Get full parameter schema, data types, required fields, and docstring for a specific tool.
 
     Args:
-        server: The target server name (e.g. 'db', 'excel', 'git', 'ssh', 'tsc').
+        server: The target server name (e.g. 'db', 'excel', 'git', 'ssh', 'tsc', 'arch').
         tool_name: The exact tool name (e.g. 'read_query', 'get_workbook_info').
     """
     res = catalog_describe_tool(server, tool_name)
@@ -99,29 +134,108 @@ def describe_tool(server: str, tool_name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def call_tool(server: str, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+def call_tool(
+    server: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    arguments: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Any:
     """
-    Execute a tool dynamically on a target MCP server.
+    Execute a tool dynamically on a target MCP server with smart auto-routing and sticky context.
     Spawns the child server process on-demand if not already running,
     forwards the execution, and returns structured results with context protection.
     Automatically normalizes parameter aliases and camelCase names.
 
+    Smart Routing & Sticky Server:
+    - If 'server' is omitted, 'call_tool' automatically routes using the active server or tool catalog.
+    - When a server is accessed, it automatically becomes the active server for following calls.
+    - Supports dot notation (e.g. 'db.read_query', 'excel.preview_sheet').
+    - If parameters are passed as top-level kwargs, they are automatically merged into 'arguments'.
+
     Args:
-        server: The target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git').
-        tool_name: The tool name to execute (e.g. 'list_connections', 'get_workbook_info').
+        server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
+        tool_name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info').
         arguments: Dictionary of arguments matching the tool's parameter schema.
     """
-    clean_server = server.lower().strip()
-    norm_args = normalize_arguments(clean_server, tool_name, arguments or {})
-    proc = GLOBAL_POOL.get_or_spawn(clean_server)
-    res = proc.call_tool(tool_name, norm_args)
+    global _ACTIVE_SERVER
+
+    # Accept 'tool' in kwargs if tool_name is not explicitly passed
+    raw_tool = tool_name or kwargs.pop("tool", None)
+    target_tool = str(raw_tool or "").strip()
+    target_server = (server or "").lower().strip()
+
+    available_servers = discover_available_servers()
+
+    # 1. Handle dot notation (e.g. 'db.read_query' or 'excel.preview_sheet')
+    if "." in target_tool:
+        prefix, actual_tool = target_tool.split(".", 1)
+        if prefix.lower() in available_servers:
+            target_server = prefix.lower()
+            target_tool = actual_tool
+
+    # 2. If tool_name was omitted but server was passed, check if server is actually a tool name
+    if not target_tool and target_server:
+        if target_server not in available_servers:
+            matching = find_servers_for_tool(target_server)
+            if matching:
+                target_tool = target_server
+                target_server = matching[0]
+
+    if not target_tool:
+        return {
+            "isError": True,
+            "error": "Missing 'tool_name' parameter. Please specify the name of the tool to execute.",
+        }
+
+    # 3. If target_server is still missing, check active server context, then global auto-discovery
+    if not target_server:
+        # If sticky active server is set and implements target_tool, use it
+        if _ACTIVE_SERVER and _ACTIVE_SERVER in available_servers:
+            active_tools = [t.get("name") for t in catalog_describe_tool(_ACTIVE_SERVER, target_tool) or []] if False else find_servers_for_tool(target_tool)
+            if _ACTIVE_SERVER in active_tools:
+                target_server = _ACTIVE_SERVER
+
+        # Otherwise resolve via unique global catalog match
+        if not target_server:
+            candidates = find_servers_for_tool(target_tool)
+            if len(candidates) == 1:
+                target_server = candidates[0]
+            elif len(candidates) > 1:
+                if _ACTIVE_SERVER in candidates:
+                    target_server = _ACTIVE_SERVER
+                else:
+                    return {
+                        "isError": True,
+                        "error": f"Tool '{target_tool}' exists on multiple servers: {candidates}. Please specify 'server' or call use_server().",
+                        "candidate_servers": candidates,
+                        "active_server": _ACTIVE_SERVER,
+                    }
+            else:
+                return {
+                    "isError": True,
+                    "error": f"Tool '{target_tool}' was not found on any registered MCP server. Use search_tools('{target_tool}') to find available tools.",
+                }
+
+    # 4. Merge arguments and extra kwargs
+    merged_args: Dict[str, Any] = {}
+    if isinstance(arguments, dict):
+        merged_args.update(arguments)
+    if kwargs:
+        merged_args.update(kwargs)
+
+    norm_args = normalize_arguments(target_server, target_tool, merged_args)
+    proc = GLOBAL_POOL.get_or_spawn(target_server)
+    res = proc.call_tool(target_tool, norm_args)
+
+    # 5. Make accessed server the sticky active server for future calls
+    _ACTIVE_SERVER = target_server
 
     # If tool call failed, enrich with schema guidance to enable immediate self-correction
     if isinstance(res, dict) and res.get("isError"):
-        meta = catalog_describe_tool(clean_server, tool_name)
+        meta = catalog_describe_tool(target_server, target_tool)
         if meta:
             params = meta.get("parameters", {})
-            sig = generate_compact_signature(tool_name, params)
+            sig = generate_compact_signature(target_tool, params)
             req = params.get("required", []) if isinstance(params, dict) else []
             props = list(params.get("properties", {}).keys()) if isinstance(params, dict) else []
             res["expected_signature"] = sig

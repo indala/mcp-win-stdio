@@ -6,6 +6,7 @@ Part of mcp-win-stdio.
 """
 
 import asyncio
+import concurrent.futures
 import json
 import math
 import os
@@ -14,7 +15,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -76,6 +77,35 @@ def _get_collection_stores(collection: str) -> List[Tuple[str, RAGVectorStore]]:
         if any(isinstance(value, str) and value.casefold() == target for value in identifiers):
             matches.append((name, store))
     return matches
+
+
+def _safe_search_store(
+    store: RAGVectorStore,
+    query: str,
+    top_k: int = 5,
+    max_chars_per_snippet: int = 1000,
+    filter_path: Optional[str] = None,
+    exclude_paths: Optional[List[str]] = None,
+    timeout_sec: float = 8.0,
+) -> List[Dict[str, Any]]:
+    """Execute store search with a strict timeout guard to prevent deadlocks or unconstrained scans."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            store.search,
+            query,
+            top_k=top_k,
+            max_chars_per_snippet=max_chars_per_snippet,
+            filter_path=filter_path,
+            exclude_paths=exclude_paths,
+        )
+        try:
+            return future.result(timeout=timeout_sec)
+        except concurrent.futures.TimeoutError:
+            sys.stderr.write(f"Warning: RAG search on {store.db_path} exceeded {timeout_sec}s deadline, falling back.\n")
+            return []
+        except Exception as e:
+            sys.stderr.write(f"Warning: RAG search on {store.db_path} failed: {e}\n")
+            return []
 
 
 def _find_chunk_contexts(
@@ -393,7 +423,8 @@ def query_knowledge_base(
                     or meta.get("collection_name") == target_url_or_collection
                     or col_name == target_url_or_collection.lower()
                 ):
-                    results = store.search(
+                    results = _safe_search_store(
+                        store,
                         query,
                         top_k=top_k,
                         max_chars_per_snippet=max_chars_per_snippet,
@@ -423,7 +454,8 @@ def query_knowledge_base(
                 )
         else:
             store = RAGVectorStore(db_path)
-            results = store.search(
+            results = _safe_search_store(
+                store,
                 query,
                 top_k=top_k,
                 max_chars_per_snippet=max_chars_per_snippet,
@@ -445,7 +477,8 @@ def query_knowledge_base(
             )
 
         for col_name, store in stores:
-            res = store.search(
+            res = _safe_search_store(
+                store,
                 query,
                 top_k=top_k,
                 max_chars_per_snippet=max_chars_per_snippet,
@@ -738,6 +771,36 @@ def list_rag_collections() -> str:
         },
         indent=2,
     )
+
+
+@mcp.tool()
+def rag_status() -> Dict[str, Any]:
+    """
+    Fast health check and status report for the RAG search engine.
+    Returns status, active collections count, collection names, and storage readiness.
+    """
+    try:
+        stores = _get_all_stores()
+        total_chunks = 0
+        names = []
+        for name, store in stores:
+            names.append(name)
+            meta = store.get_metadata()
+            total_chunks += meta.get("total_chunks", 0)
+        return {
+            "status": "healthy",
+            "ready": True,
+            "engine": "sqlite_fts5_bm25_hybrid",
+            "total_collections": len(stores),
+            "collection_names": names,
+            "total_chunks": total_chunks,
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "ready": False,
+            "error": str(e),
+        }
 
 
 @mcp.tool()

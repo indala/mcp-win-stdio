@@ -5,10 +5,9 @@ CLI entry point for mcp-win-stdio-word.
 import argparse
 import sys
 
+from mcp_win_stdio.word import __version__
 from mcp_win_stdio.word.guide import print_guide
 from mcp_win_stdio.word.server import mcp
-
-from mcp_win_stdio.word import __version__
 
 
 def cmd_run(args: argparse.Namespace) -> None:
