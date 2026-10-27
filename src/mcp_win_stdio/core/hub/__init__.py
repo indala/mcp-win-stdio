@@ -4,6 +4,13 @@ Hub core subsystem: Registry, Configuration, Profiles, and Secrets management.
 
 from .auth import BearerAuthMiddleware, SessionManager
 from .bridge import StreamableHttpBridge, ToolRouter
+from .config_loader import (
+    LoadedHubConfig,
+    generate_default_hub_config,
+    load_hub_config,
+    resolve_config_path,
+    sync_connection_profiles,
+)
 from .lifecycle import (
     VALID_TRANSITIONS,
     InvalidStateTransitionError,
@@ -41,6 +48,7 @@ __all__ = [
     "HubRegistry",
     "InvalidStateTransitionError",
     "LifecycleEvent",
+    "LoadedHubConfig",
     "ProcessInstance",
     "ProcessInstanceInfo",
     "ProcessSupervisor",
@@ -64,5 +72,9 @@ __all__ = [
     "VALID_TRANSITIONS",
     "Win32JobObject",
     "WindowsCredentialManagerProvider",
+    "generate_default_hub_config",
+    "load_hub_config",
     "redact_sensitive_data",
+    "resolve_config_path",
+    "sync_connection_profiles",
 ]

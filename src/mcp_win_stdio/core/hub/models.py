@@ -4,6 +4,7 @@ Data models and typed configuration structures for the MCP Hub.
 
 import fnmatch
 import os
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -323,16 +324,29 @@ class HubConfig:
     http_host: str = "127.0.0.1"
     http_port: int = 8080
     http_auth_token_env: str = "MWS_HTTP_AUTH_TOKEN"
+    tools: ToolFilter = field(default_factory=ToolFilter)
     servers: Dict[str, ServerConfig] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "HubConfig":
         if not isinstance(data, dict):
             raise ValueError("Hub configuration must be a dictionary")
+
+        ALLOWED_TOP_KEYS = {"schema_version", "runtime", "servers", "tools"}
+        unsupported = set(data.keys()) - ALLOWED_TOP_KEYS
+        if unsupported:
+            raise ValueError(f"Unsupported top-level configuration key(s): {sorted(unsupported)}")
+
         version = str(data.get("schema_version", "1.0"))
         runtime = data.get("runtime", {})
         if not isinstance(runtime, dict):
-            runtime = {}
+            raise ValueError("'runtime' must be a dictionary")
+
+        if runtime:
+            ALLOWED_RUNTIME_KEYS = {"mode", "control_socket", "http_bridge"}
+            unsupported_rt = set(runtime.keys()) - ALLOWED_RUNTIME_KEYS
+            if unsupported_rt:
+                raise ValueError(f"Unsupported runtime configuration key(s): {sorted(unsupported_rt)}")
 
         mode = runtime.get("mode", "hybrid").lower().strip()
         if mode not in ("hybrid", "embedded", "daemon"):
@@ -342,13 +356,27 @@ class HubConfig:
 
         http = runtime.get("http_bridge", {})
         if not isinstance(http, dict):
-            http = {}
+            raise ValueError("'http_bridge' must be a dictionary")
+
+        if http:
+            ALLOWED_HTTP_KEYS = {"host", "port", "auth_token_env"}
+            unsupported_http = set(http.keys()) - ALLOWED_HTTP_KEYS
+            if unsupported_http:
+                raise ValueError(f"Unsupported http_bridge configuration key(s): {sorted(unsupported_http)}")
+
         http_host = str(http.get("host", "127.0.0.1")).strip()
-        http_port = int(http.get("port", 8080))
+
+        raw_port = http.get("port", 8080)
+        if not isinstance(raw_port, int) or isinstance(raw_port, bool):
+            raise ValueError(f"Invalid http_port '{raw_port}'. Must be an integer.")
+        http_port = int(raw_port)
         if not (1 <= http_port <= 65535):
             raise ValueError(f"Invalid http_port '{http_port}'. Must be between 1 and 65535")
 
         http_token_env = str(http.get("auth_token_env", "MWS_HTTP_AUTH_TOKEN")).strip()
+        if http_token_env:
+            if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", http_token_env):
+                raise ValueError(f"Invalid environment variable name for auth_token_env: '{http_token_env}'")
 
         # Security invariant: Remote binding requires an explicit non-empty auth token variable
         # and requires that environment variable to be set and non-empty at runtime.
@@ -371,6 +399,14 @@ class HubConfig:
         for sname, sdata in raw_servers.items():
             servers[sname.lower().strip()] = ServerConfig.from_dict(name=sname, data=sdata)
 
+        raw_tools = data.get("tools")
+        if raw_tools is not None:
+            if not isinstance(raw_tools, dict):
+                raise ValueError("'tools' configuration must be a dictionary")
+            tool_filter = ToolFilter.from_dict(raw_tools)
+        else:
+            tool_filter = ToolFilter()
+
         return cls(
             schema_version=version,
             mode=mode,
@@ -378,6 +414,7 @@ class HubConfig:
             http_host=http_host,
             http_port=http_port,
             http_auth_token_env=http_token_env,
+            tools=tool_filter,
             servers=servers,
         )
 
