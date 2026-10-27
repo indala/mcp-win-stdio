@@ -4,11 +4,12 @@ Unit tests for Windows External Updater & Uninstaller Supervisor
 
 import sys
 from pathlib import Path
+
 from mcp_win_stdio.core.external_updater import (
-    get_local_appdata_dir,
-    ensure_external_updater_scripts,
-    ensure_external_updater_script,
     SUPERVISOR_SCRIPT_CONTENT,
+    ensure_external_updater_script,
+    ensure_external_updater_scripts,
+    get_local_appdata_dir,
 )
 
 

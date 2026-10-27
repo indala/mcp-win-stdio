@@ -28,6 +28,7 @@ for mod_name in list(sys.modules.keys()):
 
 # 4. Set namespace __path__ to workspace subpackages
 import mcp_win_stdio
+
 mcp_win_stdio.__path__ = [str((ROOT_DIR / "src" / "mcp_win_stdio").resolve())] + [
     str((ROOT_DIR / "packages" / pkg.name / "src" / "mcp_win_stdio").resolve())
     for pkg in (ROOT_DIR / "packages").iterdir()

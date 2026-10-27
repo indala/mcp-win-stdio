@@ -3,6 +3,7 @@ Unit tests for PostgreSQL audit_database_health improvements.
 """
 
 from unittest.mock import MagicMock, patch
+
 import pytest
 
 

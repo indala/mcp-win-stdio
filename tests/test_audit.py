@@ -11,6 +11,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -47,7 +48,8 @@ def test_explorer_gitignore():
     print("[PASS] Explorer gitignore test passed.")
 
 
-def test_tsc_safety():
+@patch("mcp_win_stdio.tsc.server.get_active_project_name", return_value=None)
+def test_tsc_safety(mock_get_active):
     from mcp_win_stdio.tsc.server import (
         check_tsc_available,
         find_tsconfigs,
@@ -70,6 +72,7 @@ def test_tsc_safety():
     try:
         with (
             patch("mcp_win_stdio.core.config.load_config", return_value={}),
+            patch("mcp_win_stdio.tsc.server.get_active_project_name", return_value=None),
             patch("mcp_win_stdio.tsc.server.WATCHED_PROJECTS", {}),
         ):
             assert get_default_watch_dir() is None
