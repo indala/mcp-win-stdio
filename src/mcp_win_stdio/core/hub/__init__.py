@@ -29,6 +29,11 @@ from .models import (
     SupervisorConfig,
     ToolFilter,
 )
+from .orchestrator import (
+    HubLifecycleState,
+    HubOrchestrator,
+    HubStatusInfo,
+)
 from .profiles import ProfileManager, ProfileNotFoundError
 from .registry import HubRegistry, RegistryValidationError
 from .secrets import (
@@ -45,7 +50,10 @@ __all__ = [
     "BearerAuthMiddleware",
     "EnvSecretProvider",
     "HubConfig",
+    "HubLifecycleState",
+    "HubOrchestrator",
     "HubRegistry",
+    "HubStatusInfo",
     "InvalidStateTransitionError",
     "LifecycleEvent",
     "LoadedHubConfig",

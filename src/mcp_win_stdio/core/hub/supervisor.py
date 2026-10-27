@@ -441,6 +441,58 @@ class ProcessSupervisor:
         raw_result = msg.get("result", {})
         return redact_sensitive_data(raw_result)
 
+    def list_server_tools(self, server_name: str, timeout: float = 10.0) -> List[Dict[str, Any]]:
+        """
+        Request tools/list from a healthy supervised child server.
+        """
+        clean_name = server_name.lower().strip()
+        with self._get_server_lock(clean_name):
+            instance = self._instances.get(clean_name)
+            if not instance or instance.state != ServerState.HEALTHY:
+                st = instance.state.value if instance else "unknown"
+                raise RuntimeError(f"Server '{server_name}' is not in HEALTHY state (current: {st}).")
+
+            proc = instance.process
+            if not proc or proc.poll() is not None:
+                code = proc.poll() if proc else None
+                raise RuntimeError(f"Server '{server_name}' process is dead (exit code: {code}).")
+
+            with self._global_lock:
+                self._instance_seq += 1
+                req_id = self._instance_seq
+
+            q: queue.Queue[Dict[str, Any]] = queue.Queue()
+            instance.response_queues[req_id] = q
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "tools/list",
+                "params": {},
+            }
+            try:
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+            except Exception as write_err:
+                instance.response_queues.pop(req_id, None)
+                raise RuntimeError(f"Failed writing tools/list request to '{server_name}': {write_err}") from write_err
+
+        try:
+            msg = q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"Timed out listing tools from server '{server_name}' after {timeout:.1f}s.")
+        finally:
+            instance.response_queues.pop(req_id, None)
+
+        if "error" in msg:
+            err = msg["error"]
+            err_msg = err.get("message", err) if isinstance(err, dict) else str(err)
+            raise RuntimeError(redact_sensitive_data(f"MCP tools/list error: {err_msg}"))
+
+        result = msg.get("result", {})
+        tools = result.get("tools", [])
+        return tools if isinstance(tools, list) else []
+
     def stop(self, server_name: str, timeout: Optional[float] = None) -> ProcessInstanceInfo:
         """
         Gracefully terminate a supervised MCP server instance.
@@ -538,6 +590,10 @@ class ProcessSupervisor:
         with self._global_lock:
             instance = self._instances.get(clean_name)
             return instance.snapshot() if instance else None
+
+    def get_instance(self, server_name: str) -> Optional[ProcessInstanceInfo]:
+        """Return the current immutable snapshot of a server instance, or None if never started."""
+        return self.get_status(server_name)
 
     def list_instances(self) -> List[ProcessInstanceInfo]:
         """Return snapshots of all supervised server instances."""
