@@ -22,11 +22,14 @@ TSC_PROJECTS_FILE = USER_DIR / "tsc_projects.json"
 RAG_DATA_DIR = USER_DIR / "rag_stores"
 SERVER_CUSTOM_FILE = USER_DIR / "server_custom.json"
 SERVER_CACHE_FILE = USER_DIR / "server_cache.json"
+HUB_FILE = USER_DIR / "hub.yaml"
+HUB_FILE_JSON = USER_DIR / "hub.json"
+SERVERS_DIR = USER_DIR / "servers"
 
 
 def ensure_workspace_dirs() -> Dict[str, Path]:
     """Ensure all core directories exist and return paths."""
-    for d in (USER_DIR, PLUGINS_DIR, LOGS_DIR, EXPORTS_DIR, KEYS_DIR, WORKFLOWS_DIR):
+    for d in (USER_DIR, PLUGINS_DIR, LOGS_DIR, EXPORTS_DIR, KEYS_DIR, WORKFLOWS_DIR, SERVERS_DIR):
         d.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
         default_config = {
