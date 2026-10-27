@@ -3197,7 +3197,7 @@ def compare_schemas(
 
 @mcp.tool()
 def audit_database_health(
-    schema: Optional[str] = "public",
+    schema: Optional[str] = None,
     detail: bool = False,
     connection: Optional[str] = None,
     server: Optional[str] = None,
@@ -3210,12 +3210,13 @@ def audit_database_health(
       3. bloated_tables          — Tables with >20% dead tuples that need VACUUM.
 
     Args:
-        schema:     Schema to audit (default: 'public'). Use '*' or 'all' to audit all non-system schemas.
+        schema:     Schema to audit. Default None (or '*'/'all') audits all non-system schemas.
         detail:     If True, returns full list of all unused indexes. Default False caps at top 15 by size.
         connection: Named connection or server alias to use; defaults to active connection.
         server:     Optional server or connection alias.
     """
     info: Optional[Dict[str, Any]] = None
+    current_step: str = "initializing"
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] != "postgres":
@@ -3225,6 +3226,7 @@ def audit_database_health(
         try:
             with conn.cursor() as cur:
                 # ── 0. Discover Non-System Schemas & Database Stats Reset ─────────────
+                current_step = "querying_schemas_and_stats"
                 cur.execute("""
                     SELECT nspname FROM pg_namespace
                     WHERE nspname NOT IN ('pg_catalog', 'information_schema')
@@ -3242,21 +3244,21 @@ def audit_database_health(
                 stats_reset_dt = stat_reset_row.get("stats_reset")
                 stats_age = stat_reset_row.get("stats_age")
 
-                is_all_schemas = schema in ("*", "all")
+                is_all_schemas = not schema or schema.strip().lower() in ("*", "all")
                 if is_all_schemas:
-                    sch_filter = "AND kcu.table_schema NOT IN ('pg_catalog', 'information_schema')"
-                    sch_filter_idx = "AND schemaname NOT IN ('pg_catalog', 'information_schema')"
-                    params_fk = ()
-                    params_idx = ()
+                    sch_filter = "AND kcu.table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
+                    sch_filter_idx = "AND schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')"
+                    params_fk: Tuple[Any, ...] = ()
+                    params_idx: Tuple[Any, ...] = ()
                 else:
                     sch_filter = "AND kcu.table_schema = %s"
                     sch_filter_idx = "AND schemaname = %s"
-                    params_fk = (schema,)
-                    params_idx = (schema,)
+                    params_fk = (schema.strip(),)
+                    params_idx = (schema.strip(),)
 
                 # ── 1. Unindexed Foreign Keys ─────────────────────────────────────────
-                cur.execute(
-                    f"""
+                current_step = "querying_unindexed_foreign_keys"
+                fk_query = f"""
                     SELECT
                         kcu.table_schema,
                         kcu.table_name,
@@ -3280,9 +3282,12 @@ def audit_database_health(
                     )
                     {sch_filter}
                     ORDER BY kcu.table_schema, kcu.table_name, kcu.column_name
-                """,
-                    params_fk,
-                )
+                """
+                if params_fk:
+                    cur.execute(fk_query, params_fk)
+                else:
+                    cur.execute(fk_query)
+
                 unindexed_fks = [
                     {
                         "schema": r["table_schema"],
@@ -3294,9 +3299,9 @@ def audit_database_health(
                     for r in _fetch_all(cur)
                 ]
 
-                # ── 2. Unused Indexes (Filter Out Constraints) ──────────────────────
-                cur.execute(
-                    f"""
+                # ── 2. Unused Indexes (Filter Out Unique & Constraints) ──────────────
+                current_step = "querying_unused_indexes"
+                idx_query = f"""
                     SELECT
                         psi.schemaname,
                         psi.relname      AS table_name,
@@ -3305,26 +3310,35 @@ def audit_database_health(
                         pg_relation_size(psi.indexrelid) AS raw_bytes,
                         pg_size_pretty(pg_relation_size(psi.indexrelid)) AS index_size
                     FROM pg_stat_user_indexes psi
+                    JOIN pg_index pgi ON pgi.indexrelid = psi.indexrelid
                     WHERE psi.idx_scan = 0
-                      AND psi.indexrelname NOT LIKE '%_pkey'
+                      AND NOT pgi.indisunique
+                      AND NOT pgi.indisprimary
+                      AND right(psi.indexrelname, 5) != '_pkey'
                       AND NOT EXISTS (
                           SELECT 1 FROM pg_constraint pc
                           WHERE pc.conindid = psi.indexrelid
                       )
                     {sch_filter_idx}
                     ORDER BY pg_relation_size(psi.indexrelid) DESC
-                """,
-                    params_idx,
-                )
+                """
+                if params_idx:
+                    cur.execute(idx_query, params_idx)
+                else:
+                    cur.execute(idx_query)
+
                 raw_unused = _fetch_all(cur)
                 total_unused_count = len(raw_unused)
                 total_wasted_bytes = sum(r.get("raw_bytes", 0) for r in raw_unused)
 
-                # Group count by table
+                # Group count by schema and table
                 table_counts: Dict[str, int] = {}
+                schema_counts: Dict[str, int] = {}
                 for r in raw_unused:
-                    tbl = f"{r['schemaname']}.{r['table_name']}"
+                    s_name = r["schemaname"]
+                    tbl = f"{s_name}.{r['table_name']}"
                     table_counts[tbl] = table_counts.get(tbl, 0) + 1
+                    schema_counts[s_name] = schema_counts.get(s_name, 0) + 1
 
                 # Format findings
                 all_unused_formatted = [
@@ -3348,8 +3362,8 @@ def audit_database_health(
                     unused_indexes = all_unused_formatted
 
                 # ── 3. Bloated Tables ────────────────────────────────────────────────
-                cur.execute(
-                    f"""
+                current_step = "querying_bloated_tables"
+                bloat_query = f"""
                     SELECT
                         schemaname,
                         relname                                          AS table_name,
@@ -3367,9 +3381,12 @@ def audit_database_health(
                       AND (100.0 * n_dead_tup / (n_live_tup + n_dead_tup)) > 20
                     {sch_filter_idx}
                     ORDER BY dead_pct DESC
-                """,
-                    params_idx,
-                )
+                """
+                if params_idx:
+                    cur.execute(bloat_query, params_idx)
+                else:
+                    cur.execute(bloat_query)
+
                 bloated_tables = [
                     {
                         "schema": r["schemaname"],
@@ -3402,6 +3419,7 @@ def audit_database_health(
                     "summary": {
                         "unindexed_foreign_keys": len(unindexed_fks),
                         "unused_indexes_total": total_unused_count,
+                        "unused_indexes_by_schema": schema_counts if is_all_schemas else None,
                         "unused_indexes_by_table": table_counts,
                         "bloated_tables": len(bloated_tables),
                     },
@@ -3409,6 +3427,8 @@ def audit_database_health(
                     "unused_indexes": unused_indexes,
                     "bloated_tables": bloated_tables,
                 }
+                if result["summary"]["unused_indexes_by_schema"] is None:
+                    del result["summary"]["unused_indexes_by_schema"]
 
                 if capped:
                     result["notice"] = (
@@ -3419,7 +3439,7 @@ def audit_database_health(
                 if other_schemas:
                     result["schema_notice"] = (
                         f"Audited schema '{schema}'. Found other user schemas in database: {other_schemas}. "
-                        "Pass schema='all' or schema='*' to audit all user schemas."
+                        "Omit schema or pass schema='all' to audit all user schemas."
                     )
 
                 if overall == "warnings_found":
@@ -3432,7 +3452,11 @@ def audit_database_health(
             conn.close()
     except Exception as e:
         engine = info.get("engine", "unknown") if (info is not None) else "unknown"
-        return _format_db_error(e, engine)
+        err = _format_db_error(e, engine)
+        err["failing_step"] = current_step
+        import traceback
+        err["traceback"] = traceback.format_exc().strip()
+        return err
 
 
 def _clean_mermaid_type(data_type: str) -> str:

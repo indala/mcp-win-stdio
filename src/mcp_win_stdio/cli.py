@@ -576,21 +576,26 @@ def cmd_update(args: argparse.Namespace) -> None:
         latest = get_cached_or_latest_version(force=True)
         print(f"✅ Core CLI is on the latest version: v{__version__} (PyPI: v{latest or __version__})")
 
-    if target == "all":
-        pkg_target = "mcp-win-stdio[all]"
+    # Determine target packages: ONLY update what is currently installed
+    if target in ("all", "", "installed"):
+        installed = get_installed_mws_packages()
+        pkg_targets = installed if installed else ["mcp-win-stdio"]
     elif target in ("core", "mws", "mcp-win-stdio"):
-        pkg_target = "mcp-win-stdio"
+        pkg_targets = ["mcp-win-stdio"]
     else:
         srv = get_server_info(target)
-        pkg_target = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
+        pkg_name = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
+        pkg_targets = [pkg_name]
 
-    # On Windows interactive terminals, hand off core/all update to external updater service
-    # to release executable locks on mws.exe before package upgrade
-    if sys.platform == "win32" and target in ("all", "core", "mws", "mcp-win-stdio") and sys.stdin.isatty():
-        spawn_external_updater("update", [pkg_target])
+    print(f"\n📦 Target package(s) to update ({len(pkg_targets)}): {', '.join(pkg_targets)}")
+
+    # On Windows interactive terminals, hand off update to external supervisor
+    # whenever mcp-win-stdio CLI itself is among targets to release executable locks on mws.exe
+    if sys.platform == "win32" and any(p == "mcp-win-stdio" for p in pkg_targets) and sys.stdin.isatty():
+        spawn_external_updater("update", pkg_targets)
         return
 
-    ok, msg = install_pip_dependencies([pkg_target], upgrade=True)
+    ok, msg = install_pip_dependencies(pkg_targets, upgrade=True)
 
     if ok:
         print("\n✅ Update completed successfully!\n")
@@ -672,12 +677,8 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     if target == "all":
         installed_subpkgs = [p for p in get_installed_mws_packages() if p != "mcp-win-stdio"]
         if not installed_subpkgs:
-            # Fallback to list of known server packages
-            installed_subpkgs = [
-                srv.get("package", f"mcp-win-stdio-{s}")
-                for s, srv in BUILTIN_SERVERS.items()
-                if s not in ("server", "mws")
-            ]
+            print("\nℹ️  No standalone MCP server packages are currently installed to remove.")
+            return
 
         print(f"\n==> 🧹 Uninstalling all standalone MCP server packages ({len(installed_subpkgs)} targets)...")
         for p in installed_subpkgs:
@@ -700,6 +701,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     # CASE 3: Uninstall a single specific server package
     srv = get_server_info(target)
     pkg = srv.get("package", f"mcp-win-stdio-{target}") if srv else f"mcp-win-stdio-{target}"
+
+    if pkg not in get_installed_mws_packages():
+        print(f"\nℹ️  Package '{pkg}' is not currently installed.")
+        return
 
     print(f"\n==> 🧹 Uninstalling server package '{target}' ({pkg})...")
     ok_pip, msg_pip = uninstall_pip_packages([pkg])

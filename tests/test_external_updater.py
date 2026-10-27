@@ -38,13 +38,13 @@ def test_ensure_external_updater_scripts(tmp_path, monkeypatch):
     up_text = updater.read_text(encoding="utf-8")
     assert "supervisor.py" in up_text
     assert "update" in up_text
-    assert '"mcp-win-stdio[all]"' in up_text
+    assert "auto" in up_text
 
     # Verify uninstaller script content
     un_text = uninstaller.read_text(encoding="utf-8")
     assert "supervisor.py" in un_text
     assert "uninstall" in un_text
-    assert '"mcp-win-stdio"' in un_text
+    assert "auto" in un_text
 
     # Verify supervisor is stdlib-only (no mcp_win_stdio import statements)
     sup_text = supervisor.read_text(encoding="utf-8")

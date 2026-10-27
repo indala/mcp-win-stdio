@@ -107,6 +107,24 @@ def find_mws_executable(target_python: str) -> str:
     return ""
 
 
+def get_installed_mws_packages(target_python: str) -> List[str]:
+    """Discover installed mcp-win-stdio packages in target python without importing them."""
+    script = (
+        "import importlib.metadata\n"
+        "names = [d.metadata.get('Name', '').lower().replace('_', '-') for d in importlib.metadata.distributions()]\n"
+        "print(','.join(sorted({n for n in names if n == 'mcp-win-stdio' or n.startswith('mcp-win-stdio-')})))"
+    )
+    try:
+        res = subprocess.run([target_python, "-c", script], capture_output=True, text=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            found = [p.strip() for p in res.stdout.strip().split(",") if p.strip()]
+            if found:
+                return found
+    except Exception:
+        pass
+    return ["mcp-win-stdio"]
+
+
 def main() -> None:
     if len(sys.argv) < 5:
         print("Usage: supervisor.py <action> <target_python> <pids_comma_separated> <package1> [package2...]")
@@ -117,7 +135,11 @@ def main() -> None:
     action = sys.argv[1].lower()
     target_python = sys.argv[2]
     raw_pids = sys.argv[3]
-    packages = sys.argv[4:]
+    raw_packages = sys.argv[4:]
+    if not raw_packages or raw_packages == ["auto"] or raw_packages == ["installed"]:
+        packages = get_installed_mws_packages(target_python)
+    else:
+        packages = raw_packages
 
     # Parse PIDs to monitor
     pids: List[int] = []
@@ -239,7 +261,7 @@ def ensure_external_updater_scripts(target_python: str, base_python: str) -> Tup
     updater_cmd_content = f"""@echo off
 setlocal
 title mcp-win-stdio Windows Updater
-"{base_python}" "%~dp0supervisor.py" update "{target_python}" 0 "mcp-win-stdio[all]"
+"{base_python}" "%~dp0supervisor.py" update "{target_python}" 0 auto
 """
     updater_cmd_path.write_text(updater_cmd_content, encoding="utf-8")
 
@@ -257,7 +279,7 @@ if /i not "%CONFIRM%"=="y" (
     timeout /t 2 >nul
     exit /b 0
 )
-"{base_python}" "%~dp0supervisor.py" uninstall "{target_python}" 0 "mcp-win-stdio"
+"{base_python}" "%~dp0supervisor.py" uninstall "{target_python}" 0 auto
 """
     uninstaller_cmd_path.write_text(uninstaller_cmd_content, encoding="utf-8")
 
