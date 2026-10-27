@@ -52,6 +52,7 @@ class ProcessSupervisor:
     ):
         self._registry = registry
         self._profile_manager = profile_manager
+        self._custom_job_object = job_object
         self._job_object = job_object or Win32JobObject()
         self._max_backoff_seconds = max_backoff_seconds
         self._on_event = on_event
@@ -172,7 +173,15 @@ class ProcessSupervisor:
             self._instances[clean_name] = instance
             instance.transition_to(ServerState.STARTING, reason="starting server process")
 
-            # 5. Spawn subprocess without shell interpolation
+            # 5. Connect to Windows Job Object for guaranteed kernel process-tree containment
+            if self._custom_job_object is not None:
+                job = self._custom_job_object
+            else:
+                job = Win32JobObject(name=f"mws-job-{clean_name}-{instance.instance_id}")
+            instance.job_object = job
+
+            # Spawn child with CREATE_SUSPENDED (0x00000004) on Windows to eliminate assignment race conditions
+            creationflags = 0x00000004 if job.is_supported else 0
             cmd = [server_cfg.command, *server_cfg.args]
             try:
                 proc = subprocess.Popen(
@@ -184,6 +193,7 @@ class ProcessSupervisor:
                     text=True,
                     bufsize=1,
                     encoding="utf-8",
+                    creationflags=creationflags,
                 )
             except Exception as spawn_exc:
                 safe_err = redact_sensitive_data(str(spawn_exc))
@@ -193,7 +203,37 @@ class ProcessSupervisor:
             instance.process = proc
             instance.pid = proc.pid
 
-            # 6. Start persistent stdout JSON-RPC reader thread
+            # 6. Assign to Windows Job Object immediately while suspended before executing any code
+            if job.is_supported:
+                assigned = job.assign_process(proc)
+
+                if not assigned:
+                    # Guarantee: Terminate child immediately to avoid leaving orphan
+                    proc.kill()
+                    proc.wait()
+                    self._close_pipes(proc)
+                    instance.transition_to(
+                        ServerState.FAILED,
+                        reason="Failed to assign process to Windows Job Object",
+                    )
+                    raise RuntimeError(
+                        f"Failed to assign child process for '{server_name}' (PID {proc.pid}) to Windows Job Object; "
+                        "process terminated to prevent orphan process."
+                    )
+
+                # Resume the child process after kernel containment is established
+                resumed = job.resume_process(proc)
+                if not resumed:
+                    proc.kill()
+                    proc.wait()
+                    self._close_pipes(proc)
+                    instance.transition_to(
+                        ServerState.FAILED,
+                        reason="Failed to resume suspended child process",
+                    )
+                    raise RuntimeError(f"Failed to resume child process for '{server_name}' (PID {proc.pid})")
+
+            # 7. Start persistent stdout JSON-RPC reader thread
             def stdout_reader() -> None:
                 try:
                     if proc.stdout:
@@ -229,27 +269,10 @@ class ProcessSupervisor:
             reader_t.start()
             instance.reader_thread = reader_t
 
-            # 7. Assign to Win32 Job Object immediately
-            if self._job_object.is_supported:
-                assigned = self._job_object.assign_process(proc)
-                if not assigned:
-                    # Guarantee: Terminate child immediately to avoid leaving orphan
-                    proc.kill()
-                    proc.wait()
-                    self._close_pipes(proc)
-                    instance.transition_to(
-                        ServerState.FAILED,
-                        reason="Failed to assign process to Windows Job Object",
-                    )
-                    raise RuntimeError(
-                        f"Failed to assign child process for '{server_name}' (PID {proc.pid}) to Windows Job Object; "
-                        "process terminated to prevent orphan process."
-                    )
-
             # 8. Transition to INITIALIZING
             instance.transition_to(
                 ServerState.INITIALIZING,
-                reason="process spawned and assigned to job object",
+                reason="process spawned, assigned to job object, and resumed",
             )
 
             # 9. Perform full MCP protocol handshake
@@ -257,6 +280,10 @@ class ProcessSupervisor:
                 self._perform_mcp_handshake(instance, proc, server_cfg.supervisor)
             except Exception as handshake_err:
                 proc.kill()
+                if instance.job_object:
+                    instance.job_object.terminate()
+                    instance.job_object.close()
+                    instance.job_object = None
                 proc.wait()
                 self._close_pipes(proc)
                 safe_msg = redact_sensitive_data(str(handshake_err))
@@ -325,13 +352,9 @@ class ProcessSupervisor:
 
         result = msg.get("result")
         if not isinstance(result, dict):
-            raise RuntimeError(
-                f"MCP initialize response from '{instance.server_name}' missing result dictionary"
-            )
+            raise RuntimeError(f"MCP initialize response from '{instance.server_name}' missing result dictionary")
         if "protocolVersion" not in result:
-            raise RuntimeError(
-                f"MCP initialize response from '{instance.server_name}' missing protocolVersion"
-            )
+            raise RuntimeError(f"MCP initialize response from '{instance.server_name}' missing protocolVersion")
 
         # Step 3: Send 'notifications/initialized'
         notif = {
@@ -429,7 +452,9 @@ class ProcessSupervisor:
         try:
             msg = q.get(timeout=timeout)
         except queue.Empty:
-            raise TimeoutError(f"Timed out executing tool '{tool_name}' on server '{server_name}' after {timeout:.1f}s.")
+            raise TimeoutError(
+                f"Timed out executing tool '{tool_name}' on server '{server_name}' after {timeout:.1f}s."
+            )
         finally:
             instance.response_queues.pop(req_id, None)
 
@@ -521,6 +546,13 @@ class ProcessSupervisor:
                 proc = instance.process
                 if proc:
                     self._close_pipes(proc)
+                if instance.job_object:
+                    try:
+                        instance.job_object.terminate()
+                        instance.job_object.close()
+                    except Exception:
+                        pass
+                    instance.job_object = None
                 instance.transition_to(ServerState.STOPPED, reason="stopped from failed state")
                 return instance.snapshot()
 
@@ -539,9 +571,7 @@ class ProcessSupervisor:
                 # 2. Wait up to configured grace period
                 srv_cfg = self._registry.get_server(clean_name)
                 grace = (
-                    timeout
-                    if timeout is not None
-                    else (srv_cfg.supervisor.shutdown_grace_seconds if srv_cfg else 5.0)
+                    timeout if timeout is not None else (srv_cfg.supervisor.shutdown_grace_seconds if srv_cfg else 5.0)
                 )
 
                 try:
@@ -555,6 +585,8 @@ class ProcessSupervisor:
                     )
                     try:
                         proc.kill()
+                        if instance.job_object:
+                            instance.job_object.terminate()
                         proc.wait(timeout=5.0)
                     except Exception as e:
                         logger.debug("Error during force kill of %s: %s", clean_name, e)
@@ -562,6 +594,16 @@ class ProcessSupervisor:
                 self._close_pipes(proc)
             elif proc:
                 self._close_pipes(proc)
+
+            # Ensure all descendants in the instance's Job Object are terminated and the handle closed
+            if instance.job_object:
+                try:
+                    instance.job_object.terminate()
+                    if instance.job_object is not self._custom_job_object:
+                        instance.job_object.close()
+                except Exception:
+                    pass
+                instance.job_object = None
 
             instance.transition_to(ServerState.STOPPED, reason="process exited")
             return instance.snapshot()

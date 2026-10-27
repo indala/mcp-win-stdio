@@ -8,8 +8,10 @@ and Administrators, with no permissive or inherited Everyone/Users ACEs.
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -329,3 +331,301 @@ def test_verified_live_instance_metadata_never_deleted_on_ping_failure(temp_sec_
                 assert existing.pid == os.getpid()
                 # Crucial check: metadata file MUST STILL EXIST! Never deleted!
                 assert meta_path.is_file()
+
+
+# =====================================================================
+# Phase 6.1 Step 2: Windows Job Object & Leak-Free Child Teardown Tests
+# =====================================================================
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows Job Object test")
+def test_job_object_suspended_process_lifecycle():
+    """Verify suspended process creation, Job Object assignment, and resumption."""
+    from mcp_win_stdio.core.hub.win32_job import Win32JobObject
+
+    job = Win32JobObject(name=f"test-job-{os.getpid()}-{time.time_ns()}")
+    assert job.is_supported is True
+    assert job.handle is not None
+
+    p = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('SUSPENDED_LIFECYCLE_OK\\n'); sys.stdout.flush()",
+        ],
+        stdout=subprocess.PIPE,
+        creationflags=0x00000004,  # CREATE_SUSPENDED
+        text=True,
+    )
+
+    try:
+        # Assign process to Job Object while still suspended
+        assert job.assign_process(p) is True
+
+        # Resume execution
+        assert job.resume_process(p) is True
+
+        out, _ = p.communicate(timeout=5.0)
+        assert out.strip() == "SUSPENDED_LIFECYCLE_OK"
+        assert p.poll() == 0
+    finally:
+        job.close()
+        if p.poll() is None:
+            p.kill()
+
+
+def test_job_object_assignment_failure_terminates_child_without_orphan():
+    """Verify that if Job Object assignment fails, child is immediately terminated and no orphan remains."""
+    from mcp_win_stdio.core.hub.models import ServerConfig
+    from mcp_win_stdio.core.hub.registry import HubRegistry
+    from mcp_win_stdio.core.hub.supervisor import ProcessSupervisor
+    from mcp_win_stdio.core.hub.win32_job import Win32JobObject
+
+    reg = HubRegistry()
+    reg.register_server(
+        ServerConfig(
+            name="fail_srv",
+            command=sys.executable,
+            args=["-c", "import time; time.sleep(10)"],
+        )
+    )
+
+    sup = ProcessSupervisor(registry=reg)
+    spawned_pids = []
+
+    original_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        p = original_popen(*args, **kwargs)
+        spawned_pids.append(p.pid)
+        return p
+
+    # Patch assign_process to simulate failure
+    with patch("subprocess.Popen", side_effect=recording_popen):
+        with patch.object(Win32JobObject, "assign_process", return_value=False):
+            with pytest.raises(RuntimeError, match="Failed to assign child process"):
+                sup.start("fail_srv")
+
+    assert len(spawned_pids) == 1
+    child_pid = spawned_pids[0]
+
+    # Verify that child process was terminated immediately and does not survive as an orphan
+    from mcp_win_stdio.core.hub.control import is_pid_alive
+
+    assert is_pid_alive(child_pid) is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows taskkill process tree test")
+def test_native_taskkill_terminates_child_and_grandchild_process_tree(tmp_path):
+    """
+    Native Windows test: Verifies that when the parent process is forcibly killed with taskkill /F,
+    the Windows kernel terminates the entire Job Object process tree (child and grandchild).
+    """
+    from mcp_win_stdio.core.hub.control import get_process_creation_time, is_pid_alive
+
+    helper_code = """
+import sys, time, json, subprocess
+from mcp_win_stdio.core.hub.win32_job import Win32JobObject
+from mcp_win_stdio.core.hub.control import get_process_creation_time
+
+# 1. Create Job Object with KILL_ON_JOB_CLOSE
+job = Win32JobObject(name="test-tree-job")
+
+# Grandchild code: long sleep
+grandchild_script = "import time; time.sleep(60)"
+
+# Child code: spawns grandchild and sleeps
+child_code = f\"\"\"
+import sys, subprocess, time, json
+from mcp_win_stdio.core.hub.control import get_process_creation_time
+gc = subprocess.Popen([sys.executable, "-c", "{grandchild_script}"])
+print(json.dumps({{'gc_pid': gc.pid, 'gc_ct': get_process_creation_time(gc.pid)}}), flush=True)
+time.sleep(60)
+\"\"\"
+
+# Spawn child suspended
+child = subprocess.Popen(
+    [sys.executable, "-c", child_code],
+    stdout=subprocess.PIPE,
+    creationflags=0x00000004, # CREATE_SUSPENDED
+    text=True
+)
+
+job.assign_process(child)
+job.resume_process(child)
+
+# Read grandchild info from child stdout
+line = child.stdout.readline().strip()
+gc_info = json.loads(line)
+
+# Report all PIDs to test harness
+report = {
+    'child_pid': child.pid,
+    'child_ct': get_process_creation_time(child.pid),
+    'gc_pid': gc_info['gc_pid'],
+    'gc_ct': gc_info['gc_ct'],
+}
+print(json.dumps(report), flush=True)
+
+# Keep parent alive until taskkilled
+time.sleep(60)
+"""
+
+    helper_file = tmp_path / "tree_simulator.py"
+    helper_file.write_text(helper_code, encoding="utf-8")
+
+    # Start the parent process
+    parent = subprocess.Popen(
+        [sys.executable, str(helper_file)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        line = parent.stdout.readline().strip()
+        data = json.loads(line)
+
+        child_pid = data["child_pid"]
+        child_ct = data["child_ct"]
+        gc_pid = data["gc_pid"]
+        gc_ct = data["gc_ct"]
+
+        # Confirm all processes are alive in the OS kernel before termination
+        assert is_pid_alive(parent.pid) is True
+        assert is_pid_alive(child_pid) is True
+        assert is_pid_alive(gc_pid) is True
+        assert get_process_creation_time(child_pid) == child_ct
+        assert get_process_creation_time(gc_pid) == gc_ct
+
+        # Forcibly terminate parent with taskkill /F
+        subprocess.run(
+            ["taskkill", "/F", "/PID", str(parent.pid)],
+            capture_output=True,
+            check=True,
+        )
+
+        # Poll child and grandchild to verify kernel-enforced teardown within bounded timeout
+        deadline = time.time() + 6.0
+        child_dead = False
+        gc_dead = False
+
+        while time.time() < deadline:
+            if not is_pid_alive(child_pid) or get_process_creation_time(child_pid) != child_ct:
+                child_dead = True
+            if not is_pid_alive(gc_pid) or get_process_creation_time(gc_pid) != gc_ct:
+                gc_dead = True
+            if child_dead and gc_dead:
+                break
+            time.sleep(0.1)
+
+        assert child_dead is True, f"Child PID {child_pid} survived parent taskkill /F!"
+        assert gc_dead is True, f"Grandchild PID {gc_pid} survived parent taskkill /F!"
+
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+
+
+def test_multiple_supervised_mcps_independent_containment():
+    """Verify that multiple supervised MCP servers have independent Job Objects and containment."""
+    from mcp_win_stdio.core.hub.models import ServerConfig, ServerState
+    from mcp_win_stdio.core.hub.registry import HubRegistry
+    from mcp_win_stdio.core.hub.supervisor import ProcessSupervisor
+
+    mcp_script = """
+import sys, json
+
+for line in iter(sys.stdin.readline, ""):
+    req = json.loads(line)
+    mid = req.get("id")
+    method = req.get("method")
+    if method == "initialize":
+        res = {"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": "2024-11-05", "serverInfo": {"name": "test", "version": "1.0"}}}
+    elif method == "tools/list":
+        res = {"jsonrpc": "2.0", "id": mid, "result": {"tools": []}}
+    else:
+        res = {"jsonrpc": "2.0", "id": mid, "result": {}}
+    sys.stdout.write(json.dumps(res) + "\\n")
+    sys.stdout.flush()
+"""
+
+    reg = HubRegistry()
+    reg.register_server(ServerConfig(name="server_a", command=sys.executable, args=["-c", mcp_script]))
+    reg.register_server(ServerConfig(name="server_b", command=sys.executable, args=["-c", mcp_script]))
+
+    sup = ProcessSupervisor(registry=reg)
+
+    try:
+        # Start both servers
+        info_a = sup.start("server_a")
+        info_b = sup.start("server_b")
+
+        assert info_a.state == ServerState.HEALTHY
+        assert info_b.state == ServerState.HEALTHY
+        assert info_a.pid is not None
+        assert info_b.pid is not None
+        assert info_a.pid != info_b.pid
+
+        # Stop Server A
+        stop_a = sup.stop("server_a")
+        assert stop_a.state == ServerState.STOPPED
+
+        # Server B must remain completely HEALTHY and active
+        status_b = sup.get_status("server_b")
+        assert status_b.state == ServerState.HEALTHY
+        from mcp_win_stdio.core.hub.control import is_pid_alive
+
+        assert is_pid_alive(status_b.pid) is True
+        assert sup.list_server_tools("server_b") == []
+
+        # Stop Server B
+        stop_b = sup.stop("server_b")
+        assert stop_b.state == ServerState.STOPPED
+
+    finally:
+        sup.shutdown()
+
+
+def test_server_restart_terminates_old_process_tree():
+    """Verify that restarting a server terminates the old process and contained tree."""
+    from mcp_win_stdio.core.hub.control import is_pid_alive
+    from mcp_win_stdio.core.hub.models import ServerConfig, ServerState
+    from mcp_win_stdio.core.hub.registry import HubRegistry
+    from mcp_win_stdio.core.hub.supervisor import ProcessSupervisor
+
+    mcp_script = """
+import sys, json
+
+for line in iter(sys.stdin.readline, ""):
+    req = json.loads(line)
+    mid = req.get("id")
+    method = req.get("method")
+    if method == "initialize":
+        res = {"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": "2024-11-05", "serverInfo": {"name": "test", "version": "1.0"}}}
+    else:
+        res = {"jsonrpc": "2.0", "id": mid, "result": {}}
+    sys.stdout.write(json.dumps(res) + "\\n")
+    sys.stdout.flush()
+"""
+
+    reg = HubRegistry()
+    reg.register_server(ServerConfig(name="restart_srv", command=sys.executable, args=["-c", mcp_script]))
+
+    sup = ProcessSupervisor(registry=reg)
+
+    try:
+        initial = sup.start("restart_srv")
+        assert initial.state == ServerState.HEALTHY
+        old_pid = initial.pid
+
+        # Restart server
+        restarted = sup.restart("restart_srv")
+        assert restarted.state == ServerState.HEALTHY
+        new_pid = restarted.pid
+
+        assert new_pid != old_pid
+        # Verify old PID is dead
+        assert is_pid_alive(old_pid) is False
+
+    finally:
+        sup.shutdown()

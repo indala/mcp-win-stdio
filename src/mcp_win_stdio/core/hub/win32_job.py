@@ -16,6 +16,7 @@ JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JobObjectExtendedLimitInformation = 9
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_TERMINATE = 0x0001
+CREATE_SUSPENDED = 0x00000004
 
 if sys.platform == "win32":
     import ctypes
@@ -162,6 +163,50 @@ class Win32JobObject:
                     k32.CloseHandle(h_proc)
 
             return False
+
+    def resume_process(self, target: Union[subprocess.Popen, int]) -> bool:
+        """
+        Resume a process created with CREATE_SUSPENDED.
+
+        Args:
+            target: A subprocess.Popen instance or integer PID.
+
+        Returns:
+            bool: True if process was resumed successfully, False otherwise.
+        """
+        if not self._is_supported:
+            return True
+
+        if sys.platform == "win32":
+            try:
+                ntdll = ctypes.windll.ntdll
+                h_proc = None
+                should_close = False
+
+                if isinstance(target, subprocess.Popen):
+                    raw_h = getattr(target, "_handle", None)
+                    if raw_h is not None:
+                        h_proc = int(raw_h)
+
+                if h_proc is None and isinstance(target, int):
+                    k32 = ctypes.windll.kernel32
+                    PROCESS_SUSPEND_RESUME = 0x0800
+                    h_proc = k32.OpenProcess(PROCESS_SUSPEND_RESUME, False, target)
+                    should_close = True
+
+                if not h_proc:
+                    return False
+
+                try:
+                    status = ntdll.NtResumeProcess(h_proc)
+                    return status == 0
+                finally:
+                    if should_close and h_proc:
+                        ctypes.windll.kernel32.CloseHandle(h_proc)
+            except Exception as e:
+                logger.warning("Error resuming process: %s", e)
+                return False
+        return True
 
     def terminate(self, exit_code: int = 1) -> bool:
         """

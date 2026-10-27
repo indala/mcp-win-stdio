@@ -70,6 +70,7 @@ class ProcessInstance:
         self.last_error: Optional[str] = None
         self.response_queues: Dict[int, queue.Queue] = {}
         self.reader_thread: Optional[threading.Thread] = None
+        self.job_object: Optional[Any] = None
 
         self._listeners: List[Callable[[LifecycleEvent], None]] = []
         if on_event:
