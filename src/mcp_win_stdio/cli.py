@@ -6,13 +6,18 @@ import argparse
 import getpass
 import importlib
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Ensure Windows console uses UTF-8 without crashing on cp1252
 if sys.platform == "win32":
@@ -2034,6 +2039,299 @@ def cmd_workflow(args: argparse.Namespace) -> None:
         print()
 
 
+def cmd_hub_start(args: argparse.Namespace) -> None:
+    """Start the MCP Hub orchestrator in foreground or background daemon mode."""
+    config_path = getattr(args, "config", None)
+    is_daemon = bool(getattr(args, "daemon", False))
+    is_internal_daemon = bool(getattr(args, "internal_daemon", False))
+
+    from mcp_win_stdio.core.hub.control import (
+        HubControlServer,
+        HubInstanceManager,
+        get_default_pipe_name,
+    )
+    from mcp_win_stdio.core.hub.orchestrator import HubOrchestrator
+
+    instance_mgr = HubInstanceManager()
+    running, existing_meta = instance_mgr.is_running()
+    if running and existing_meta:
+        print(
+            f"Error: MCP Hub is already running (PID {existing_meta.pid}) on "
+            f"http://{existing_meta.http_host}:{existing_meta.http_port}."
+        )
+        sys.exit(1)
+
+    if is_daemon and not is_internal_daemon:
+        # Launch detached background process
+        ensure_workspace_dirs()
+        log_dir = USER_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "hub.log"
+
+        cmd = [sys.executable, "-u", "-m", "mcp_win_stdio.cli", "hub", "start", "--internal-daemon"]
+        if config_path:
+            cmd.extend(["--config", str(Path(config_path).resolve())])
+
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+
+        with open(log_file, "a", encoding="utf-8") as out_f:
+            proc = subprocess.Popen(
+                cmd,
+                creationflags=creationflags,
+                stdin=subprocess.DEVNULL,
+                stdout=out_f,
+                stderr=out_f,
+                close_fds=True,
+            )
+
+        # Poll for daemon readiness (up to 10 seconds)
+        deadline = time.time() + 10.0
+        started = False
+        meta = None
+        while time.time() < deadline:
+            time.sleep(0.3)
+            is_alive, meta = instance_mgr.is_running()
+            if is_alive and meta:
+                started = True
+                break
+            if proc.poll() is not None:
+                break
+
+        if started and meta:
+            print("=" * 65)
+            print(f"   🚀 MCP Hub started in background (PID {meta.pid})")
+            print("=" * 65)
+            print(f" • HTTP Bridge:   http://{meta.http_host}:{meta.http_port}")
+            print(f" • Control Pipe:  {meta.pipe_name}")
+            print(f" • Config Source: {meta.config_source} ({meta.config_path or 'default'})")
+            print(f" • Log File:      {log_file}")
+            print("=" * 65)
+            sys.exit(0)
+        else:
+            print("Error: MCP Hub failed to start within 10 seconds.")
+            if log_file.is_file():
+                try:
+                    with open(log_file, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                        if lines:
+                            print("\nRecent log output:")
+                            for l in lines[-15:]:
+                                print("  " + l.rstrip())
+                except Exception:
+                    pass
+            sys.exit(1)
+
+    # Foreground mode or internal daemon process
+    from mcp_win_stdio.core.hub.config_loader import load_hub_config
+
+    try:
+        loaded = load_hub_config(cli_path=config_path)
+    except Exception as e:
+        logger.error("Error loading Hub configuration: %s", e)
+        print(f"Error loading Hub configuration: {e}", flush=True)
+        sys.exit(1)
+
+    pipe_name = loaded.config.control_socket or get_default_pipe_name()
+
+    try:
+        meta = instance_mgr.acquire(
+            pid=os.getpid(),
+            pipe_name=pipe_name,
+            config_path=str(loaded.source_path) if loaded.source_path else None,
+            config_source=loaded.source_tier,
+            http_host=loaded.config.http_host,
+            http_port=loaded.config.http_port,
+        )
+    except Exception as e:
+        logger.error("Error acquiring hub instance lock: %s", e)
+        print(f"Error acquiring hub instance lock: {e}", flush=True)
+        sys.exit(1)
+
+    orchestrator = HubOrchestrator(loaded_config=loaded)
+    stop_event = threading.Event()
+
+    def handle_stop_signal() -> None:
+        logger.info("Stop requested via control IPC")
+        stop_event.set()
+
+    control_server = HubControlServer(
+        orchestrator=orchestrator,
+        pipe_name=pipe_name,
+        authkey_hex=meta.authkey_hex,
+        on_stop_requested=handle_stop_signal,
+    )
+
+    try:
+        control_server.start()
+        status_info = orchestrator.start()
+    except Exception as e:
+        logger.error("Error starting MCP Hub: %s", e)
+        print(f"Error starting MCP Hub: {e}", flush=True)
+        control_server.stop()
+        instance_mgr.release()
+        sys.exit(1)
+
+    if not is_internal_daemon:
+        print("=" * 65)
+        print(f"   🚀 MCP Hub RUNNING in foreground (PID {os.getpid()})")
+        print("=" * 65)
+        print(f" • HTTP Bridge:   http://{loaded.config.http_host}:{loaded.config.http_port}")
+        print(f" • Control Pipe:  {pipe_name}")
+        print(f" • Config Source: {loaded.source_tier} ({loaded.source_path or 'default'})")
+        print(f" • Servers:       {len(status_info.servers)} active")
+        print("   Press Ctrl+C to stop.")
+        print("=" * 65)
+
+    import signal
+
+    def sig_handler(sig: Any, frame: Any) -> None:
+        logger.info("Signal %s received", sig)
+        stop_event.set()
+
+    try:
+        signal.signal(signal.SIGINT, sig_handler)
+        signal.signal(signal.SIGTERM, sig_handler)
+    except Exception:
+        pass
+
+    # Launch uvicorn HTTP server in a worker thread
+    uvicorn_server = None
+    try:
+        import uvicorn
+        asgi_app = orchestrator.asgi_app
+        uv_cfg = uvicorn.Config(
+            app=asgi_app,
+            host=loaded.config.http_host,
+            port=loaded.config.http_port,
+            log_level="warning",
+            access_log=False,
+        )
+        uvicorn_server = uvicorn.Server(uv_cfg)
+        uv_thread = threading.Thread(target=uvicorn_server.run, name="mws-uvicorn", daemon=True)
+        uv_thread.start()
+    except Exception as uve:
+        logger.warning("Could not launch uvicorn HTTP listener: %s", uve)
+
+    try:
+        while not stop_event.is_set():
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt caught in main loop")
+    except Exception as exc:
+        logger.exception("Unexpected exception in main loop: %s", exc)
+    finally:
+        logger.info("Entering Hub shutdown sequence (stop_event=%s)", stop_event.is_set())
+        if not is_internal_daemon:
+            print("\nShutting down MCP Hub...")
+        if uvicorn_server:
+            uvicorn_server.should_exit = True
+        control_server.stop()
+        orchestrator.stop()
+        instance_mgr.release()
+        if not is_internal_daemon:
+            print("✅ MCP Hub stopped cleanly.")
+
+
+def cmd_hub_status(args: argparse.Namespace) -> None:
+    """Report whether the hub is running, its health, endpoint, uptime, and server states."""
+    from mcp_win_stdio.core.hub.control import HubControlClient, HubInstanceManager
+    from mcp_win_stdio.core.hub.secrets import redact_sensitive_data
+
+    is_json = bool(getattr(args, "json", False))
+    instance_mgr = HubInstanceManager()
+    running, meta = instance_mgr.is_running()
+
+    if is_json:
+        if not running or not meta:
+            print(json.dumps({"running": False, "state": "stopped"}))
+            sys.exit(0)
+
+        status_data = HubControlClient.get_status(meta.pipe_name, meta.authkey_hex)
+        out = {
+            "running": True,
+            "pid": meta.pid,
+            "pipe_name": meta.pipe_name,
+            "http_endpoint": f"http://{meta.http_host}:{meta.http_port}",
+            "config_source": meta.config_source,
+            "config_path": meta.config_path,
+            "details": status_data or {},
+        }
+        print(json.dumps(redact_sensitive_data(out), indent=2))
+        sys.exit(0)
+
+    # Human-readable output
+    if not running or not meta:
+        print("=" * 65)
+        print("   MCP Hub Status: STOPPED")
+        print("=" * 65)
+        print("No active Hub instance found.")
+        print("Run 'mws hub start' to launch the Hub orchestrator.\n")
+        sys.exit(0)
+
+    status_data = HubControlClient.get_status(meta.pipe_name, meta.authkey_hex)
+    state = status_data.get("state", "running") if status_data else "running"
+    uptime = status_data.get("uptime_seconds", 0.0) if status_data else 0.0
+    sessions = status_data.get("active_sessions", 0) if status_data else 0
+
+    print("=" * 65)
+    print(f"   MCP Hub Status: {state.upper()} (PID {meta.pid})")
+    print("=" * 65)
+    print(f" • HTTP Bridge:   http://{meta.http_host}:{meta.http_port}")
+    print(f" • Control Pipe:  {meta.pipe_name}")
+    print(f" • Config Source: {meta.config_source} ({meta.config_path or 'default'})")
+    print(f" • Uptime:        {uptime:.1f}s")
+    print(f" • Sessions:      {sessions} active")
+
+    servers = status_data.get("servers", {}) if status_data else {}
+    if servers:
+        print("\n Supervised Servers:")
+        print(f"   {'SERVER':<16} {'STATE':<12} {'PID':<8} {'RESTARTS':<8}")
+        print("   " + "-" * 48)
+        for sname, sinfo in sorted(servers.items()):
+            st = sinfo.get("state", "unknown")
+            spid = str(sinfo.get("pid") or "-")
+            rc = str(sinfo.get("restart_count", 0))
+            print(f"   {sname:<16} {st:<12} {spid:<8} {rc:<8}")
+    print("=" * 65 + "\n")
+
+
+def cmd_hub_stop(args: argparse.Namespace) -> None:
+    """Request graceful shutdown of the running Hub instance via local control pipe."""
+    from mcp_win_stdio.core.hub.control import HubControlClient, HubInstanceManager
+
+    timeout = float(getattr(args, "timeout", 10.0))
+    if timeout <= 0:
+        print("Error: --timeout must be a positive number.")
+        sys.exit(1)
+
+    instance_mgr = HubInstanceManager()
+    running, meta = instance_mgr.is_running()
+    if not running or not meta:
+        print("MCP Hub is not currently running.")
+        sys.exit(0)
+
+    print(f"Stopping MCP Hub (PID {meta.pid}) via control pipe...")
+    HubControlClient.request_stop(meta.pipe_name, meta.authkey_hex, timeout=timeout)
+
+    deadline = time.time() + timeout
+    stopped = False
+    while time.time() < deadline:
+        time.sleep(0.3)
+        is_alive, _ = instance_mgr.is_running()
+        if not is_alive:
+            stopped = True
+            break
+
+    if stopped:
+        print(f"✅ MCP Hub (PID {meta.pid}) stopped successfully.")
+        sys.exit(0)
+    else:
+        print(f"⚠️  MCP Hub (PID {meta.pid}) did not stop within {timeout:.1f} seconds.")
+        sys.exit(1)
+
+
 def main() -> None:
     """CLI entry point."""
     cleanup_old_executables()
@@ -2175,6 +2473,62 @@ def main() -> None:
     sub_wf.add_argument("--params", default=None, help="JSON string of parameter key/value overrides for run")
     sub_wf.set_defaults(func=cmd_workflow)
 
+    # 12. hub: background MCP hub orchestrator
+    sub_hub = subparsers.add_parser("hub", help="Manage and operate the background MCP Hub orchestrator")
+    sub_hub.set_defaults(func=cmd_hub_status)
+    hub_subparsers = sub_hub.add_subparsers(dest="hub_action", metavar="<action>", help="Hub action")
+
+    # mws hub start
+    hub_start = hub_subparsers.add_parser("start", help="Start the MCP Hub orchestrator")
+    hub_start_group = hub_start.add_mutually_exclusive_group()
+    hub_start_group.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run hub in foreground (default)",
+    )
+    hub_start_group.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run hub as detached background process",
+    )
+    hub_start.add_argument(
+        "--config",
+        "-c",
+        default=None,
+        help="Path to hub.yaml configuration file",
+    )
+    hub_start.add_argument(
+        "--internal-daemon",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    hub_start.set_defaults(func=cmd_hub_start)
+
+    # mws hub status
+    hub_status = hub_subparsers.add_parser("status", help="Show Hub operational status and server health")
+    hub_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON status only",
+    )
+    hub_status.add_argument(
+        "--config",
+        "-c",
+        default=None,
+        help="Optional path to hub.yaml configuration file",
+    )
+    hub_status.set_defaults(func=cmd_hub_status)
+
+    # mws hub stop
+    hub_stop = hub_subparsers.add_parser("stop", help="Stop running MCP Hub orchestrator")
+    hub_stop.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for graceful shutdown (default: 10.0)",
+    )
+    hub_stop.set_defaults(func=cmd_hub_stop)
+
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
     known_srvs = {
         "git",
@@ -2208,6 +2562,7 @@ def main() -> None:
         "all",
     }
     known_cmds = {
+        "hub",
         "server",
         "guide",
         "run",

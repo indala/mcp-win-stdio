@@ -11,6 +11,13 @@ from .config_loader import (
     resolve_config_path,
     sync_connection_profiles,
 )
+from .control import (
+    HubControlClient,
+    HubControlServer,
+    HubInstanceManager,
+    HubInstanceMetadata,
+    is_pid_alive,
+)
 from .lifecycle import (
     VALID_TRANSITIONS,
     InvalidStateTransitionError,
@@ -50,6 +57,10 @@ __all__ = [
     "BearerAuthMiddleware",
     "EnvSecretProvider",
     "HubConfig",
+    "HubControlClient",
+    "HubControlServer",
+    "HubInstanceMetadata",
+    "HubInstanceManager",
     "HubLifecycleState",
     "HubOrchestrator",
     "HubRegistry",
@@ -81,6 +92,7 @@ __all__ = [
     "Win32JobObject",
     "WindowsCredentialManagerProvider",
     "generate_default_hub_config",
+    "is_pid_alive",
     "load_hub_config",
     "redact_sensitive_data",
     "resolve_config_path",
