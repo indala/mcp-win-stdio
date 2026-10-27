@@ -2,6 +2,7 @@
 Data models and typed configuration structures for the MCP Hub.
 """
 
+import fnmatch
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -226,23 +227,19 @@ class ToolFilter:
         """Evaluate allow/deny rules against tool_name. deny always overrides allow."""
         tool = tool_name.lower().strip()
 
-        # 1. Deny check (strict precedence)
+        # 1. Deny check (strict precedence, supports glob patterns like '*', '*secret*', 'srv.*')
         for d in self.deny:
             pattern = d.lower().strip()
-            if pattern == "*" or pattern == tool:
-                return False
-            if pattern.endswith(".*") and tool.startswith(pattern[:-1]):
+            if fnmatch.fnmatchcase(tool, pattern):
                 return False
 
-        # 2. Allow check
+        # 2. Allow check (supports glob patterns)
         if not self.allow:
             return True
 
         for a in self.allow:
             pattern = a.lower().strip()
-            if pattern == "*" or pattern == tool:
-                return True
-            if pattern.endswith(".*") and tool.startswith(pattern[:-1]):
+            if fnmatch.fnmatchcase(tool, pattern):
                 return True
 
         return False

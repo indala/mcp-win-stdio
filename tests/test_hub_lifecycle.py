@@ -75,6 +75,61 @@ def test_win32_job_object_kernel_kill_on_close():
             proc.wait()
 
 
+def test_win32_job_object_kills_grandchild_descendants():
+    """Verify Job Object terminates both child and grandchild descendant processes on Windows."""
+    job = Win32JobObject()
+    if not job.is_supported:
+        pytest.skip("Win32 Job Objects only supported on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    grandchild_code = "import sys, time; time.sleep(60)"
+    child_code = (
+        f"import subprocess, sys, time; "
+        f"p = subprocess.Popen([sys.executable, '-c', {grandchild_code!r}]); "
+        f"print(p.pid, flush=True); "
+        f"time.sleep(60)"
+    )
+
+    proc_a = subprocess.Popen(
+        [sys.executable, "-u", "-c", child_code],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert job.assign_process(proc_a) is True
+        grandchild_pid_line = proc_a.stdout.readline().strip()
+        assert grandchild_pid_line.isdigit()
+        grandchild_pid = int(grandchild_pid_line)
+
+        # Confirm grandchild process exists
+        k32 = ctypes.windll.kernel32
+        h_grandchild = k32.OpenProcess(0x1000, False, grandchild_pid)
+        assert h_grandchild != 0
+        k32.CloseHandle(h_grandchild)
+
+        # Close Job Object handle -> OS kernel terminates all processes in job tree
+        job.close()
+
+        # Both parent and grandchild must terminate
+        code_a = proc_a.wait(timeout=5.0)
+        assert code_a is not None
+
+        # Verify grandchild is terminated
+        time.sleep(0.5)
+        h_gc_check = k32.OpenProcess(0x1000, False, grandchild_pid)
+        if h_gc_check:
+            exit_code = wintypes.DWORD()
+            k32.GetExitCodeProcess(h_gc_check, ctypes.byref(exit_code))
+            k32.CloseHandle(h_gc_check)
+            assert exit_code.value != 259
+    finally:
+        if proc_a.poll() is None:
+            proc_a.kill()
+            proc_a.wait()
+
+
 def test_lifecycle_happy_path_transitions():
     """Verify full valid transition sequence: STOPPED -> STARTING -> INITIALIZING -> HEALTHY -> STOPPING -> STOPPED."""
     instance = ProcessInstance(server_name="test-server", instance_id=1)

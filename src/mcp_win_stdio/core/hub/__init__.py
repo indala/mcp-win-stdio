@@ -2,6 +2,8 @@
 Hub core subsystem: Registry, Configuration, Profiles, and Secrets management.
 """
 
+from .auth import BearerAuthMiddleware, SessionManager
+from .bridge import StreamableHttpBridge, ToolRouter
 from .lifecycle import (
     VALID_TRANSITIONS,
     InvalidStateTransitionError,
@@ -33,6 +35,7 @@ from .supervisor import ProcessSupervisor, ServerNotFoundError
 from .win32_job import Win32JobObject
 
 __all__ = [
+    "BearerAuthMiddleware",
     "EnvSecretProvider",
     "HubConfig",
     "HubRegistry",
@@ -53,8 +56,11 @@ __all__ = [
     "ServerNotFoundError",
     "ServerProfileManifest",
     "ServerState",
+    "SessionManager",
+    "StreamableHttpBridge",
     "SupervisorConfig",
     "ToolFilter",
+    "ToolRouter",
     "VALID_TRANSITIONS",
     "Win32JobObject",
     "WindowsCredentialManagerProvider",

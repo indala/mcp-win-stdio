@@ -5,6 +5,7 @@ and readiness (HEALTHY), with strict failure semantics and event notifications.
 """
 
 import logging
+import queue
 import subprocess
 import threading
 import time
@@ -67,6 +68,8 @@ class ProcessInstance:
         self.consecutive_crashes: int = 0
         self.last_exit_code: Optional[int] = None
         self.last_error: Optional[str] = None
+        self.response_queues: Dict[int, queue.Queue] = {}
+        self.reader_thread: Optional[threading.Thread] = None
 
         self._listeners: List[Callable[[LifecycleEvent], None]] = []
         if on_event:

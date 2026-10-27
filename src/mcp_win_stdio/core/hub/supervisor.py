@@ -193,7 +193,43 @@ class ProcessSupervisor:
             instance.process = proc
             instance.pid = proc.pid
 
-            # 6. Assign to Win32 Job Object immediately
+            # 6. Start persistent stdout JSON-RPC reader thread
+            def stdout_reader() -> None:
+                try:
+                    if proc.stdout:
+                        for line in iter(proc.stdout.readline, ""):
+                            line_str = line.strip()
+                            if not line_str.startswith("{"):
+                                continue
+                            try:
+                                msg = json.loads(line_str)
+                                mid = msg.get("id")
+                                if mid is not None and mid in instance.response_queues:
+                                    instance.response_queues[mid].put(msg)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                finally:
+                    # Notify any pending callers that process exited
+                    err_msg = {
+                        "error": {
+                            "code": -32000,
+                            "message": f"Server '{instance.server_name}' closed stdout prematurely",
+                        }
+                    }
+                    for q_item in list(instance.response_queues.values()):
+                        q_item.put(err_msg)
+
+            reader_t = threading.Thread(
+                target=stdout_reader,
+                name=f"mws-stdout-{instance.server_name}-{instance.instance_id}",
+                daemon=True,
+            )
+            reader_t.start()
+            instance.reader_thread = reader_t
+
+            # 7. Assign to Win32 Job Object immediately
             if self._job_object.is_supported:
                 assigned = self._job_object.assign_process(proc)
                 if not assigned:
@@ -210,13 +246,13 @@ class ProcessSupervisor:
                         "process terminated to prevent orphan process."
                     )
 
-            # 7. Transition to INITIALIZING
+            # 8. Transition to INITIALIZING
             instance.transition_to(
                 ServerState.INITIALIZING,
                 reason="process spawned and assigned to job object",
             )
 
-            # 8. Perform full MCP protocol handshake
+            # 9. Perform full MCP protocol handshake
             try:
                 self._perform_mcp_handshake(instance, proc, server_cfg.supervisor)
             except Exception as handshake_err:
@@ -227,7 +263,7 @@ class ProcessSupervisor:
                 instance.transition_to(ServerState.FAILED, reason=f"Handshake failed: {safe_msg}")
                 raise
 
-            # 9. Handshake confirmed -> Transition to HEALTHY
+            # 10. Handshake confirmed -> Transition to HEALTHY
             instance.transition_to(ServerState.HEALTHY, reason="MCP handshake acknowledged")
             return instance.snapshot()
 
@@ -246,28 +282,12 @@ class ProcessSupervisor:
           4. (Optional) Send 'ping' and verify response within probe_timeout_seconds
         """
         timeout = sup_config.startup_timeout_seconds
-        deadline = time.time() + timeout
-        q: queue.Queue[Optional[str]] = queue.Queue()
-
-        def stdout_reader() -> None:
-            try:
-                if proc.stdout:
-                    for line in iter(proc.stdout.readline, ""):
-                        q.put(line)
-            except Exception:
-                pass
-            finally:
-                q.put(None)
-
-        reader_thread = threading.Thread(
-            target=stdout_reader,
-            name=f"mws-handshake-stdout-{instance.server_name}-{instance.instance_id}",
-            daemon=True,
-        )
-        reader_thread.start()
 
         # Step 1: Send 'initialize' request
         req_id = 1
+        q_init: queue.Queue[Dict[str, Any]] = queue.Queue()
+        instance.response_queues[req_id] = q_init
+
         init_req = {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -284,56 +304,33 @@ class ProcessSupervisor:
             proc.stdin.write(json.dumps(init_req) + "\n")
             proc.stdin.flush()
         except Exception as e:
+            instance.response_queues.pop(req_id, None)
             raise RuntimeError(f"Failed writing initialize request to '{instance.server_name}': {e}") from e
 
         # Step 2: Await matching initialize response
-        init_succeeded = False
-        while time.time() < deadline:
-            remaining = max(0.05, deadline - time.time())
-            try:
-                line = q.get(timeout=remaining)
-            except queue.Empty:
-                if proc.poll() is not None:
-                    code = proc.poll()
-                    raise RuntimeError(
-                        f"Server '{instance.server_name}' exited with code {code} before completing handshake."
-                    )
-                continue
-
-            if line is None:
-                code = proc.poll()
-                raise RuntimeError(
-                    f"Server '{instance.server_name}' closed stdout prematurely (exit code: {code})."
-                )
-
-            line_str = line.strip()
-            if not line_str.startswith("{"):
-                continue
-
-            try:
-                msg = json.loads(line_str)
-            except Exception:
-                continue
-
-            if msg.get("id") == req_id:
-                if "error" in msg:
-                    err = msg["error"]
-                    raise RuntimeError(f"MCP initialize error from '{instance.server_name}': {err}")
-                result = msg.get("result")
-                if not isinstance(result, dict):
-                    raise RuntimeError(
-                        f"MCP initialize response from '{instance.server_name}' missing result dictionary"
-                    )
-                if "protocolVersion" not in result:
-                    raise RuntimeError(
-                        f"MCP initialize response from '{instance.server_name}' missing protocolVersion"
-                    )
-                init_succeeded = True
-                break
-
-        if not init_succeeded:
+        try:
+            msg = q_init.get(timeout=timeout)
+        except queue.Empty:
+            code = proc.poll()
             raise TimeoutError(
-                f"Timed out waiting for MCP initialize response from '{instance.server_name}' after {timeout:.1f}s."
+                f"Timed out waiting for MCP initialize response from '{instance.server_name}' "
+                f"after {timeout:.1f}s (process exit code: {code})."
+            )
+        finally:
+            instance.response_queues.pop(req_id, None)
+
+        if "error" in msg:
+            err = msg["error"]
+            raise RuntimeError(f"MCP initialize error from '{instance.server_name}': {err}")
+
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                f"MCP initialize response from '{instance.server_name}' missing result dictionary"
+            )
+        if "protocolVersion" not in result:
+            raise RuntimeError(
+                f"MCP initialize response from '{instance.server_name}' missing protocolVersion"
             )
 
         # Step 3: Send 'notifications/initialized'
@@ -351,6 +348,9 @@ class ProcessSupervisor:
         # Step 4: Optional protocol ping check
         if sup_config.protocol_ping:
             ping_id = 2
+            q_ping: queue.Queue[Dict[str, Any]] = queue.Queue()
+            instance.response_queues[ping_id] = q_ping
+
             ping_req = {
                 "jsonrpc": "2.0",
                 "id": ping_id,
@@ -361,39 +361,85 @@ class ProcessSupervisor:
                 proc.stdin.write(json.dumps(ping_req) + "\n")
                 proc.stdin.flush()
             except Exception as e:
+                instance.response_queues.pop(ping_id, None)
                 raise RuntimeError(f"Failed sending ping to '{instance.server_name}': {e}") from e
 
-            ping_deadline = time.time() + sup_config.probe_timeout_seconds
-            ping_succeeded = False
-            while time.time() < ping_deadline:
-                remaining = max(0.05, ping_deadline - time.time())
-                try:
-                    line = q.get(timeout=remaining)
-                except queue.Empty:
-                    if proc.poll() is not None:
-                        raise RuntimeError(f"Server '{instance.server_name}' exited during protocol ping.")
-                    continue
-
-                if line is None:
-                    raise RuntimeError(f"Server '{instance.server_name}' closed stdout during protocol ping.")
-
-                line_str = line.strip()
-                if not line_str.startswith("{"):
-                    continue
-
-                try:
-                    msg = json.loads(line_str)
-                except Exception:
-                    continue
-
-                if msg.get("id") == ping_id:
-                    ping_succeeded = True
-                    break
-
-            if not ping_succeeded:
+            try:
+                ping_msg = q_ping.get(timeout=sup_config.probe_timeout_seconds)
+            except queue.Empty:
+                code = proc.poll()
                 raise TimeoutError(
-                    f"Protocol ping to '{instance.server_name}' timed out after {sup_config.probe_timeout_seconds:.1f}s."
+                    f"Protocol ping to '{instance.server_name}' timed out after "
+                    f"{sup_config.probe_timeout_seconds:.1f}s (process exit code: {code})."
                 )
+            finally:
+                instance.response_queues.pop(ping_id, None)
+
+            if "error" in ping_msg:
+                raise RuntimeError(f"Protocol ping error from '{instance.server_name}': {ping_msg['error']}")
+
+    def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        timeout: float = 60.0,
+    ) -> Dict[str, Any]:
+        """
+        Forward an MCP tools/call request to the supervised child server process.
+        Thread-safe under server lock; validates process health before dispatch.
+        """
+        clean_name = server_name.lower().strip()
+        with self._get_server_lock(clean_name):
+            instance = self._instances.get(clean_name)
+            if not instance or instance.state != ServerState.HEALTHY:
+                self.start(clean_name)
+                instance = self._instances.get(clean_name)
+
+            if not instance or instance.state != ServerState.HEALTHY:
+                st = instance.state.value if instance else "unknown"
+                raise RuntimeError(f"Server '{server_name}' is not in HEALTHY state (current: {st}).")
+
+            proc = instance.process
+            if not proc or proc.poll() is not None:
+                code = proc.poll() if proc else None
+                raise RuntimeError(f"Server '{server_name}' process is dead (exit code: {code}).")
+
+            with self._global_lock:
+                self._instance_seq += 1
+                req_id = self._instance_seq
+
+            q: queue.Queue[Dict[str, Any]] = queue.Queue()
+            instance.response_queues[req_id] = q
+
+            payload = {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": arguments or {}},
+            }
+            try:
+                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.flush()
+            except Exception as write_err:
+                instance.response_queues.pop(req_id, None)
+                raise RuntimeError(f"Failed writing tools/call request to '{server_name}': {write_err}") from write_err
+
+        # Lock is released before awaiting response, allowing concurrent multiplexed requests
+        try:
+            msg = q.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError(f"Timed out executing tool '{tool_name}' on server '{server_name}' after {timeout:.1f}s.")
+        finally:
+            instance.response_queues.pop(req_id, None)
+
+        if "error" in msg:
+            err = msg["error"]
+            err_msg = err.get("message", err) if isinstance(err, dict) else str(err)
+            raise RuntimeError(redact_sensitive_data(f"MCP tool error: {err_msg}"))
+
+        raw_result = msg.get("result", {})
+        return redact_sensitive_data(raw_result)
 
     def stop(self, server_name: str, timeout: Optional[float] = None) -> ProcessInstanceInfo:
         """
