@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-excel-db"
-version = "0.3.4"
+version = "0.4.0"
 description = "High-Performance Excel & Database Power Pipeline MCP Server: Zero-Context Streaming, Cross-Source Joins, and Diff Auditing."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,7 @@ authors = [
 keywords = ["mcp", "excel", "database", "pipeline", "etl", "duckdb", "sql", "streaming", "analytics", "stdio"]
 
 dependencies = [
-    "mcp-win-stdio>=0.3.4",
+    "mcp-win-stdio>=0.4.0",
     "mcp>=1.2.0",
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
