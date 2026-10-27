@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 from mcp_win_stdio.core.config import USER_DIR
 from mcp_win_stdio.core.hub.orchestrator import HubOrchestrator
 from mcp_win_stdio.core.hub.secrets import redact_sensitive_data
+from mcp_win_stdio.core.hub.security import write_secure_json_file
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,39 @@ def is_pid_alive(pid: int) -> bool:
             return False
 
 
+def get_process_creation_time(pid: int) -> Optional[int]:
+    """Retrieve 64-bit creation timestamp (FILETIME) for given PID in Windows kernel."""
+    if pid <= 0 or sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return None
+        ct, et, kt, ut = FILETIME(), FILETIME(), FILETIME(), FILETIME()
+        k32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+            ctypes.POINTER(FILETIME),
+        ]
+        k32.GetProcessTimes.restype = wintypes.BOOL
+        ok = k32.GetProcessTimes(h, ctypes.byref(ct), ctypes.byref(et), ctypes.byref(kt), ctypes.byref(ut))
+        k32.CloseHandle(h)
+        if ok:
+            return (ct.dwHighDateTime << 32) + ct.dwLowDateTime
+        return None
+    except Exception:
+        return None
+
+
 def get_default_pipe_name() -> str:
     """Generate default named pipe path for current user."""
     username = os.environ.get("USERNAME", os.environ.get("USER", "default")).lower().strip()
@@ -79,6 +113,7 @@ class HubInstanceMetadata:
     config_source: str
     http_host: str
     http_port: int
+    creation_time: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -90,6 +125,7 @@ class HubInstanceMetadata:
             "config_source": self.config_source,
             "http_host": self.http_host,
             "http_port": self.http_port,
+            "creation_time": self.creation_time,
         }
 
     @classmethod
@@ -103,6 +139,7 @@ class HubInstanceMetadata:
             config_source=str(data.get("config_source", "unknown")),
             http_host=str(data.get("http_host", "127.0.0.1")),
             http_port=int(data.get("http_port", 8080)),
+            creation_time=data.get("creation_time"),
         )
 
 
@@ -191,18 +228,38 @@ class HubInstanceManager:
                 self.release()
                 return False, None
 
-            # 2. Control IPC ping verification to confirm process identity
+            # 2. Kernel creation-time check: verify whether the PID was reused by another program
+            if meta.creation_time is not None:
+                live_creation_time = get_process_creation_time(meta.pid)
+                if live_creation_time is not None and live_creation_time != meta.creation_time:
+                    logger.info(
+                        "PID %d creation time mismatch (stored: %d, live: %d); PID was reused by unrelated process. Purging stale metadata.",
+                        meta.pid,
+                        meta.creation_time,
+                        live_creation_time,
+                    )
+                    self.release()
+                    return False, None
+
+            # 3. Control IPC ping verification to confirm process identity
             active_pid = HubControlClient.ping(meta.pipe_name, meta.authkey_hex, timeout=1.0)
             if active_pid == meta.pid:
                 return True, meta
 
-            # If PID is alive in OS but ping did not respond, allow startup grace period
-            # before treating the metadata as an unrelated reused PID
-            age = time.time() - meta.started_at
-            if age > 15.0:
-                logger.info("PID %d did not respond to control ping after %.1fs; cleaning up stale instance.", meta.pid, age)
-                self.release()
-                return False, None
+            # Process is alive in OS kernel:
+            # If creation_time was verified, this IS the live Hub process (busy, high load, or initializing).
+            # We must NEVER delete metadata belonging to a verified live process!
+            # Only if creation_time was not recorded (e.g. non-Windows) do we rely on time-based grace period.
+            if meta.creation_time is None:
+                age = time.time() - meta.started_at
+                if age > 15.0:
+                    logger.info(
+                        "PID %d did not respond to control ping after %.1fs; cleaning up stale instance.",
+                        meta.pid,
+                        age,
+                    )
+                    self.release()
+                    return False, None
 
             # Process is alive in OS kernel but IPC handshake is not yet ready (starting up)
             return False, meta
@@ -222,11 +279,14 @@ class HubInstanceManager:
         """
         with self._lock:
             running, existing = self.is_running()
-            if running and existing:
-                raise RuntimeError(
-                    f"MCP Hub is already running (PID {existing.pid}) on {existing.http_host}:{existing.http_port}."
-                )
+            if existing:
+                # If running or process is confirmed alive in kernel, reject concurrent start
+                if running or is_pid_alive(existing.pid):
+                    raise RuntimeError(
+                        f"MCP Hub is already running (PID {existing.pid}) on {existing.http_host}:{existing.http_port}."
+                    )
 
+            creation_time = get_process_creation_time(pid)
             authkey_hex = secrets.token_hex(16)
             meta = HubInstanceMetadata(
                 pid=pid,
@@ -237,14 +297,11 @@ class HubInstanceManager:
                 config_source=config_source,
                 http_host=http_host,
                 http_port=http_port,
+                creation_time=creation_time,
             )
 
-            self.metadata_path.parent.mkdir(parents=True, exist_ok=True)
-            # Atomic file write via temp file
-            tmp_path = self.metadata_path.with_suffix(".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(meta.to_dict(), f, indent=2)
-            tmp_path.replace(self.metadata_path)
+            # Write metadata securely with protected DACL (atomic replacement)
+            write_secure_json_file(self.metadata_path, meta.to_dict())
 
             return meta
 

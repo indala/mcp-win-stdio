@@ -50,6 +50,14 @@ from .secrets import (
     WindowsCredentialManagerProvider,
     redact_sensitive_data,
 )
+from .security import (
+    WindowsSecurityError,
+    get_current_user_sid,
+    secure_directory,
+    secure_file,
+    verify_security_descriptor,
+    write_secure_json_file,
+)
 from .supervisor import ProcessSupervisor, ServerNotFoundError
 from .win32_job import Win32JobObject
 
@@ -91,10 +99,16 @@ __all__ = [
     "VALID_TRANSITIONS",
     "Win32JobObject",
     "WindowsCredentialManagerProvider",
+    "WindowsSecurityError",
     "generate_default_hub_config",
+    "get_current_user_sid",
     "is_pid_alive",
     "load_hub_config",
     "redact_sensitive_data",
     "resolve_config_path",
+    "secure_directory",
+    "secure_file",
     "sync_connection_profiles",
+    "verify_security_descriptor",
+    "write_secure_json_file",
 ]
