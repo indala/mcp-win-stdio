@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio"
-version = "0.4.0"
+version = "0.4.1"
 description = "Universal Windows-optimized Model Context Protocol (MCP) suite & dynamic on-demand tool gateway for AI IDEs and CLI agents (Gemini, Claude, ChatGPT, Cursor, Windsurf, Kiro, OpenCode)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,46 +34,46 @@ dependencies = [
 
 [project.optional-dependencies]
 excel = [
-    "mcp-win-stdio-excel>=0.4.0",
+    "mcp-win-stdio-excel>=0.4.1",
 ]
 word = [
-    "mcp-win-stdio-word>=0.4.0",
+    "mcp-win-stdio-word>=0.4.1",
 ]
 explorer = [
-    "mcp-win-stdio-explorer>=0.4.0",
+    "mcp-win-stdio-explorer>=0.4.1",
 ]
 tsc = [
-    "mcp-win-stdio-tsc>=0.4.0",
+    "mcp-win-stdio-tsc>=0.4.1",
 ]
 db = [
-    "mcp-win-stdio-db>=0.4.0",
+    "mcp-win-stdio-db>=0.4.1",
 ]
 git = [
-    "mcp-win-stdio-git>=0.4.0",
+    "mcp-win-stdio-git>=0.4.1",
 ]
 ssh = [
-    "mcp-win-stdio-ssh>=0.4.0",
+    "mcp-win-stdio-ssh>=0.4.1",
 ]
 rag = [
-    "mcp-win-stdio-rag>=0.4.0",
+    "mcp-win-stdio-rag>=0.4.1",
 ]
 excel-db = [
-    "mcp-win-stdio-excel-db>=0.4.0",
+    "mcp-win-stdio-excel-db>=0.4.1",
 ]
 arch = [
-    "mcp-win-stdio-arch>=0.4.0",
+    "mcp-win-stdio-arch>=0.4.1",
 ]
 all = [
-    "mcp-win-stdio-excel>=0.4.0",
-    "mcp-win-stdio-word>=0.4.0",
-    "mcp-win-stdio-explorer>=0.4.0",
-    "mcp-win-stdio-tsc>=0.4.0",
-    "mcp-win-stdio-db>=0.4.0",
-    "mcp-win-stdio-git>=0.4.0",
-    "mcp-win-stdio-ssh>=0.4.0",
-    "mcp-win-stdio-rag>=0.4.0",
-    "mcp-win-stdio-excel-db>=0.4.0",
-    "mcp-win-stdio-arch>=0.4.0",
+    "mcp-win-stdio-excel>=0.4.1",
+    "mcp-win-stdio-word>=0.4.1",
+    "mcp-win-stdio-explorer>=0.4.1",
+    "mcp-win-stdio-tsc>=0.4.1",
+    "mcp-win-stdio-db>=0.4.1",
+    "mcp-win-stdio-git>=0.4.1",
+    "mcp-win-stdio-ssh>=0.4.1",
+    "mcp-win-stdio-rag>=0.4.1",
+    "mcp-win-stdio-excel-db>=0.4.1",
+    "mcp-win-stdio-arch>=0.4.1",
 ]
 dev = [
     "pytest>=8.0.0",
