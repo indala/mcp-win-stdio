@@ -4,6 +4,7 @@ Data models and typed configuration structures for the MCP Hub.
 
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 
@@ -382,3 +383,67 @@ class HubConfig:
             http_auth_token_env=http_token_env,
             servers=servers,
         )
+
+
+class ServerState(str, Enum):
+    """Lifecycle states of a supervised MCP server instance."""
+
+    STOPPED = "stopped"
+    STARTING = "starting"
+    INITIALIZING = "initializing"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+    STOPPING = "stopping"
+
+
+@dataclass(frozen=True)
+class ProcessInstanceInfo:
+    """Immutable snapshot of a supervised server process instance."""
+
+    instance_id: int
+    server_name: str
+    pid: Optional[int]
+    state: ServerState
+    started_at: Optional[float] = None
+    last_heartbeat: Optional[float] = None
+    restart_count: int = 0
+    consecutive_crashes: int = 0
+    last_exit_code: Optional[int] = None
+    last_error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "instance_id": self.instance_id,
+            "server_name": self.server_name,
+            "pid": self.pid,
+            "state": self.state.value,
+            "started_at": self.started_at,
+            "last_heartbeat": self.last_heartbeat,
+            "restart_count": self.restart_count,
+            "consecutive_crashes": self.consecutive_crashes,
+            "last_exit_code": self.last_exit_code,
+            "last_error": self.last_error,
+        }
+
+
+@dataclass(frozen=True)
+class LifecycleEvent:
+    """Event emitted upon state transition of a supervised instance."""
+
+    server_name: str
+    instance_id: int
+    old_state: ServerState
+    new_state: ServerState
+    timestamp: float
+    reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "server_name": self.server_name,
+            "instance_id": self.instance_id,
+            "old_state": self.old_state.value,
+            "new_state": self.new_state.value,
+            "timestamp": self.timestamp,
+            "reason": self.reason,
+        }

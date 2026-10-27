@@ -1,0 +1,615 @@
+"""
+Process Supervisor for supervised MCP server instances.
+Manages process lifecycle, Win32 Job Object isolation, MCP protocol handshake,
+crash loop detection, exponential backoff, and graceful termination.
+"""
+
+import json
+import logging
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+from mcp_win_stdio.core.hub.lifecycle import ProcessInstance
+from mcp_win_stdio.core.hub.models import (
+    LifecycleEvent,
+    ProcessInstanceInfo,
+    ProjectConfig,
+    ServerConfig,
+    ServerState,
+    SupervisorConfig,
+)
+from mcp_win_stdio.core.hub.profiles import ProfileManager
+from mcp_win_stdio.core.hub.registry import HubRegistry
+from mcp_win_stdio.core.hub.secrets import redact_sensitive_data
+from mcp_win_stdio.core.hub.win32_job import Win32JobObject
+
+logger = logging.getLogger(__name__)
+
+
+class ServerNotFoundError(Exception):
+    """Raised when an operation is requested on an unregistered server."""
+
+
+class ProcessSupervisor:
+    """
+    Supervises the execution, OS isolation, protocol handshake, health monitoring,
+    and automatic restart of MCP child servers.
+    """
+
+    def __init__(
+        self,
+        registry: HubRegistry,
+        profile_manager: Optional[ProfileManager] = None,
+        job_object: Optional[Win32JobObject] = None,
+        max_backoff_seconds: float = 30.0,
+        auto_start_monitor: bool = True,
+        on_event: Optional[Callable[[LifecycleEvent], None]] = None,
+    ):
+        self._registry = registry
+        self._profile_manager = profile_manager
+        self._job_object = job_object or Win32JobObject()
+        self._max_backoff_seconds = max_backoff_seconds
+        self._on_event = on_event
+
+        self._instances: Dict[str, ProcessInstance] = {}
+        self._server_locks: Dict[str, threading.RLock] = {}
+        self._global_lock = threading.RLock()
+        self._instance_seq = 0
+        self._shutdown_event = threading.Event()
+
+        self._monitor_thread: Optional[threading.Thread] = None
+        if auto_start_monitor:
+            self._monitor_thread = threading.Thread(
+                target=self._monitor_loop,
+                name="mws-supervisor-monitor",
+                daemon=True,
+            )
+            self._monitor_thread.start()
+
+    @property
+    def job_object(self) -> Win32JobObject:
+        """Return the active Windows Job Object instance."""
+        return self._job_object
+
+    def _get_server_lock(self, server_name: str) -> threading.RLock:
+        """Get or create the per-server lock to ensure serialized start/stop per server."""
+        clean = server_name.lower().strip()
+        with self._global_lock:
+            if clean not in self._server_locks:
+                self._server_locks[clean] = threading.RLock()
+            return self._server_locks[clean]
+
+    def _dispatch_event(self, event: LifecycleEvent) -> None:
+        """Internal callback when an instance emits a lifecycle event."""
+        if self._on_event:
+            try:
+                self._on_event(event)
+            except Exception as e:
+                logger.warning("Error in supervisor lifecycle event listener: %s", e)
+
+    def start(
+        self,
+        server_name: str,
+        profile_override: Optional[str] = None,
+        session_id: Optional[str] = None,
+        project_config: Optional[ProjectConfig] = None,
+    ) -> ProcessInstanceInfo:
+        """
+        Start and supervise a configured MCP server.
+        Enforces:
+          1. Concurrent start guard (no duplicate process spawn).
+          2. Win32 Job Object assignment immediately after spawn.
+          3. Full MCP protocol handshake (initialize -> initialized notification -> ping).
+        """
+        clean_name = server_name.lower().strip()
+
+        with self._get_server_lock(clean_name):
+            # 1. Check if already active
+            existing = self._instances.get(clean_name)
+            if existing and existing.state in (
+                ServerState.HEALTHY,
+                ServerState.STARTING,
+                ServerState.INITIALIZING,
+            ):
+                return existing.snapshot()
+
+            # 2. Resolve ServerConfig from HubRegistry
+            server_cfg: Optional[ServerConfig] = self._registry.get_server(clean_name)
+            if not server_cfg:
+                raise ServerNotFoundError(f"Server '{server_name}' is not registered in the Hub.")
+            if not server_cfg.enabled:
+                raise ValueError(f"Server '{server_name}' is disabled in the Hub configuration.")
+
+            # 3. Construct Environment with security redaction awareness
+            env = os.environ.copy()
+            extra_paths = [p for p in sys.path if "packages" in p or "src" in p]
+            if extra_paths:
+                combined = os.pathsep.join(extra_paths)
+                existing_pp = env.get("PYTHONPATH", "")
+                env["PYTHONPATH"] = f"{combined}{os.pathsep}{existing_pp}" if existing_pp else combined
+
+            # Merge server config environment
+            for k, v in server_cfg.env.items():
+                env[k] = str(v)
+
+            # Resolve profile if manager is provided
+            if self._profile_manager:
+                try:
+                    prof, _ = self._profile_manager.resolve_profile(
+                        clean_name,
+                        request_override=profile_override,
+                        session_id=session_id,
+                        project_config=project_config,
+                    )
+                    for pk, pv in prof.parameters.items():
+                        env[pk] = str(pv)
+                        env[f"MWS_PARAM_{pk.upper()}"] = str(pv)
+                    for sk, sec_ref in prof.secrets.items():
+                        try:
+                            sval = self._profile_manager._secrets.resolve_secret(sec_ref)
+                            env[sk] = sval
+                            env[f"MWS_SECRET_{sk.upper()}"] = sval
+                        except Exception as sec_err:
+                            logger.warning("Could not resolve secret '%s': %s", sk, sec_err)
+                except Exception as e:
+                    logger.debug("Profile resolution bypassed or skipped for %s: %s", clean_name, e)
+
+            # 4. Allocate instance_id
+            with self._global_lock:
+                self._instance_seq += 1
+                inst_id = self._instance_seq
+
+            instance = ProcessInstance(
+                server_name=clean_name,
+                instance_id=inst_id,
+                on_event=self._dispatch_event,
+            )
+            self._instances[clean_name] = instance
+            instance.transition_to(ServerState.STARTING, reason="starting server process")
+
+            # 5. Spawn subprocess without shell interpolation
+            cmd = [server_cfg.command, *server_cfg.args]
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=env,
+                    text=True,
+                    bufsize=1,
+                    encoding="utf-8",
+                )
+            except Exception as spawn_exc:
+                safe_err = redact_sensitive_data(str(spawn_exc))
+                instance.transition_to(ServerState.FAILED, reason=f"Spawn failed: {safe_err}")
+                raise
+
+            instance.process = proc
+            instance.pid = proc.pid
+
+            # 6. Assign to Win32 Job Object immediately
+            if self._job_object.is_supported:
+                assigned = self._job_object.assign_process(proc)
+                if not assigned:
+                    # Guarantee: Terminate child immediately to avoid leaving orphan
+                    proc.kill()
+                    proc.wait()
+                    self._close_pipes(proc)
+                    instance.transition_to(
+                        ServerState.FAILED,
+                        reason="Failed to assign process to Windows Job Object",
+                    )
+                    raise RuntimeError(
+                        f"Failed to assign child process for '{server_name}' (PID {proc.pid}) to Windows Job Object; "
+                        "process terminated to prevent orphan process."
+                    )
+
+            # 7. Transition to INITIALIZING
+            instance.transition_to(
+                ServerState.INITIALIZING,
+                reason="process spawned and assigned to job object",
+            )
+
+            # 8. Perform full MCP protocol handshake
+            try:
+                self._perform_mcp_handshake(instance, proc, server_cfg.supervisor)
+            except Exception as handshake_err:
+                proc.kill()
+                proc.wait()
+                self._close_pipes(proc)
+                safe_msg = redact_sensitive_data(str(handshake_err))
+                instance.transition_to(ServerState.FAILED, reason=f"Handshake failed: {safe_msg}")
+                raise
+
+            # 9. Handshake confirmed -> Transition to HEALTHY
+            instance.transition_to(ServerState.HEALTHY, reason="MCP handshake acknowledged")
+            return instance.snapshot()
+
+    def _perform_mcp_handshake(
+        self,
+        instance: ProcessInstance,
+        proc: subprocess.Popen,
+        sup_config: SupervisorConfig,
+    ) -> None:
+        """
+        Execute JSON-RPC handshake over stdin/stdout with timeout safety.
+        Sequence:
+          1. Send 'initialize'
+          2. Wait for response with timeout = startup_timeout_seconds
+          3. Send 'notifications/initialized'
+          4. (Optional) Send 'ping' and verify response within probe_timeout_seconds
+        """
+        timeout = sup_config.startup_timeout_seconds
+        deadline = time.time() + timeout
+        q: queue.Queue[Optional[str]] = queue.Queue()
+
+        def stdout_reader() -> None:
+            try:
+                if proc.stdout:
+                    for line in iter(proc.stdout.readline, ""):
+                        q.put(line)
+            except Exception:
+                pass
+            finally:
+                q.put(None)
+
+        reader_thread = threading.Thread(
+            target=stdout_reader,
+            name=f"mws-handshake-stdout-{instance.server_name}-{instance.instance_id}",
+            daemon=True,
+        )
+        reader_thread.start()
+
+        # Step 1: Send 'initialize' request
+        req_id = 1
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "mws", "version": "0.4.2"},
+            },
+        }
+        try:
+            if not proc.stdin:
+                raise RuntimeError("Process stdin pipe is not available")
+            proc.stdin.write(json.dumps(init_req) + "\n")
+            proc.stdin.flush()
+        except Exception as e:
+            raise RuntimeError(f"Failed writing initialize request to '{instance.server_name}': {e}") from e
+
+        # Step 2: Await matching initialize response
+        init_succeeded = False
+        while time.time() < deadline:
+            remaining = max(0.05, deadline - time.time())
+            try:
+                line = q.get(timeout=remaining)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    code = proc.poll()
+                    raise RuntimeError(
+                        f"Server '{instance.server_name}' exited with code {code} before completing handshake."
+                    )
+                continue
+
+            if line is None:
+                code = proc.poll()
+                raise RuntimeError(
+                    f"Server '{instance.server_name}' closed stdout prematurely (exit code: {code})."
+                )
+
+            line_str = line.strip()
+            if not line_str.startswith("{"):
+                continue
+
+            try:
+                msg = json.loads(line_str)
+            except Exception:
+                continue
+
+            if msg.get("id") == req_id:
+                if "error" in msg:
+                    err = msg["error"]
+                    raise RuntimeError(f"MCP initialize error from '{instance.server_name}': {err}")
+                result = msg.get("result")
+                if not isinstance(result, dict):
+                    raise RuntimeError(
+                        f"MCP initialize response from '{instance.server_name}' missing result dictionary"
+                    )
+                if "protocolVersion" not in result:
+                    raise RuntimeError(
+                        f"MCP initialize response from '{instance.server_name}' missing protocolVersion"
+                    )
+                init_succeeded = True
+                break
+
+        if not init_succeeded:
+            raise TimeoutError(
+                f"Timed out waiting for MCP initialize response from '{instance.server_name}' after {timeout:.1f}s."
+            )
+
+        # Step 3: Send 'notifications/initialized'
+        notif = {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {},
+        }
+        try:
+            proc.stdin.write(json.dumps(notif) + "\n")
+            proc.stdin.flush()
+        except Exception as e:
+            raise RuntimeError(f"Failed sending notifications/initialized to '{instance.server_name}': {e}") from e
+
+        # Step 4: Optional protocol ping check
+        if sup_config.protocol_ping:
+            ping_id = 2
+            ping_req = {
+                "jsonrpc": "2.0",
+                "id": ping_id,
+                "method": "ping",
+                "params": {},
+            }
+            try:
+                proc.stdin.write(json.dumps(ping_req) + "\n")
+                proc.stdin.flush()
+            except Exception as e:
+                raise RuntimeError(f"Failed sending ping to '{instance.server_name}': {e}") from e
+
+            ping_deadline = time.time() + sup_config.probe_timeout_seconds
+            ping_succeeded = False
+            while time.time() < ping_deadline:
+                remaining = max(0.05, ping_deadline - time.time())
+                try:
+                    line = q.get(timeout=remaining)
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        raise RuntimeError(f"Server '{instance.server_name}' exited during protocol ping.")
+                    continue
+
+                if line is None:
+                    raise RuntimeError(f"Server '{instance.server_name}' closed stdout during protocol ping.")
+
+                line_str = line.strip()
+                if not line_str.startswith("{"):
+                    continue
+
+                try:
+                    msg = json.loads(line_str)
+                except Exception:
+                    continue
+
+                if msg.get("id") == ping_id:
+                    ping_succeeded = True
+                    break
+
+            if not ping_succeeded:
+                raise TimeoutError(
+                    f"Protocol ping to '{instance.server_name}' timed out after {sup_config.probe_timeout_seconds:.1f}s."
+                )
+
+    def stop(self, server_name: str, timeout: Optional[float] = None) -> ProcessInstanceInfo:
+        """
+        Gracefully terminate a supervised MCP server instance.
+        1. Closes stdin to signal EOF.
+        2. Waits up to shutdown_grace_seconds.
+        3. If still alive, escalates to force kill.
+        4. Transitions state to STOPPED and cleans up pipes.
+        """
+        clean_name = server_name.lower().strip()
+
+        with self._get_server_lock(clean_name):
+            instance = self._instances.get(clean_name)
+            if not instance:
+                return ProcessInstanceInfo(
+                    instance_id=0,
+                    server_name=clean_name,
+                    pid=None,
+                    state=ServerState.STOPPED,
+                )
+
+            if instance.state == ServerState.STOPPED:
+                return instance.snapshot()
+
+            if instance.state == ServerState.FAILED:
+                # Process has already failed/exited; ensure pipes closed and transition cleanly to STOPPED
+                proc = instance.process
+                if proc:
+                    self._close_pipes(proc)
+                instance.transition_to(ServerState.STOPPED, reason="stopped from failed state")
+                return instance.snapshot()
+
+            if instance.state != ServerState.STOPPING:
+                instance.transition_to(ServerState.STOPPING, reason="stop requested")
+
+            proc = instance.process
+            if proc and proc.poll() is None:
+                # 1. Close stdin to signal graceful exit
+                try:
+                    if proc.stdin and not proc.stdin.closed:
+                        proc.stdin.close()
+                except Exception:
+                    pass
+
+                # 2. Wait up to configured grace period
+                srv_cfg = self._registry.get_server(clean_name)
+                grace = (
+                    timeout
+                    if timeout is not None
+                    else (srv_cfg.supervisor.shutdown_grace_seconds if srv_cfg else 5.0)
+                )
+
+                try:
+                    proc.wait(timeout=grace)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Server '%s' (PID %s) did not exit within %.1fs; force-terminating",
+                        clean_name,
+                        proc.pid,
+                        grace,
+                    )
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=5.0)
+                    except Exception as e:
+                        logger.debug("Error during force kill of %s: %s", clean_name, e)
+
+                self._close_pipes(proc)
+            elif proc:
+                self._close_pipes(proc)
+
+            instance.transition_to(ServerState.STOPPED, reason="process exited")
+            return instance.snapshot()
+
+    def restart(
+        self,
+        server_name: str,
+        profile_override: Optional[str] = None,
+        session_id: Optional[str] = None,
+        project_config: Optional[ProjectConfig] = None,
+    ) -> ProcessInstanceInfo:
+        """Stop and re-launch a supervised MCP server instance."""
+        clean_name = server_name.lower().strip()
+        with self._get_server_lock(clean_name):
+            self.stop(clean_name)
+            return self.start(
+                clean_name,
+                profile_override=profile_override,
+                session_id=session_id,
+                project_config=project_config,
+            )
+
+    def get_status(self, server_name: str) -> Optional[ProcessInstanceInfo]:
+        """Return the current immutable snapshot of a server instance, or None if never started."""
+        clean_name = server_name.lower().strip()
+        with self._global_lock:
+            instance = self._instances.get(clean_name)
+            return instance.snapshot() if instance else None
+
+    def list_instances(self) -> List[ProcessInstanceInfo]:
+        """Return snapshots of all supervised server instances."""
+        with self._global_lock:
+            return [inst.snapshot() for inst in self._instances.values()]
+
+    def _monitor_loop(self) -> None:
+        """Background supervision loop checking for process exits and applying exponential backoff."""
+        while not self._shutdown_event.is_set():
+            try:
+                time.sleep(0.2)
+            except Exception:
+                break
+
+            if self._shutdown_event.is_set():
+                break
+
+            with self._global_lock:
+                instances = list(self._instances.values())
+
+            for instance in instances:
+                if self._shutdown_event.is_set():
+                    break
+
+                with self._get_server_lock(instance.server_name):
+                    # Check active states
+                    if instance.state in (
+                        ServerState.HEALTHY,
+                        ServerState.INITIALIZING,
+                        ServerState.STARTING,
+                        ServerState.DEGRADED,
+                    ):
+                        proc = instance.process
+                        if proc and proc.poll() is not None:
+                            exit_code = proc.poll()
+                            instance.last_exit_code = exit_code
+                            self._close_pipes(proc)
+                            reason = redact_sensitive_data(f"Process exited unexpectedly with code {exit_code}")
+                            instance.transition_to(ServerState.FAILED, reason=reason)
+
+                            # Evaluate auto-restart policy
+                            srv_cfg = self._registry.get_server(instance.server_name)
+                            if srv_cfg and srv_cfg.enabled and not self._shutdown_event.is_set():
+                                sup = srv_cfg.supervisor
+                                if instance.consecutive_crashes <= sup.max_restart_retries:
+                                    backoff = min(
+                                        sup.restart_backoff_seconds * (2 ** (instance.consecutive_crashes - 1)),
+                                        self._max_backoff_seconds,
+                                    )
+                                    logger.info(
+                                        "Scheduling restart for '%s' in %.2fs (crash %d/%d)",
+                                        instance.server_name,
+                                        backoff,
+                                        instance.consecutive_crashes,
+                                        sup.max_restart_retries,
+                                    )
+                                    t = threading.Thread(
+                                        target=self._delayed_restart,
+                                        args=(instance.server_name, backoff, instance.instance_id),
+                                        name=f"mws-restart-{instance.server_name}-{instance.instance_id}",
+                                        daemon=True,
+                                    )
+                                    t.start()
+                                else:
+                                    logger.warning(
+                                        "Server '%s' exceeded max restart retries (%d). Halting auto-restart.",
+                                        instance.server_name,
+                                        sup.max_restart_retries,
+                                    )
+
+    def _delayed_restart(self, server_name: str, delay: float, triggering_instance_id: int) -> None:
+        """Wait for backoff delay and perform restart if the instance remains in FAILED state."""
+        start = time.time()
+        while time.time() - start < delay:
+            if self._shutdown_event.is_set():
+                return
+            time.sleep(0.05)
+
+        if self._shutdown_event.is_set():
+            return
+
+        with self._get_server_lock(server_name):
+            current = self._instances.get(server_name)
+            # Guarantee: only proceed if current instance matches the crash trigger
+            if not current or current.instance_id != triggering_instance_id or current.state != ServerState.FAILED:
+                return
+
+            try:
+                logger.info("Executing auto-restart for '%s'", server_name)
+                self.start(server_name)
+            except Exception as e:
+                logger.warning("Auto-restart failed for '%s': %s", server_name, redact_sensitive_data(str(e)))
+
+    def _close_pipes(self, proc: subprocess.Popen) -> None:
+        """Safely close open stdin/stdout/stderr pipes to prevent resource leaks."""
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe and not getattr(pipe, "closed", True):
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+    def shutdown(self) -> None:
+        """Stop supervisor, terminate all instances, and close Job Object."""
+        self._shutdown_event.set()
+        with self._global_lock:
+            names = list(self._instances.keys())
+
+        for name in names:
+            try:
+                self.stop(name, timeout=2.0)
+            except Exception as e:
+                logger.debug("Error stopping server '%s' during supervisor shutdown: %s", name, e)
+
+        self._job_object.close()
+
+    def __enter__(self) -> "ProcessSupervisor":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.shutdown()

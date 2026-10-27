@@ -2,13 +2,21 @@
 Hub core subsystem: Registry, Configuration, Profiles, and Secrets management.
 """
 
+from .lifecycle import (
+    VALID_TRANSITIONS,
+    InvalidStateTransitionError,
+    ProcessInstance,
+)
 from .models import (
     HubConfig,
+    LifecycleEvent,
+    ProcessInstanceInfo,
     ProfileConfig,
     ProjectConfig,
     SecretReference,
     ServerConfig,
     ServerProfileManifest,
+    ServerState,
     SupervisorConfig,
     ToolFilter,
 )
@@ -21,11 +29,18 @@ from .secrets import (
     WindowsCredentialManagerProvider,
     redact_sensitive_data,
 )
+from .supervisor import ProcessSupervisor, ServerNotFoundError
+from .win32_job import Win32JobObject
 
 __all__ = [
     "EnvSecretProvider",
     "HubConfig",
     "HubRegistry",
+    "InvalidStateTransitionError",
+    "LifecycleEvent",
+    "ProcessInstance",
+    "ProcessInstanceInfo",
+    "ProcessSupervisor",
     "ProfileConfig",
     "ProfileManager",
     "ProfileNotFoundError",
@@ -35,9 +50,13 @@ __all__ = [
     "SecretReference",
     "SecretRegistry",
     "ServerConfig",
+    "ServerNotFoundError",
     "ServerProfileManifest",
+    "ServerState",
     "SupervisorConfig",
     "ToolFilter",
+    "VALID_TRANSITIONS",
+    "Win32JobObject",
     "WindowsCredentialManagerProvider",
     "redact_sensitive_data",
 ]
