@@ -5,6 +5,7 @@ enforces ToolFilter (deny > allow) at both discovery and invocation boundaries,
 and routes tool calls to supervised child processes.
 """
 
+import ipaddress
 import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -127,11 +128,47 @@ class StreamableHttpBridge:
         self.tool_filter = tool_filter
         self.router = ToolRouter()
 
-        # By default, allow testserver/loopback in transport security
+        # Enable DNS rebinding protection and origin restrictions by default for local hub
         if transport_security is None:
+            allowed_hosts = [
+                "127.0.0.1:*",
+                "127.0.0.1",
+                "localhost:*",
+                "localhost",
+                "[::1]:*",
+                "[::1]",
+                "testserver",
+                "testserver:*",
+            ]
+            allowed_origins = [
+                "http://127.0.0.1:*",
+                "http://127.0.0.1",
+                "http://localhost:*",
+                "http://localhost",
+                "http://[::1]:*",
+                "http://[::1]",
+                "http://testserver",
+                "http://testserver:*",
+                "https://127.0.0.1:*",
+                "https://localhost:*",
+                "https://[::1]:*",
+            ]
+            cfg_host = getattr(getattr(registry, "config", None), "http_host", None)
+            # Security invariant: Only genuinely validated loopback IP addresses are permitted.
+            # External hostnames, wildcard binds (0.0.0.0), and invalid IP strings are strictly rejected.
+            if cfg_host:
+                try:
+                    ip_obj = ipaddress.ip_address(cfg_host.strip("[]"))
+                    if ip_obj.is_loopback and cfg_host not in allowed_hosts:
+                        allowed_hosts.extend([f"{cfg_host}:*", cfg_host])
+                        allowed_origins.extend([f"http://{cfg_host}:*", f"https://{cfg_host}:*"])
+                except ValueError:
+                    pass
+
             transport_security = TransportSecuritySettings(
-                enable_dns_rebinding_protection=False,
-                allowed_hosts=["*"],
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
             )
         self.transport_security = transport_security
 

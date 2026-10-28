@@ -3,6 +3,7 @@ Data models and typed configuration structures for the MCP Hub.
 """
 
 import fnmatch
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -380,7 +381,18 @@ class HubConfig:
 
         # Security invariant: Remote binding requires an explicit non-empty auth token variable
         # and requires that environment variable to be set and non-empty at runtime.
-        if http_host not in ("127.0.0.1", "localhost", "::1"):
+        # Uses strict ipaddress validation to ensure only genuine loopback addresses are exempt.
+        is_loopback = False
+        if http_host.lower() in ("localhost", "testserver"):
+            is_loopback = True
+        else:
+            try:
+                ip_obj = ipaddress.ip_address(http_host.strip("[]"))
+                is_loopback = ip_obj.is_loopback
+            except ValueError:
+                is_loopback = False
+
+        if not is_loopback:
             if not http_token_env:
                 raise ValueError(
                     f"Remote HTTP host binding '{http_host}' strictly requires a non-empty 'auth_token_env' for authentication."

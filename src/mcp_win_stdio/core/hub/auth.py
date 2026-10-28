@@ -5,6 +5,7 @@ fail-closed error semantics, and server-controlled session token issuance.
 """
 
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -151,7 +152,22 @@ class BearerAuthMiddleware:
         self.allow_loopback_health_unauthenticated = allow_loopback_health_unauthenticated
         self.session_manager = session_manager or SessionManager()
 
-        self._is_loopback_binding = self.bind_host in ("127.0.0.1", "localhost", "::1")
+        is_loop = False
+        if self.bind_host in ("localhost", "testserver"):
+            is_loop = True
+        else:
+            try:
+                is_loop = ipaddress.ip_address(self.bind_host.strip("[]")).is_loopback
+            except ValueError:
+                is_loop = False
+        self._is_loopback_binding = is_loop
+        self.allowed_hosts: Set[str] = {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+            "[::1]",
+            "testserver",
+        }
 
     async def __call__(
         self,
@@ -177,6 +193,24 @@ class BearerAuthMiddleware:
         client_host = client[0] if client else None
         is_loopback_client = client_host in ("127.0.0.1", "::1", "localhost", "testclient")
         path = scope.get("path", "")
+
+        # 0. Enforce Host header validation to defend against DNS rebinding
+        host_header = self._get_header(scope, b"host")
+        if host_header:
+            host_str = host_header.decode("ascii", errors="replace").strip()
+            clean_host = host_str.lower()
+            if ":" in clean_host and not clean_host.startswith("["):
+                clean_host = clean_host.split(":", 1)[0]
+            elif clean_host.startswith("[") and "]" in clean_host:
+                clean_host = clean_host[: clean_host.index("]") + 1]
+
+            if clean_host not in self.allowed_hosts:
+                await self._send_response(
+                    send,
+                    status=421,
+                    message="Invalid Host header.",
+                )
+                return
 
         # 1. Determine if authentication is required for this request
         auth_required = True

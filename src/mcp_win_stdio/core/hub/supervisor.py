@@ -787,7 +787,7 @@ class ProcessSupervisor:
                 logger.debug("Error stopping server '%s' during supervisor shutdown: %s", name, e)
 
         self._job_object.close()
-        if hasattr(self, "_monitor_thread") and self._monitor_thread.is_alive():
+        if getattr(self, "_monitor_thread", None) is not None and self._monitor_thread.is_alive():
             self._monitor_thread.join(timeout=2.0)
 
     def __enter__(self) -> "ProcessSupervisor":
