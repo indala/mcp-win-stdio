@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.abspath("src"))
 import subprocess
 import tempfile
 
+import pytest
 from mcp_win_stdio.git.server import (
     _filter_git_output,
     _truncate_output,
@@ -27,6 +28,7 @@ from mcp_win_stdio.git.server import (
     git_log,
     git_remote,
     git_restore,
+    git_stash,
     git_status,
     git_tag,
     is_gh_installed,
@@ -37,6 +39,13 @@ from mcp_win_stdio.git.server import (
     repo_overview,
     use_repo,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_git_repos(tmp_path, monkeypatch):
+    mock_file = tmp_path / "git_repos.json"
+    monkeypatch.setattr("mcp_win_stdio.git.server.REPOS_CONFIG_FILE", mock_file)
+    monkeypatch.setattr("mcp_win_stdio.git.server._ACTIVE_REPO", None)
 
 
 def test_dependency_checkers():
@@ -109,9 +118,9 @@ def test_local_git_operations():
         repo_dir = Path(tmp_dir)
 
         # 1. Init git repo
-        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=str(repo_dir), check=True)
-        subprocess.run(["git", "config", "user.email", "test@runner.local"], cwd=str(repo_dir), check=True)
+        subprocess.run(["git", "init", "-b", "main"], cwd=str(repo_dir), check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=str(repo_dir), check=True, capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(["git", "config", "user.email", "test@runner.local"], cwd=str(repo_dir), check=True, capture_output=True, stdin=subprocess.DEVNULL)
 
         # 2. Test status on empty repo
         status_res = git_status(repo_path=str(repo_dir))

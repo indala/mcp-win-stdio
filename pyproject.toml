@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio"
-version = "0.4.2"
+version = "0.4.3"
 description = "Universal Windows-optimized Model Context Protocol (MCP) suite & dynamic on-demand tool gateway for AI IDEs and CLI agents (Gemini, Claude, ChatGPT, Cursor, Windsurf, Kiro, OpenCode)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,50 +31,51 @@ classifiers = [
 dependencies = [
     "mcp>=1.2.0",
     "pyyaml>=6.0.3",
+    "tomli>=2.0.1; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 excel = [
-    "mcp-win-stdio-excel>=0.4.2",
+    "mcp-win-stdio-excel>=0.4.3",
 ]
 word = [
-    "mcp-win-stdio-word>=0.4.2",
+    "mcp-win-stdio-word>=0.4.3",
 ]
 explorer = [
-    "mcp-win-stdio-explorer>=0.4.2",
+    "mcp-win-stdio-explorer>=0.4.3",
 ]
 tsc = [
-    "mcp-win-stdio-tsc>=0.4.2",
+    "mcp-win-stdio-tsc>=0.4.3",
 ]
 db = [
-    "mcp-win-stdio-db>=0.4.2",
+    "mcp-win-stdio-db>=0.4.3",
 ]
 git = [
-    "mcp-win-stdio-git>=0.4.2",
+    "mcp-win-stdio-git>=0.4.3",
 ]
 ssh = [
-    "mcp-win-stdio-ssh>=0.4.2",
+    "mcp-win-stdio-ssh>=0.4.3",
 ]
 rag = [
-    "mcp-win-stdio-rag>=0.4.2",
+    "mcp-win-stdio-rag>=0.4.3",
 ]
 excel-db = [
-    "mcp-win-stdio-excel-db>=0.4.2",
+    "mcp-win-stdio-excel-db>=0.4.3",
 ]
 arch = [
-    "mcp-win-stdio-arch>=0.4.2",
+    "mcp-win-stdio-arch>=0.4.3",
 ]
 all = [
-    "mcp-win-stdio-excel>=0.4.2",
-    "mcp-win-stdio-word>=0.4.2",
-    "mcp-win-stdio-explorer>=0.4.2",
-    "mcp-win-stdio-tsc>=0.4.2",
-    "mcp-win-stdio-db>=0.4.2",
-    "mcp-win-stdio-git>=0.4.2",
-    "mcp-win-stdio-ssh>=0.4.2",
-    "mcp-win-stdio-rag>=0.4.2",
-    "mcp-win-stdio-excel-db>=0.4.2",
-    "mcp-win-stdio-arch>=0.4.2",
+    "mcp-win-stdio-excel>=0.4.3",
+    "mcp-win-stdio-word>=0.4.3",
+    "mcp-win-stdio-explorer>=0.4.3",
+    "mcp-win-stdio-tsc>=0.4.3",
+    "mcp-win-stdio-db>=0.4.3",
+    "mcp-win-stdio-git>=0.4.3",
+    "mcp-win-stdio-ssh>=0.4.3",
+    "mcp-win-stdio-rag>=0.4.3",
+    "mcp-win-stdio-excel-db>=0.4.3",
+    "mcp-win-stdio-arch>=0.4.3",
 ]
 dev = [
     "pytest>=8.0.0",

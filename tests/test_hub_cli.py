@@ -29,7 +29,7 @@ from mcp_win_stdio.core.hub.profiles import ProfileManager
 def test_parser_mutually_exclusive_flags():
     """--foreground and --daemon are strictly mutually exclusive."""
     cmd = [sys.executable, "-m", "mcp_win_stdio.cli", "hub", "start", "--foreground", "--daemon"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     assert res.returncode != 0
     assert "not allowed with argument" in res.stderr.lower() or "error" in res.stderr.lower()
 
@@ -221,14 +221,14 @@ def test_cli_detached_daemon_lifecycle(tmp_path):
         "--config",
         str(config_file),
     ]
-    res_start = subprocess.run(cmd_start, capture_output=True, text=True, timeout=15)
+    res_start = subprocess.run(cmd_start, capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
     assert res_start.returncode == 0
     assert "MCP Hub started in background" in res_start.stdout
 
     try:
         # Status query
         cmd_status = [sys.executable, "-m", "mcp_win_stdio.cli", "hub", "status", "--json"]
-        res_status = subprocess.run(cmd_status, capture_output=True, text=True, timeout=5)
+        res_status = subprocess.run(cmd_status, capture_output=True, text=True, timeout=5, stdin=subprocess.DEVNULL)
         assert res_status.returncode == 0
         data = json.loads(res_status.stdout)
         assert data["running"] is True
@@ -236,6 +236,6 @@ def test_cli_detached_daemon_lifecycle(tmp_path):
     finally:
         # Graceful stop
         cmd_stop = [sys.executable, "-m", "mcp_win_stdio.cli", "hub", "stop", "--timeout", "5.0"]
-        res_stop = subprocess.run(cmd_stop, capture_output=True, text=True, timeout=10)
+        res_stop = subprocess.run(cmd_stop, capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL)
         assert res_stop.returncode == 0
         assert "stopped successfully" in res_stop.stdout
