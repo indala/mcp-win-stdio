@@ -95,6 +95,8 @@ def test_win32_job_object_kills_grandchild_descendants():
     proc_a = subprocess.Popen(
         [sys.executable, "-u", "-c", child_code],
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         text=True,
     )
     try:
