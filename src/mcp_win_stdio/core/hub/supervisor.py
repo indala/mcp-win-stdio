@@ -203,35 +203,53 @@ class ProcessSupervisor:
             instance.process = proc
             instance.pid = proc.pid
 
+            # Helper for robust, leak-free cleanup of a failed child spawn
+            def _cleanup_failed_spawn(reason: str, error_msg: str) -> None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                try:
+                    self._close_pipes(proc)
+                except Exception:
+                    pass
+                if instance.job_object:
+                    try:
+                        instance.job_object.terminate()
+                    except Exception:
+                        pass
+                    if instance.job_object is not self._custom_job_object:
+                        try:
+                            instance.job_object.close()
+                        except Exception:
+                            pass
+                    instance.job_object = None
+                instance.transition_to(ServerState.FAILED, reason=reason)
+                raise RuntimeError(error_msg)
+
             # 6. Assign to Windows Job Object immediately while suspended before executing any code
             if job.is_supported:
                 assigned = job.assign_process(proc)
-
                 if not assigned:
-                    # Guarantee: Terminate child immediately to avoid leaving orphan
-                    proc.kill()
-                    proc.wait()
-                    self._close_pipes(proc)
-                    instance.transition_to(
-                        ServerState.FAILED,
+                    _cleanup_failed_spawn(
                         reason="Failed to assign process to Windows Job Object",
-                    )
-                    raise RuntimeError(
-                        f"Failed to assign child process for '{server_name}' (PID {proc.pid}) to Windows Job Object; "
-                        "process terminated to prevent orphan process."
+                        error_msg=(
+                            f"Failed to assign child process for '{server_name}' (PID {proc.pid}) to Windows Job Object; "
+                            "process terminated to prevent orphan process."
+                        ),
                     )
 
                 # Resume the child process after kernel containment is established
                 resumed = job.resume_process(proc)
                 if not resumed:
-                    proc.kill()
-                    proc.wait()
-                    self._close_pipes(proc)
-                    instance.transition_to(
-                        ServerState.FAILED,
+                    _cleanup_failed_spawn(
                         reason="Failed to resume suspended child process",
+                        error_msg=f"Failed to resume child process for '{server_name}' (PID {proc.pid})",
                     )
-                    raise RuntimeError(f"Failed to resume child process for '{server_name}' (PID {proc.pid})")
 
             # 7. Start persistent stdout JSON-RPC reader thread
             def stdout_reader() -> None:
@@ -279,13 +297,29 @@ class ProcessSupervisor:
             try:
                 self._perform_mcp_handshake(instance, proc, server_cfg.supervisor)
             except Exception as handshake_err:
-                proc.kill()
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
                 if instance.job_object:
-                    instance.job_object.terminate()
-                    instance.job_object.close()
+                    try:
+                        instance.job_object.terminate()
+                    except Exception:
+                        pass
+                    if instance.job_object is not self._custom_job_object:
+                        try:
+                            instance.job_object.close()
+                        except Exception:
+                            pass
                     instance.job_object = None
-                proc.wait()
-                self._close_pipes(proc)
+                try:
+                    proc.wait(timeout=2.0)
+                except Exception:
+                    pass
+                try:
+                    self._close_pipes(proc)
+                except Exception:
+                    pass
                 safe_msg = redact_sensitive_data(str(handshake_err))
                 instance.transition_to(ServerState.FAILED, reason=f"Handshake failed: {safe_msg}")
                 raise
@@ -718,6 +752,8 @@ class ProcessSupervisor:
             return
 
         with self._get_server_lock(server_name):
+            if self._shutdown_event.is_set():
+                return
             current = self._instances.get(server_name)
             # Guarantee: only proceed if current instance matches the crash trigger
             if not current or current.instance_id != triggering_instance_id or current.state != ServerState.FAILED:
@@ -739,7 +775,7 @@ class ProcessSupervisor:
                     pass
 
     def shutdown(self) -> None:
-        """Stop supervisor, terminate all instances, and close Job Object."""
+        """Stop supervisor, terminate all instances, join monitor thread, and close Job Object."""
         self._shutdown_event.set()
         with self._global_lock:
             names = list(self._instances.keys())
@@ -751,6 +787,8 @@ class ProcessSupervisor:
                 logger.debug("Error stopping server '%s' during supervisor shutdown: %s", name, e)
 
         self._job_object.close()
+        if hasattr(self, "_monitor_thread") and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2.0)
 
     def __enter__(self) -> "ProcessSupervisor":
         return self

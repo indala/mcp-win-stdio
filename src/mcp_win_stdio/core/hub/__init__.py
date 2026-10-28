@@ -53,6 +53,7 @@ from .secrets import (
 from .security import (
     WindowsSecurityError,
     get_current_user_sid,
+    interprocess_file_lock,
     secure_directory,
     secure_file,
     verify_security_descriptor,
@@ -102,6 +103,7 @@ __all__ = [
     "WindowsSecurityError",
     "generate_default_hub_config",
     "get_current_user_sid",
+    "interprocess_file_lock",
     "is_pid_alive",
     "load_hub_config",
     "redact_sensitive_data",

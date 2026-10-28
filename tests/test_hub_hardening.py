@@ -391,28 +391,58 @@ def test_job_object_assignment_failure_terminates_child_without_orphan():
     )
 
     sup = ProcessSupervisor(registry=reg)
-    spawned_pids = []
-
-    original_popen = subprocess.Popen
-
-    def recording_popen(*args, **kwargs):
-        p = original_popen(*args, **kwargs)
-        spawned_pids.append(p.pid)
-        return p
 
     # Patch assign_process to simulate failure
-    with patch("subprocess.Popen", side_effect=recording_popen):
-        with patch.object(Win32JobObject, "assign_process", return_value=False):
-            with pytest.raises(RuntimeError, match="Failed to assign child process"):
-                sup.start("fail_srv")
+    with patch.object(Win32JobObject, "assign_process", return_value=False):
+        with pytest.raises(RuntimeError, match="Failed to assign child process"):
+            sup.start("fail_srv")
 
-    assert len(spawned_pids) == 1
-    child_pid = spawned_pids[0]
+    inst = sup._instances.get("fail_srv")
+    assert inst is not None
+    assert inst.pid is not None
+    child_pid = inst.pid
 
     # Verify that child process was terminated immediately and does not survive as an orphan
     from mcp_win_stdio.core.hub.control import is_pid_alive
 
     assert is_pid_alive(child_pid) is False
+    assert inst.job_object is None
+    sup.shutdown()
+
+
+def test_job_object_resume_failure_terminates_child_without_orphan():
+    """Verify that if resuming a suspended process fails, the child is immediately killed and handle closed."""
+    from mcp_win_stdio.core.hub.models import ServerConfig
+    from mcp_win_stdio.core.hub.registry import HubRegistry
+    from mcp_win_stdio.core.hub.supervisor import ProcessSupervisor
+    from mcp_win_stdio.core.hub.win32_job import Win32JobObject
+
+    reg = HubRegistry()
+    reg.register_server(
+        ServerConfig(
+            name="resume_fail_srv",
+            command=sys.executable,
+            args=["-c", "import time; time.sleep(10)"],
+        )
+    )
+
+    sup = ProcessSupervisor(registry=reg)
+
+    # Patch resume_process to simulate failure
+    with patch.object(Win32JobObject, "resume_process", return_value=False):
+        with pytest.raises(RuntimeError, match="Failed to resume child process"):
+            sup.start("resume_fail_srv")
+
+    inst = sup._instances.get("resume_fail_srv")
+    assert inst is not None
+    assert inst.pid is not None
+    child_pid = inst.pid
+
+    from mcp_win_stdio.core.hub.control import is_pid_alive
+
+    assert is_pid_alive(child_pid) is False
+    assert inst.job_object is None
+    sup.shutdown()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows taskkill process tree test")
@@ -524,6 +554,101 @@ time.sleep(60)
     finally:
         if parent.poll() is None:
             parent.kill()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object tests require Windows")
+def test_job_object_explicit_handle_close_kills_tree_without_taskkill(tmp_path):
+    """
+    Directly verify that closing the Job Object handle (without taskkill or proc.kill)
+    causes the Windows kernel to immediately terminate all running child and grandchild processes
+    via JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+    """
+    from mcp_win_stdio.core.hub.control import get_process_creation_time, is_pid_alive
+    from mcp_win_stdio.core.hub.win32_job import CREATE_SUSPENDED, Win32JobObject
+
+    # Grandchild script: loops forever
+    gc_code = "import time; time.sleep(60)"
+    gc_file = tmp_path / "gc_runner.py"
+    gc_file.write_text(gc_code, encoding="utf-8")
+
+    # Child script: spawns grandchild, outputs both PIDs and creation times, then sleeps
+    child_code = f"""
+import sys, subprocess, time, json
+from mcp_win_stdio.core.hub.control import get_process_creation_time
+gc = subprocess.Popen([sys.executable, r"{gc_file}"])
+my_pid = sys.argv[1] if len(sys.argv) > 1 else "0"
+gc_ct = get_process_creation_time(gc.pid)
+data = {{"child_pid": int(my_pid), "gc_pid": gc.pid, "gc_ct": gc_ct}}
+sys.stdout.write(json.dumps(data) + "\\n")
+sys.stdout.flush()
+time.sleep(60)
+"""
+    child_file = tmp_path / "child_runner.py"
+    child_file.write_text(child_code, encoding="utf-8")
+
+    job = Win32JobObject(name=f"mws-test-explicit-close-{os.getpid()}-{time.time_ns()}")
+    assert job.is_supported is True
+
+    # 1. Spawn child suspended
+    proc = subprocess.Popen(
+        [sys.executable, str(child_file), str(os.getpid())],
+        stdout=subprocess.PIPE,
+        creationflags=CREATE_SUSPENDED,
+        text=True,
+    )
+    # Correct child_pid in argument
+    child_pid = proc.pid
+    child_ct = get_process_creation_time(child_pid)
+
+    try:
+        # 2. Assign to Job Object before resuming
+        assigned = job.assign_process(proc)
+        assert assigned is True, "Failed to assign child process to Job Object"
+
+        # 3. Resume child process
+        resumed = job.resume_process(proc)
+        assert resumed is True, "Failed to resume child process"
+
+        # Read grandchild info
+        line = proc.stdout.readline().strip()
+        data = json.loads(line)
+        gc_pid = data["gc_pid"]
+        gc_ct = data["gc_ct"]
+
+        # Confirm child and grandchild are alive
+        assert is_pid_alive(child_pid) is True
+        assert is_pid_alive(gc_pid) is True
+        assert get_process_creation_time(child_pid) == child_ct
+        assert get_process_creation_time(gc_pid) == gc_ct
+
+        # 4. EXPLICITLY CLOSE JOB OBJECT HANDLE
+        # Neither proc.kill() nor taskkill is called.
+        # Closing the handle MUST cause the Windows kernel to kill all processes in the job.
+        job.close()
+
+        # 5. Verify kernel teardown of both processes within bounded timeout
+        deadline = time.time() + 6.0
+        child_dead = False
+        gc_dead = False
+
+        while time.time() < deadline:
+            if not is_pid_alive(child_pid) or get_process_creation_time(child_pid) != child_ct:
+                child_dead = True
+            if not is_pid_alive(gc_pid) or get_process_creation_time(gc_pid) != gc_ct:
+                gc_dead = True
+            if child_dead and gc_dead:
+                break
+            time.sleep(0.1)
+
+        assert child_dead is True, f"Child PID {child_pid} survived explicit Job Object handle closure!"
+        assert gc_dead is True, f"Grandchild PID {gc_pid} survived explicit Job Object handle closure!"
+
+    finally:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        job.close()
 
 
 def test_multiple_supervised_mcps_independent_containment():

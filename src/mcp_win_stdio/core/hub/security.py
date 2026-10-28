@@ -11,6 +11,8 @@ import re
 import secrets
 import stat
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Set, Union
 
@@ -458,3 +460,90 @@ def write_secure_json_file(path: Union[str, Path], data: Dict[str, Any]) -> None
         except Exception:
             pass
         raise
+
+
+@contextmanager
+def interprocess_file_lock(lock_path: Union[str, Path], timeout: float = 10.0):
+    """
+    Acquire an exclusive cross-process filesystem lock.
+    Uses Win32/msvcrt byte locking on Windows, and fcntl.flock on POSIX.
+    Blocks up to timeout seconds. Raises TimeoutError if lock cannot be acquired.
+    Kernel automatically releases lock if process crashes or is killed.
+    """
+    path_obj = Path(lock_path).resolve()
+    parent_dir = path_obj.parent
+    parent_dir.mkdir(parents=True, exist_ok=True)
+
+    if sys.platform == "win32":
+        try:
+            secure_directory(parent_dir)
+        except Exception:
+            pass
+
+    deadline = time.time() + max(0.1, timeout)
+    f = None
+
+    try:
+        f = open(path_obj, "a+b")
+        if sys.platform == "win32":
+            try:
+                secure_file(path_obj)
+            except Exception:
+                pass
+
+        # Ensure at least 1 byte exists in file for byte-range locking
+        f.seek(0, os.SEEK_END)
+        if f.tell() == 0:
+            f.write(b"\x00")
+            f.flush()
+        fd = f.fileno()
+
+        locked = False
+        while time.time() < deadline:
+            if sys.platform == "win32":
+                import msvcrt
+
+                try:
+                    f.seek(0)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    locked = True
+                    break
+                except (OSError, IOError):
+                    time.sleep(0.05)
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except (OSError, IOError):
+                    time.sleep(0.05)
+
+        if not locked:
+            raise TimeoutError(f"Timed out after {timeout:.1f}s acquiring lockfile '{path_obj}'")
+
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                import msvcrt
+
+                try:
+                    f.seek(0)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except Exception:
+                    pass
+    finally:
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass

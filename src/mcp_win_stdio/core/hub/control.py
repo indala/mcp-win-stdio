@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 from mcp_win_stdio.core.config import USER_DIR
 from mcp_win_stdio.core.hub.orchestrator import HubOrchestrator
 from mcp_win_stdio.core.hub.secrets import redact_sensitive_data
-from mcp_win_stdio.core.hub.security import write_secure_json_file
+from mcp_win_stdio.core.hub.security import interprocess_file_lock, write_secure_json_file
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,7 @@ class HubInstanceManager:
 
     def __init__(self, metadata_path: Optional[Path] = None):
         self.metadata_path = metadata_path or (USER_DIR / "hub_instance.json")
+        self.lock_path = self.metadata_path.with_suffix(".lock")
         self._lock = threading.RLock()
 
     def get_metadata(self) -> Optional[HubInstanceMetadata]:
@@ -214,8 +215,9 @@ class HubInstanceManager:
         Verify if the hub instance is genuinely running:
           1. Reads metadata file.
           2. Checks if PID is active in OS.
-          3. Pings control pipe with authkey to guarantee process identity (no PID reuse).
-          4. Cleans up stale metadata automatically if dead.
+          3. Checks creation time to guard against PID reuse.
+          4. Pings control pipe with authkey to guarantee process identity and responsiveness.
+          5. Cleans up stale metadata automatically if dead in OS kernel.
         """
         with self._lock:
             meta = self.get_metadata()
@@ -241,27 +243,15 @@ class HubInstanceManager:
                     self.release()
                     return False, None
 
-            # 3. Control IPC ping verification to confirm process identity
+            # 3. Control IPC ping verification to confirm process responsiveness
             active_pid = HubControlClient.ping(meta.pipe_name, meta.authkey_hex, timeout=1.0)
             if active_pid == meta.pid:
                 return True, meta
 
-            # Process is alive in OS kernel:
-            # If creation_time was verified, this IS the live Hub process (busy, high load, or initializing).
-            # We must NEVER delete metadata belonging to a verified live process!
-            # Only if creation_time was not recorded (e.g. non-Windows) do we rely on time-based grace period.
-            if meta.creation_time is None:
-                age = time.time() - meta.started_at
-                if age > 15.0:
-                    logger.info(
-                        "PID %d did not respond to control ping after %.1fs; cleaning up stale instance.",
-                        meta.pid,
-                        age,
-                    )
-                    self.release()
-                    return False, None
-
-            # Process is alive in OS kernel but IPC handshake is not yet ready (starting up)
+            # Process is alive in OS kernel (PID is alive, and creation_time matched if recorded),
+            # but IPC handshake is not responding (either starting up, high load, or hung).
+            # Constraint: A recovery routine must NEVER remove metadata belonging to a live hub!
+            # Return (False, meta) indicating alive in OS kernel but unresponsive on IPC.
             return False, meta
 
     def acquire(
@@ -275,41 +265,48 @@ class HubInstanceManager:
     ) -> HubInstanceMetadata:
         """
         Register active instance ownership. Fails if another instance is running.
+        Uses cross-process filesystem locking to guarantee mutual exclusion during concurrent starts.
         Generates per-instance cryptographic authkey for IPC security.
         """
         with self._lock:
-            running, existing = self.is_running()
-            if existing:
-                # If running or process is confirmed alive in kernel, reject concurrent start
-                if running or is_pid_alive(existing.pid):
-                    raise RuntimeError(
-                        f"MCP Hub is already running (PID {existing.pid}) on {existing.http_host}:{existing.http_port}."
-                    )
+            with interprocess_file_lock(self.lock_path, timeout=5.0):
+                running, existing = self.is_running()
+                if existing:
+                    # If running or process is confirmed alive in kernel, reject concurrent start
+                    if running or is_pid_alive(existing.pid):
+                        if (
+                            existing.creation_time is None
+                            or get_process_creation_time(existing.pid) == existing.creation_time
+                        ):
+                            raise RuntimeError(
+                                f"MCP Hub is already running (PID {existing.pid}) on {existing.http_host}:{existing.http_port}."
+                            )
 
-            creation_time = get_process_creation_time(pid)
-            authkey_hex = secrets.token_hex(16)
-            meta = HubInstanceMetadata(
-                pid=pid,
-                started_at=time.time(),
-                pipe_name=pipe_name,
-                authkey_hex=authkey_hex,
-                config_path=config_path,
-                config_source=config_source,
-                http_host=http_host,
-                http_port=http_port,
-                creation_time=creation_time,
-            )
+                creation_time = get_process_creation_time(pid)
+                authkey_hex = secrets.token_hex(16)
+                meta = HubInstanceMetadata(
+                    pid=pid,
+                    started_at=time.time(),
+                    pipe_name=pipe_name,
+                    authkey_hex=authkey_hex,
+                    config_path=config_path,
+                    config_source=config_source,
+                    http_host=http_host,
+                    http_port=http_port,
+                    creation_time=creation_time,
+                )
 
-            # Write metadata securely with protected DACL (atomic replacement)
-            write_secure_json_file(self.metadata_path, meta.to_dict())
+                # Write metadata securely with protected DACL (atomic replacement)
+                write_secure_json_file(self.metadata_path, meta.to_dict())
 
-            return meta
+                return meta
 
     def release(self) -> None:
-        """Clean up instance metadata file."""
+        """Clean up instance metadata file under interprocess lock."""
         with self._lock:
             try:
-                self.metadata_path.unlink(missing_ok=True)
+                with interprocess_file_lock(self.lock_path, timeout=5.0):
+                    self.metadata_path.unlink(missing_ok=True)
             except Exception as e:
                 logger.warning("Error releasing hub instance metadata: %s", e)
 

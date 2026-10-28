@@ -179,6 +179,7 @@ def _get_guide_func(srv_name: str):
     if srv_name in ("server", "mws", "gateway"):
         try:
             from mcp_win_stdio.server.guide import print_server_guide
+
             return print_server_guide
         except ImportError:
             pass
@@ -798,7 +799,10 @@ def cmd_run(args: argparse.Namespace) -> None:
         except ModuleNotFoundError as e:
             pkg = srv.get("package", f"mcp-win-stdio-{server_name}")
             print(f"Error: Server package '{pkg}' is not installed in the current environment.", file=sys.stderr)
-            print(f"👉 To install: mws install {server_name}  (or: uv pip install {pkg} / pip install {pkg})", file=sys.stderr)
+            print(
+                f"👉 To install: mws install {server_name}  (or: uv pip install {pkg} / pip install {pkg})",
+                file=sys.stderr,
+            )
             sys.exit(1)
         except Exception as e:
             print(f"Error launching server '{server_name}': {str(e)}", file=sys.stderr)
@@ -1329,8 +1333,7 @@ def _detected_project_clients() -> Dict[str, bool]:
     appdata = Path(os.environ.get("APPDATA", ""))
     local_appdata = Path(os.environ.get("LOCALAPPDATA", ""))
     return {
-        "antigravity": (Path.home() / ".gemini").exists()
-        or (local_appdata / "Programs" / "Antigravity IDE").exists(),
+        "antigravity": (Path.home() / ".gemini").exists() or (local_appdata / "Programs" / "Antigravity IDE").exists(),
         "codex": bool(shutil.which("codex")) or (Path.home() / ".codex").exists(),
         "claude": (appdata / "Claude").exists()
         or (Path.home() / ".claude.json").exists()
@@ -1341,9 +1344,7 @@ def _detected_project_clients() -> Dict[str, bool]:
         or bool(shutil.which("code"))
         or bool(shutil.which("code.cmd"))
         or bool(shutil.which("gh")),
-        "cursor": (appdata / "Cursor").exists()
-        or (Path.home() / ".cursor").exists()
-        or bool(shutil.which("cursor")),
+        "cursor": (appdata / "Cursor").exists() or (Path.home() / ".cursor").exists() or bool(shutil.which("cursor")),
         "windsurf": (Path.home() / ".codeium" / "windsurf").exists()
         or (appdata / "Windsurf").exists()
         or bool(shutil.which("windsurf")),
@@ -2200,6 +2201,7 @@ def cmd_hub_start(args: argparse.Namespace) -> None:
     uvicorn_server = None
     try:
         import uvicorn
+
         asgi_app = orchestrator.asgi_app
         uv_cfg = uvicorn.Config(
             app=asgi_app,
@@ -2244,8 +2246,23 @@ def cmd_hub_status(args: argparse.Namespace) -> None:
     running, meta = instance_mgr.is_running()
 
     if is_json:
-        if not running or not meta:
+        if not meta:
             print(json.dumps({"running": False, "state": "stopped"}))
+            sys.exit(0)
+
+        if not running:
+            print(
+                json.dumps(
+                    {
+                        "running": False,
+                        "state": "unresponsive",
+                        "pid": meta.pid,
+                        "pipe_name": meta.pipe_name,
+                        "http_endpoint": f"http://{meta.http_host}:{meta.http_port}",
+                        "warning": "Hub process is alive in OS kernel but control IPC is unresponsive.",
+                    }
+                )
+            )
             sys.exit(0)
 
         status_data = HubControlClient.get_status(meta.pipe_name, meta.authkey_hex)
@@ -2262,12 +2279,23 @@ def cmd_hub_status(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     # Human-readable output
-    if not running or not meta:
+    if not meta:
         print("=" * 65)
         print("   MCP Hub Status: STOPPED")
         print("=" * 65)
         print("No active Hub instance found.")
         print("Run 'mws hub start' to launch the Hub orchestrator.\n")
+        sys.exit(0)
+
+    if not running:
+        print("=" * 65)
+        print(f"   MCP Hub Status: UNRESPONSIVE (PID {meta.pid})")
+        print("=" * 65)
+        print(f" • Process:       Alive in OS kernel (PID {meta.pid})")
+        print(f" • HTTP Bridge:   http://{meta.http_host}:{meta.http_port}")
+        print(f" • Control Pipe:  {meta.pipe_name}")
+        print(" • Warning:       Control IPC did not respond. Process may be hung or initializing.")
+        print(" • Action:        Run 'mws hub stop --force' to terminate or inspect logs.\n")
         sys.exit(0)
 
     status_data = HubControlClient.get_status(meta.pipe_name, meta.authkey_hex)
@@ -2299,18 +2327,51 @@ def cmd_hub_status(args: argparse.Namespace) -> None:
 
 def cmd_hub_stop(args: argparse.Namespace) -> None:
     """Request graceful shutdown of the running Hub instance via local control pipe."""
-    from mcp_win_stdio.core.hub.control import HubControlClient, HubInstanceManager
+    import signal
+
+    from mcp_win_stdio.core.hub.control import HubControlClient, HubInstanceManager, is_pid_alive
 
     timeout = float(getattr(args, "timeout", 10.0))
+    force = bool(getattr(args, "force", False))
     if timeout <= 0:
         print("Error: --timeout must be a positive number.")
         sys.exit(1)
 
     instance_mgr = HubInstanceManager()
     running, meta = instance_mgr.is_running()
-    if not running or not meta:
+    if not meta:
         print("MCP Hub is not currently running.")
         sys.exit(0)
+
+    def _force_kill(pid: int) -> None:
+        print(f"Force-terminating MCP Hub process (PID {pid})...")
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            if not is_pid_alive(pid):
+                break
+            time.sleep(0.1)
+        instance_mgr.release()
+
+    if force:
+        _force_kill(meta.pid)
+        if is_pid_alive(meta.pid):
+            print(f"Error: Failed to force-terminate MCP Hub (PID {meta.pid}).")
+            sys.exit(1)
+        print(f"✅ MCP Hub (PID {meta.pid}) force-terminated successfully.")
+        sys.exit(0)
+
+    if not running:
+        # Process is alive in OS kernel, but control IPC is unresponsive
+        print(f"⚠️  MCP Hub (PID {meta.pid}) is alive in kernel but control IPC is unresponsive.")
+        print("👉 Use 'mws hub stop --force' to terminate the process.")
+        sys.exit(1)
 
     print(f"Stopping MCP Hub (PID {meta.pid}) via control pipe...")
     HubControlClient.request_stop(meta.pipe_name, meta.authkey_hex, timeout=timeout)
@@ -2318,18 +2379,76 @@ def cmd_hub_stop(args: argparse.Namespace) -> None:
     deadline = time.time() + timeout
     stopped = False
     while time.time() < deadline:
-        time.sleep(0.3)
-        is_alive, _ = instance_mgr.is_running()
-        if not is_alive:
+        time.sleep(0.2)
+        if not is_pid_alive(meta.pid):
             stopped = True
             break
 
     if stopped:
+        instance_mgr.release()
         print(f"✅ MCP Hub (PID {meta.pid}) stopped successfully.")
         sys.exit(0)
     else:
         print(f"⚠️  MCP Hub (PID {meta.pid}) did not stop within {timeout:.1f} seconds.")
+        print("👉 Use 'mws hub stop --force' to force-stop.")
         sys.exit(1)
+
+
+def cmd_hub_restart(args: argparse.Namespace) -> None:
+    """Restart running MCP Hub orchestrator."""
+    import signal
+
+    from mcp_win_stdio.core.hub.control import HubControlClient, HubInstanceManager, is_pid_alive
+
+    timeout = float(getattr(args, "timeout", 10.0))
+    force = bool(getattr(args, "force", False))
+    instance_mgr = HubInstanceManager()
+    running, meta = instance_mgr.is_running()
+
+    if meta:
+        if running:
+            print(f"Stopping MCP Hub (PID {meta.pid}) via control pipe...")
+            HubControlClient.request_stop(meta.pipe_name, meta.authkey_hex, timeout=timeout)
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(0.3)
+                is_alive, _ = instance_mgr.is_running()
+                if not is_alive:
+                    break
+
+        if is_pid_alive(meta.pid):
+            if force:
+                print(f"Force-terminating MCP Hub process (PID {meta.pid})...")
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/F", "/PID", str(meta.pid)], capture_output=True)
+                else:
+                    try:
+                        os.kill(meta.pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                deadline = time.time() + 5.0
+                while time.time() < deadline:
+                    if not is_pid_alive(meta.pid):
+                        break
+                    time.sleep(0.1)
+
+                if is_pid_alive(meta.pid):
+                    print(f"Error: Failed to terminate existing MCP Hub (PID {meta.pid}); aborting restart.")
+                    sys.exit(1)
+                instance_mgr.release()
+            else:
+                print(f"Error: MCP Hub (PID {meta.pid}) failed to stop within {timeout:.1f}s.")
+                print("👉 Use 'mws hub restart --force' to force restart.")
+                sys.exit(1)
+
+    # Re-verify instance is dead before launching replacement
+    still_running, remaining_meta = instance_mgr.is_running()
+    if remaining_meta and is_pid_alive(remaining_meta.pid):
+        print(f"Error: Existing MCP Hub (PID {remaining_meta.pid}) is still active; aborting restart.")
+        sys.exit(1)
+
+    print("Starting MCP Hub orchestrator...")
+    cmd_hub_start(args)
 
 
 def main() -> None:
@@ -2410,7 +2529,10 @@ def main() -> None:
         "--fix-path", action="store_true", help="Configure Python Scripts directory in Windows User PATH"
     )
     sub_doctor.add_argument(
-        "--yes", "-y", action="store_true", help="Automatically accept adding missing directories to PATH without prompting"
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Automatically accept adding missing directories to PATH without prompting",
     )
     sub_doctor.set_defaults(func=cmd_doctor)
 
@@ -2445,9 +2567,7 @@ def main() -> None:
     sub_install.set_defaults(func=cmd_install)
 
     # 10. uninstall: uninstall packages
-    sub_uninstall = subparsers.add_parser(
-        "uninstall", help="Uninstall MCP server package(s) from Python environment"
-    )
+    sub_uninstall = subparsers.add_parser("uninstall", help="Uninstall MCP server package(s) from Python environment")
     sub_uninstall.add_argument(
         "server",
         nargs="?",
@@ -2527,7 +2647,47 @@ def main() -> None:
         default=10.0,
         help="Seconds to wait for graceful shutdown (default: 10.0)",
     )
+    hub_stop.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force-terminate hub process if graceful shutdown fails or IPC is hung",
+    )
     hub_stop.set_defaults(func=cmd_hub_stop)
+
+    # mws hub restart
+    hub_restart = hub_subparsers.add_parser("restart", help="Restart running MCP Hub orchestrator")
+    hub_restart_group = hub_restart.add_mutually_exclusive_group()
+    hub_restart_group.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run restarted hub in foreground",
+    )
+    hub_restart_group.add_argument(
+        "--daemon",
+        action="store_true",
+        default=True,
+        help="Run restarted hub as detached background process (default)",
+    )
+    hub_restart.add_argument(
+        "--config",
+        "-c",
+        default=None,
+        help="Path to hub.yaml configuration file",
+    )
+    hub_restart.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Seconds to wait for graceful stop (default: 10.0)",
+    )
+    hub_restart.add_argument(
+        "--force",
+        "-f",
+        action="store_true",
+        help="Force-terminate existing hub process if unresponsive",
+    )
+    hub_restart.set_defaults(func=cmd_hub_restart)
 
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
     known_srvs = {

@@ -3579,8 +3579,8 @@ def diff_workbooks(
         total_mismatches = 0
 
         for s in shared_sheets:
-            df_a = xl_a.parse(s)
-            df_b = xl_b.parse(s)
+            df_a = pd.read_excel(xl_a, sheet_name=s)
+            df_b = pd.read_excel(xl_b, sheet_name=s)
 
             df_a.columns = [c.strip() for c in df_a.columns]
             df_b.columns = [c.strip() for c in df_b.columns]
