@@ -407,7 +407,13 @@ def test_project_status_reports_installed_config_and_env(tmp_path, monkeypatch, 
 
 
 def test_codex_project_init_and_remove_preserve_other_toml(tmp_path):
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib
+        except ModuleNotFoundError:
+            tomllib = None
 
     from mcp_win_stdio.cli import _remove_codex_project_servers, _update_codex_project_config
 
@@ -423,10 +429,14 @@ def test_codex_project_init_and_remove_preserve_other_toml(tmp_path):
     assert "[mcp_servers.other]" in content
     assert "[mcp_servers.db]" in content
     assert 'cwd = "."' in content
-    codex_config = tomllib.loads(content)
-    assert codex_config["mcp_servers"]["db"]["cwd"] == "."
-    assert codex_config["mcp_servers"]["db"]["args"][:4] == ["-m", "mcp_win_stdio", "run", "db"]
-    assert codex_config["mcp_servers"]["db"]["args"][-2:] == ["--env-file", str(tmp_path / ".env")]
+    if tomllib is not None:
+        codex_config = tomllib.loads(content)
+        assert codex_config["mcp_servers"]["db"]["cwd"] == "."
+        assert codex_config["mcp_servers"]["db"]["args"][:4] == ["-m", "mcp_win_stdio", "run", "db"]
+        assert codex_config["mcp_servers"]["db"]["args"][-2:] == ["--env-file", str(tmp_path / ".env")]
+    else:
+        assert 'cwd = "."' in content
+        assert '"-m", "mcp_win_stdio", "run", "db"' in content
 
     _update_codex_project_config(["db"], tmp_path)
     content = path.read_text(encoding="utf-8")
