@@ -225,24 +225,56 @@ class ToolFilter:
     allow: List[str] = field(default_factory=list)
     deny: List[str] = field(default_factory=list)
 
-    def is_tool_allowed(self, tool_name: str) -> bool:
-        """Evaluate allow/deny rules against tool_name. deny always overrides allow."""
-        tool = tool_name.lower().strip()
+    def is_tool_allowed(self, tool_name: str, server_name: Optional[str] = None) -> bool:
+        """
+        Evaluate allow/deny rules against tool_name. deny always overrides allow.
+        Supports both unqualified ('tool') and namespaced ('server.tool') identifiers.
+        Case-insensitive and whitespace-tolerant.
+        """
+        if not tool_name or not isinstance(tool_name, str):
+            return False
+
+        clean_tool = tool_name.lower().strip()
+        if not clean_tool:
+            return False
+
+        # Gather candidate representations to test (base name and namespaced name)
+        candidates: List[str] = [clean_tool]
+        if server_name:
+            clean_srv = str(server_name).lower().strip()
+            if clean_srv:
+                if clean_tool.startswith(f"{clean_srv}."):
+                    base = clean_tool[len(clean_srv) + 1:].strip()
+                    if base:
+                        candidates.append(base)
+                else:
+                    candidates.append(f"{clean_srv}.{clean_tool}")
+        elif "." in clean_tool:
+            parts = clean_tool.split(".", 1)
+            base = parts[1].strip()
+            if base:
+                candidates.append(base)
 
         # 1. Deny check (strict precedence, supports glob patterns like '*', '*secret*', 'srv.*')
+        # If ANY candidate representation matches ANY deny pattern, tool is strictly DENIED.
         for d in self.deny:
             pattern = d.lower().strip()
-            if fnmatch.fnmatchcase(tool, pattern):
-                return False
+            if not pattern:
+                continue
+            for cand in candidates:
+                if fnmatch.fnmatchcase(cand, pattern):
+                    return False
 
         # 2. Allow check (supports glob patterns)
-        if not self.allow:
+        # Empty or whitespace-only allow list retains default permit semantics (unless denied).
+        effective_allow = [a.lower().strip() for a in self.allow if a.lower().strip()]
+        if not effective_allow:
             return True
 
-        for a in self.allow:
-            pattern = a.lower().strip()
-            if fnmatch.fnmatchcase(tool, pattern):
-                return True
+        for pattern in effective_allow:
+            for cand in candidates:
+                if fnmatch.fnmatchcase(cand, pattern):
+                    return True
 
         return False
 
@@ -262,8 +294,8 @@ class ToolFilter:
             raise ValueError("ToolFilter 'deny' must strictly be a list of strings")
 
         return cls(
-            allow=[x.strip() for x in raw_allow],
-            deny=[x.strip() for x in raw_deny],
+            allow=[x.strip() for x in raw_allow if x.strip()],
+            deny=[x.strip() for x in raw_deny if x.strip()],
         )
 
 

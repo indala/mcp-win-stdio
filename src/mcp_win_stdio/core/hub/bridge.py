@@ -8,7 +8,7 @@ and routes tool calls to supervised child processes.
 import ipaddress
 import json
 import logging
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -40,54 +40,101 @@ class ToolRouter:
     Registry and routing table for MCP tools.
     Maps tool names to their owning server and applies ToolFilter policies.
     Supports both unqualified ('tool') and namespaced ('server.tool') identifiers.
+    Immune to casing variations, whitespace tricks, and namespace evasion.
+    Prevents cross-server unqualified collisions.
     """
 
     def __init__(self) -> None:
         self._tools: Dict[str, Tool] = {}
         self._tool_to_server: Dict[str, str] = {}
+        self._normalized_tools: Dict[str, Tool] = {}
+        self._normalized_tool_to_server: Dict[str, str] = {}
+        self._ambiguous_tools: Set[str] = set()
 
     def register_tool(self, server_name: str, tool: Tool) -> None:
         """Register a tool definition associated with an owning server."""
         clean_srv = server_name.lower().strip()
-        # Unqualified mapping
-        self._tools[tool.name] = tool
-        self._tool_to_server[tool.name] = clean_srv
-        # Namespaced mapping
-        namespaced_name = f"{clean_srv}.{tool.name}"
-        self._tools[namespaced_name] = tool
-        self._tool_to_server[namespaced_name] = clean_srv
+        raw_name = tool.name.strip()
+        lower_name = raw_name.lower()
+
+        # Track cross-server unqualified name collisions to prevent silent resolution to wrong server
+        existing_srv = self._normalized_tool_to_server.get(lower_name)
+        if existing_srv is not None and existing_srv != clean_srv:
+            self._ambiguous_tools.add(lower_name)
+
+        # Unqualified mapping (raw and normalized)
+        self._tools[raw_name] = tool
+        self._tool_to_server[raw_name] = clean_srv
+        self._normalized_tools[lower_name] = tool
+        self._normalized_tool_to_server[lower_name] = clean_srv
+
+        # Namespaced mapping (raw and normalized)
+        namespaced_raw = f"{clean_srv}.{raw_name}"
+        namespaced_lower = f"{clean_srv}.{lower_name}"
+        self._tools[namespaced_raw] = tool
+        self._tool_to_server[namespaced_raw] = clean_srv
+        self._normalized_tools[namespaced_lower] = tool
+        self._normalized_tool_to_server[namespaced_lower] = clean_srv
+
+    def is_ambiguous_tool(self, tool_name: str) -> bool:
+        """Returns True if the tool name is an unqualified name registered by multiple servers."""
+        if not tool_name or not isinstance(tool_name, str):
+            return False
+        clean = tool_name.strip().lower()
+        return clean in self._ambiguous_tools
+
+    def resolve_tool(self, tool_name: str) -> Tuple[Optional[Tool], Optional[str]]:
+        """
+        Resolves a caller-requested tool name to a single unique registered Tool
+        and its owning server name.
+        Returns (None, None) if unknown, malformed, or ambiguous across servers.
+        """
+        if not tool_name or not isinstance(tool_name, str):
+            return None, None
+        clean = tool_name.strip().lower()
+        if not clean or clean in self._ambiguous_tools:
+            return None, None
+
+        tool = self._normalized_tools.get(clean) or self._tools.get(tool_name)
+        srv = self._normalized_tool_to_server.get(clean) or self._tool_to_server.get(tool_name)
+        if tool is not None and srv is not None:
+            return tool, srv
+        return None, None
 
     def get_tool(self, tool_name: str) -> Optional[Tool]:
-        """Look up tool metadata by name."""
-        return self._tools.get(tool_name)
+        """Look up tool metadata by name (case-insensitive and whitespace-tolerant)."""
+        tool, _ = self.resolve_tool(tool_name)
+        return tool
 
     def get_tool_server(self, tool_name: str) -> Optional[str]:
-        """Resolve the owning server name for a given tool."""
-        return self._tool_to_server.get(tool_name)
+        """Resolve the owning server name for a given tool (case-insensitive and whitespace-tolerant)."""
+        _, srv = self.resolve_tool(tool_name)
+        return srv
 
     def is_tool_allowed(self, tool_name: str, tool_filter: Optional[ToolFilter] = None) -> bool:
         """
         Check whether a tool is permitted to execute.
         Deny rules strictly override allow rules.
-        Evaluates both unqualified ('tool') and namespaced ('server.tool') identifiers.
+        Evaluates both unqualified ('tool') and namespaced ('server.tool') representations.
+        Case-insensitive and whitespace-tolerant.
         """
         if not tool_filter:
             return True
-
-        srv = self.get_tool_server(tool_name)
-        base_name = tool_name.split(".", 1)[1] if (srv and tool_name.startswith(f"{srv}.")) else tool_name
-
-        # Deny rule check on base name
-        if not tool_filter.is_tool_allowed(base_name):
+        if not tool_name or not isinstance(tool_name, str):
             return False
 
-        # Deny rule check on namespaced name
-        if srv:
-            namespaced = f"{srv}.{base_name}"
-            if not tool_filter.is_tool_allowed(namespaced):
-                return False
+        clean = tool_name.strip().lower()
+        if not clean:
+            return False
 
-        return True
+        # If it resolves to a registered tool, authorize against that canonical identity
+        tool, srv = self.resolve_tool(clean)
+        if tool is not None and srv is not None:
+            return tool_filter.is_tool_allowed(tool.name, server_name=srv)
+
+        # Fallback for patterns or namespaced strings before/without registration
+        srv = self._normalized_tool_to_server.get(clean)
+        return tool_filter.is_tool_allowed(clean, server_name=srv)
 
     def list_tools(self, tool_filter: Optional[ToolFilter] = None) -> List[Tool]:
         """
@@ -97,7 +144,8 @@ class ToolRouter:
         result = []
         seen: Set[str] = set()
         for name, tool in self._tools.items():
-            if not self.is_tool_allowed(name, tool_filter):
+            srv = self._tool_to_server.get(name)
+            if tool_filter and not tool_filter.is_tool_allowed(tool.name, server_name=srv):
                 continue
             if tool.name not in seen:
                 seen.add(tool.name)
@@ -221,29 +269,48 @@ class StreamableHttpBridge:
         params: CallToolRequestParams,
     ) -> CallToolResult:
         """
-        Invocation handler: Strictly enforces ToolFilter and executes tools via supervisor.
-        Rejection rules:
-          1. Direct invocation of denied tools is rejected (even if client skips discovery).
-          2. Unknown tools are rejected without leaking server configurations.
-          3. Process crashes or execution timeouts are handled gracefully.
+        Invocation handler: Resolves, authorizes, and executes tools via supervisor.
+        Execution sequence:
+          1. Validate and resolve requested name to a single unique registered tool and owning server.
+          2. Check for ambiguity (cross-server collision) and reject with clear guidance.
+          3. Enforce ToolFilter against the resolved canonical tool and server identity.
+          4. Dispatch that exact canonical tool to the supervisor.
+          5. Handle unhandled tool errors or process crashes with data redaction.
         """
-        tool_name = params.name
+        raw_name = getattr(params, "name", "")
+        tool_name = (raw_name or "").strip()
+        if not tool_name:
+            return CallToolResult(
+                isError=True,
+                content=[TextContent(type="text", text="Tool name cannot be empty.")],
+            )
 
-        # 1. Enforce ToolFilter at invocation boundary
-        if not self.router.is_tool_allowed(tool_name, self.tool_filter):
+        # 1. Check for cross-server ambiguity
+        if self.router.is_ambiguous_tool(tool_name):
             return CallToolResult(
                 isError=True,
                 content=[
                     TextContent(
                         type="text",
-                        text=f"Tool '{tool_name}' is prohibited by access policy.",
+                        text=f"Ambiguous tool '{tool_name}'. Multiple servers provide this tool; use a namespaced name (e.g. 'server.{tool_name}').",
                     )
                 ],
             )
 
-        # 2. Resolve owning server and un-prefixed tool name
-        server_name = self.router.get_tool_server(tool_name)
-        if not server_name:
+        # 2. Resolve requested name to unique registered Tool and owning server
+        canonical_tool, server_name = self.router.resolve_tool(tool_name)
+        if not canonical_tool or not server_name:
+            # Check if this unknown/unresolved name was explicitly denied to avoid disclosure
+            if self.tool_filter and not self.tool_filter.is_tool_allowed(tool_name):
+                return CallToolResult(
+                    isError=True,
+                    content=[
+                        TextContent(
+                            type="text",
+                            text=f"Tool '{tool_name}' is prohibited by access policy.",
+                        )
+                    ],
+                )
             return CallToolResult(
                 isError=True,
                 content=[
@@ -254,17 +321,23 @@ class StreamableHttpBridge:
                 ],
             )
 
-        # Strip namespace prefix if caller invoked as 'server.tool'
-        if "." in tool_name and tool_name.startswith(f"{server_name}."):
-            target_tool_name = tool_name[len(server_name) + 1:]
-        else:
-            target_tool_name = tool_name
+        # 3. Apply ToolFilter to the resolved canonical tool name and server identity
+        if self.tool_filter and not self.tool_filter.is_tool_allowed(canonical_tool.name, server_name=server_name):
+            return CallToolResult(
+                isError=True,
+                content=[
+                    TextContent(
+                        type="text",
+                        text=f"Tool '{tool_name}' is prohibited by access policy.",
+                    )
+                ],
+            )
 
-        # 3. Dispatch to ProcessSupervisor
+        # 4. Dispatch the exact authorized canonical tool
         try:
             raw_result = self.supervisor.call_tool(
                 server_name=server_name,
-                tool_name=target_tool_name,
+                tool_name=canonical_tool.name,
                 arguments=params.arguments or {},
             )
         except Exception as exc:
