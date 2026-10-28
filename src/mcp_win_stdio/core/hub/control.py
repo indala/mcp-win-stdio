@@ -7,6 +7,7 @@ with per-instance secret tokens, stale PID verification, and cross-process stop/
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import threading
@@ -210,6 +211,26 @@ class HubInstanceManager:
         except Exception:
             return None
 
+    def _salvage_corrupted_metadata(self) -> Tuple[Optional[int], Optional[int]]:
+        """
+        Attempt to salvage PID and creation_time from a malformed/corrupted metadata file
+        to prevent deleting evidence of an active, running Hub process.
+        Returns (salvaged_pid, salvaged_creation_time).
+        """
+        if not self.metadata_path.is_file():
+            return None, None
+        try:
+            raw_text = self.metadata_path.read_text(encoding="utf-8", errors="replace")
+            if not raw_text.strip():
+                return None, None
+            pid_match = re.search(r'["\']?pid["\']?\s*[:=]\s*(\d+)', raw_text, re.IGNORECASE)
+            ct_match = re.search(r'["\']?creation_time["\']?\s*[:=]\s*(\d+)', raw_text, re.IGNORECASE)
+            salvaged_pid = int(pid_match.group(1)) if pid_match else None
+            salvaged_ct = int(ct_match.group(1)) if ct_match else None
+            return salvaged_pid, salvaged_ct
+        except Exception:
+            return None, None
+
     def is_running(self) -> Tuple[bool, Optional[HubInstanceMetadata]]:
         """
         Verify if the hub instance is genuinely running:
@@ -218,10 +239,43 @@ class HubInstanceManager:
           3. Checks creation time to guard against PID reuse.
           4. Pings control pipe with authkey to guarantee process identity and responsiveness.
           5. Cleans up stale metadata automatically if dead in OS kernel.
+          6. Protects live processes even if metadata is corrupted.
         """
         with self._lock:
             meta = self.get_metadata()
             if not meta:
+                if not self.metadata_path.is_file():
+                    return False, None
+
+                # File exists on disk but is malformed / corrupted JSON.
+                # Constraint: Distinguish malformed metadata from a live process!
+                salvaged_pid, salvaged_ct = self._salvage_corrupted_metadata()
+                if salvaged_pid is not None and is_pid_alive(salvaged_pid):
+                    live_ct = get_process_creation_time(salvaged_pid)
+                    # If creation_time matches or cannot be determined (live_ct is None or salvaged_ct is None),
+                    # fail safely: do NOT assume stale, preserve metadata and prevent duplicate start!
+                    if salvaged_ct is None or live_ct is None or live_ct == salvaged_ct:
+                        logger.warning(
+                            "Found malformed metadata file, but PID %d is verified ALIVE in OS kernel. "
+                            "Preserving metadata and preventing duplicate start.",
+                            salvaged_pid,
+                        )
+                        synthetic_meta = HubInstanceMetadata(
+                            pid=salvaged_pid,
+                            started_at=time.time(),
+                            pipe_name="",
+                            authkey_hex="",
+                            config_path=None,
+                            config_source="corrupted",
+                            http_host="127.0.0.1",
+                            http_port=8080,
+                            creation_time=salvaged_ct,
+                        )
+                        return False, synthetic_meta
+
+                # No PID could be salvaged, or the salvaged PID is confirmed dead in OS kernel.
+                logger.info("Found unparseable/corrupted metadata file with no live process; purging.")
+                self.release()
                 return False, None
 
             # 1. OS-level PID check: if process is dead in kernel, purge immediately
@@ -274,9 +328,11 @@ class HubInstanceManager:
                 if existing:
                     # If running or process is confirmed alive in kernel, reject concurrent start
                     if running or is_pid_alive(existing.pid):
+                        live_ct = get_process_creation_time(existing.pid)
                         if (
                             existing.creation_time is None
-                            or get_process_creation_time(existing.pid) == existing.creation_time
+                            or live_ct is None
+                            or live_ct == existing.creation_time
                         ):
                             raise RuntimeError(
                                 f"MCP Hub is already running (PID {existing.pid}) on {existing.http_host}:{existing.http_port}."
@@ -332,6 +388,7 @@ class HubControlServer:
         self._listener: Optional[Listener] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._is_accepting = False
 
     def start(self) -> None:
         """Initialize listener and start server background thread."""
@@ -357,7 +414,11 @@ class HubControlServer:
             try:
                 if not self._listener:
                     break
+                self._is_accepting = True
                 conn = self._listener.accept()
+                self._is_accepting = False
+                if self._stop_event.is_set():
+                    break
                 req = conn.recv()
                 if not isinstance(req, dict):
                     continue
@@ -383,18 +444,41 @@ class HubControlServer:
                 if self._stop_event.is_set():
                     break
             finally:
+                self._is_accepting = False
                 if conn:
                     try:
                         conn.close()
                     except Exception:
                         pass
-
-    def stop(self) -> None:
-        """Close control listener and stop server thread."""
-        self._stop_event.set()
         if self._listener:
             try:
                 self._listener.close()
             except Exception:
                 pass
             self._listener = None
+
+    def stop(self) -> None:
+        """Close control listener and stop server thread."""
+        self._stop_event.set()
+        # Connect a lightweight dummy client only if the loop is blocked in accept()
+        if self._is_accepting and self._thread and self._thread.is_alive():
+            try:
+                family = get_ipc_family(self.pipe_name)
+                auth_bytes = bytes.fromhex(self.authkey_hex)
+                with Client(self.pipe_name, family=family, authkey=auth_bytes) as dummy:
+                    dummy.send({"cmd": "ping"})
+            except Exception:
+                pass
+
+        if self._thread and self._thread.is_alive() and self._thread != threading.current_thread():
+            self._thread.join(timeout=1.5)
+
+        if self._listener:
+            try:
+                self._listener.close()
+            except Exception:
+                pass
+            self._listener = None
+
+        if self._thread and self._thread.is_alive() and self._thread != threading.current_thread():
+            self._thread.join(timeout=0.5)

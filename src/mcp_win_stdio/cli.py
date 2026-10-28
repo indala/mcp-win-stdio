@@ -2197,7 +2197,7 @@ def cmd_hub_start(args: argparse.Namespace) -> None:
     except Exception:
         pass
 
-    # Launch uvicorn HTTP server in a worker thread
+    # Launch uvicorn HTTP server in a worker thread with port collision detection
     uvicorn_server = None
     try:
         import uvicorn
@@ -2211,10 +2211,53 @@ def cmd_hub_start(args: argparse.Namespace) -> None:
             access_log=False,
         )
         uvicorn_server = uvicorn.Server(uv_cfg)
-        uv_thread = threading.Thread(target=uvicorn_server.run, name="mws-uvicorn", daemon=True)
+
+        def _safe_uvicorn_run() -> None:
+            try:
+                uvicorn_server.run()
+            except (SystemExit, Exception):
+                pass
+
+        uv_thread = threading.Thread(target=_safe_uvicorn_run, name="mws-uvicorn", daemon=True)
         uv_thread.start()
+
+        # Bounded wait to ensure HTTP listener bound successfully without port collision
+        start_deadline = time.time() + 1.5
+        while time.time() < start_deadline:
+            if getattr(uvicorn_server, "started", False):
+                break
+            if not uv_thread.is_alive():
+                break
+            time.sleep(0.05)
+
+        if not getattr(uvicorn_server, "started", False) or not uv_thread.is_alive():
+            raise RuntimeError(
+                f"Failed to bind HTTP Bridge listener on {loaded.config.http_host}:{loaded.config.http_port} "
+                "(port may already be in use by another process)."
+            )
     except Exception as uve:
-        logger.warning("Could not launch uvicorn HTTP listener: %s", uve)
+        logger.error("Could not launch uvicorn HTTP listener: %s", uve)
+        print(f"Error starting HTTP Bridge: {uve}", file=sys.stderr, flush=True)
+        # Complete startup rollback: stop control server, orchestrator, child processes, and release metadata.
+        # Ensure rollback cannot short-circuit if any component raises.
+        if uvicorn_server:
+            try:
+                uvicorn_server.should_exit = True
+            except Exception as se:
+                logger.debug("Error requesting uvicorn exit during rollback: %s", se)
+        try:
+            control_server.stop()
+        except Exception as cse:
+            logger.warning("Error stopping control server during rollback: %s", cse)
+        try:
+            orchestrator.stop()
+        except Exception as ose:
+            logger.warning("Error stopping orchestrator during rollback: %s", ose)
+        try:
+            instance_mgr.release()
+        except Exception as ime:
+            logger.warning("Error releasing instance metadata during rollback: %s", ime)
+        sys.exit(1)
 
     try:
         while not stop_event.is_set():

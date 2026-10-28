@@ -23,6 +23,7 @@ from mcp_win_stdio.core.hub.security import (
     WindowsSecurityError,
     get_current_user_sid,
     get_sddl_string,
+    interprocess_file_lock,
     secure_directory,
     secure_file,
     verify_security_descriptor,
@@ -751,6 +752,160 @@ for line in iter(sys.stdin.readline, ""):
         assert new_pid != old_pid
         # Verify old PID is dead
         assert is_pid_alive(old_pid) is False
+
+    finally:
+        sup.shutdown()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows NTFS DACL tests require Windows")
+def test_interprocess_lock_file_protected_dacl(tmp_path):
+    """Verify that interprocess_file_lock creates the lock file with a strict, protected NTFS DACL."""
+    lock_file = tmp_path / "hub_instance.lock"
+    with interprocess_file_lock(lock_file, timeout=2.0):
+        assert lock_file.is_file()
+        # Verify native security descriptor on lock file
+        verify_security_descriptor(lock_file, is_directory=False)
+        sddl = get_sddl_string(lock_file)
+        assert "D:P" in sddl, f"Lockfile DACL is missing protected flag (D:P): {sddl}"
+        user_sid = get_current_user_sid()
+        assert f"(A;;FA;;;{user_sid})" in sddl
+        assert "(A;;FA;;;SY)" in sddl
+        assert "(A;;FA;;;BA)" in sddl
+        assert "WD" not in sddl
+        assert "BU" not in sddl
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object tests require Windows")
+def test_handshake_failure_terminates_child_and_grandchild_process_tree(tmp_path):
+    """
+    Verify that if a supervised child spawns a background grandchild process before failing its
+    MCP handshake, the supervisor's handshake exception handler terminates both child and grandchild.
+    """
+    from mcp_win_stdio.core.hub.control import is_pid_alive
+    from mcp_win_stdio.core.hub.models import ServerConfig, SupervisorConfig
+    from mcp_win_stdio.core.hub.registry import HubRegistry
+    from mcp_win_stdio.core.hub.supervisor import ProcessSupervisor
+
+    sync_file = tmp_path / "handshake_fail_sync.json"
+    child_script = tmp_path / "bad_handshake_child.py"
+    child_code = (
+        "import sys, os, time, json, subprocess\n"
+        "sync_path = sys.argv[1]\n"
+        "# Wait for initialize request on stdin\n"
+        "req_line = sys.stdin.readline()\n"
+        "gc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        "with open(sync_path, 'w', encoding='utf-8') as f:\n"
+        "    json.dump({'child_pid': os.getpid(), 'gc_pid': gc.pid}, f)\n"
+        "# Return invalid handshake (missing protocolVersion) to trigger handshake failure\n"
+        "sys.stdout.write(json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {'missing_proto': True}}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    child_script.write_text(child_code, encoding="utf-8")
+
+    reg = HubRegistry()
+    reg.register_server(
+        ServerConfig(
+            name="bad_hs",
+            command=sys.executable,
+            args=["-u", str(child_script), str(sync_file)],
+            supervisor=SupervisorConfig(startup_timeout_seconds=2.0),
+        )
+    )
+
+    sup = ProcessSupervisor(registry=reg)
+    child_pid = None
+    gc_pid = None
+
+    try:
+        with pytest.raises(Exception) as exc_info:
+            sup.start("bad_hs")
+        print("Caught exception in test:", exc_info.value)
+
+        # Read sync file
+        assert sync_file.exists()
+        tree_data = json.loads(sync_file.read_text(encoding="utf-8"))
+        child_pid = tree_data["child_pid"]
+        gc_pid = tree_data["gc_pid"]
+
+        # Verify both child and grandchild were terminated by Job Object cleanup
+        deadline = time.time() + 6.0
+        child_dead = False
+        gc_dead = False
+        while time.time() < deadline:
+            if not is_pid_alive(child_pid):
+                child_dead = True
+            if not is_pid_alive(gc_pid):
+                gc_dead = True
+            if child_dead and gc_dead:
+                break
+            time.sleep(0.1)
+
+        assert child_dead is True, f"Child PID {child_pid} survived handshake failure cleanup!"
+        assert gc_dead is True, f"Grandchild PID {gc_pid} survived handshake failure cleanup!"
+
+    finally:
+        for p in (child_pid, gc_pid):
+            if p and is_pid_alive(p):
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", str(p)], capture_output=True)
+                except Exception:
+                    pass
+        sup.shutdown()
+
+
+def test_supervisor_shutdown_cancels_delayed_restart_deterministically():
+    """
+    Use synchronization events to verify that calling supervisor.shutdown() while a crash
+    backoff is waiting immediately cancels the delayed restart and joins the monitor thread.
+    """
+    import threading
+
+    from mcp_win_stdio.core.hub.models import ServerConfig, ServerState, SupervisorConfig
+    from mcp_win_stdio.core.hub.registry import HubRegistry
+    from mcp_win_stdio.core.hub.supervisor import ProcessSupervisor
+
+    failed_event = threading.Event()
+
+    def on_event(evt):
+        if evt.new_state == ServerState.FAILED:
+            failed_event.set()
+
+    reg = HubRegistry()
+    reg.register_server(
+        ServerConfig(
+            name="crash_srv",
+            command=sys.executable,
+            args=["-c", "import sys; sys.exit(1)"],
+            supervisor=SupervisorConfig(
+                max_restart_retries=3,
+                restart_backoff_seconds=5.0,
+            ),
+        )
+    )
+
+    sup = ProcessSupervisor(registry=reg, on_event=on_event)
+
+    try:
+        with pytest.raises(Exception):
+            sup.start("crash_srv")
+
+        # Deterministically wait for FAILED state and delayed restart scheduling
+        assert failed_event.wait(timeout=5.0) is True
+
+        # Shutdown supervisor while restart is delayed
+        start_time = time.time()
+        sup.shutdown()
+        shutdown_elapsed = time.time() - start_time
+
+        # Monitor thread must join within 3.0s
+        assert shutdown_elapsed < 3.0
+        assert sup._monitor_thread.is_alive() is False
+
+        # Verify instance is STOPPED and no replacement was spawned
+        inst = sup.get_status("crash_srv")
+        assert inst is not None
+        assert inst.state == ServerState.STOPPED
 
     finally:
         sup.shutdown()

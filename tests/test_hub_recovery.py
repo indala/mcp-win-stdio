@@ -525,3 +525,191 @@ servers:
                     subprocess.run(["taskkill", "/F", "/PID", str(p)], capture_output=True)
                 except Exception:
                     pass
+
+
+def test_corrupted_metadata_with_live_pid_preserves_evidence(tmp_path):
+    """
+    If hub_instance.json contains malformed/truncated JSON but the text still contains
+    a live PID (and matching creation time), is_running() must never delete the file
+    and acquire() must reject starting a duplicate instance.
+    """
+    meta_file = tmp_path / "hub_instance.json"
+    mgr = HubInstanceManager(metadata_path=meta_file)
+
+    dummy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        live_pid = dummy.pid
+        live_ct = get_process_creation_time(live_pid)
+        assert is_pid_alive(live_pid) is True
+
+        # Write truncated/corrupt JSON containing the live PID
+        corrupted_content = f'{{"pid": {live_pid}, "creation_time": {live_ct or 0}, "broken_syntax": '
+        meta_file.write_text(corrupted_content, encoding="utf-8")
+
+        running, meta = mgr.is_running()
+        assert running is False
+        assert meta is not None
+        assert meta.pid == live_pid
+        assert meta_file.is_file() is True
+
+        # Attempting to acquire must fail to prevent duplicate hub launch
+        with pytest.raises(RuntimeError, match=f"MCP Hub is already running \\(PID {live_pid}\\)"):
+            mgr.acquire(pid=os.getpid(), pipe_name=r"\\.\pipe\mws-conflict-pipe")
+
+    finally:
+        try:
+            dummy.kill()
+            dummy.wait(timeout=2.0)
+        except Exception:
+            pass
+
+
+def test_corrupted_metadata_with_dead_pid_purged(tmp_path):
+    """
+    If hub_instance.json is corrupted/empty and belongs to a dead PID (or has no salvageable PID),
+    is_running() must purge the corrupted file under the interprocess lock, allowing subsequent acquire().
+    """
+    meta_file = tmp_path / "hub_instance.json"
+    mgr = HubInstanceManager(metadata_path=meta_file)
+
+    proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(0)"])
+    proc.wait()
+    dead_pid = proc.pid
+    assert is_pid_alive(dead_pid) is False
+
+    # Case 1: Corrupted JSON with dead PID
+    meta_file.write_text(f'{{"pid": {dead_pid}, "creation_time": 12345, "broken": ', encoding="utf-8")
+    running, meta = mgr.is_running()
+    assert running is False
+    assert meta is None
+    assert meta_file.exists() is False
+
+    # Case 2: Completely empty file
+    meta_file.write_text("", encoding="utf-8")
+    running, meta = mgr.is_running()
+    assert running is False
+    assert meta is None
+    assert meta_file.exists() is False
+
+    # Subsequent acquire must succeed cleanly
+    my_pid = os.getpid()
+    new_meta = mgr.acquire(pid=my_pid, pipe_name=r"\\.\pipe\mws-clean-pipe")
+    assert new_meta.pid == my_pid
+    assert meta_file.is_file() is True
+    mgr.release()
+
+
+def test_port_collision_aborts_startup_and_rolls_back_completely(tmp_path):
+    """
+    Verify that if the HTTP Bridge port is already in use, cmd_hub_start unwinds
+    completely: control server is stopped, orchestrator is stopped, instance metadata
+    is released/unlinked, and process exits with code 1.
+    """
+    import argparse
+    import socket
+
+    from mcp_win_stdio.cli import cmd_hub_start
+
+    # Bind a socket on 127.0.0.1 to occupy a port
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    port = sock.getsockname()[1]
+
+    cfg_file = tmp_path / "hub_collision.yaml"
+    cfg_file.write_text(
+        f"""schema_version: '1.0'
+runtime:
+  http_bridge:
+    port: {port}
+""",
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        config=str(cfg_file),
+        port=port,
+        host="127.0.0.1",
+        daemon=False,
+        foreground=True,
+    )
+
+    try:
+        with patch("mcp_win_stdio.core.hub.control.USER_DIR", tmp_path):
+            with patch("mcp_win_stdio.cli.USER_DIR", tmp_path):
+                with pytest.raises(SystemExit) as exc_info:
+                    cmd_hub_start(args)
+
+                assert exc_info.value.code == 1
+
+        # Check metadata file is unlinked (rolled back)
+        meta_file = tmp_path / "hub_instance.json"
+        assert meta_file.exists() is False
+
+    finally:
+        sock.close()
+
+
+def test_cli_hub_restart_aborts_when_existing_hub_unresponsive(tmp_path):
+    """
+    Verify that 'mws hub restart' (with force=False) aborts with status 1 if the
+    existing hub process is alive but fails to stop, and NEVER launches a replacement hub.
+    """
+    import argparse
+
+    from mcp_win_stdio.cli import cmd_hub_restart
+    from mcp_win_stdio.core.hub.security import write_secure_json_file
+
+    meta_file = tmp_path / "hub_instance.json"
+    dummy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    try:
+        live_pid = dummy.pid
+        live_ct = get_process_creation_time(live_pid)
+
+        # Write metadata pointing to dummy process with an inactive control pipe
+        meta_data = HubInstanceMetadata(
+            pid=live_pid,
+            started_at=time.time() - 50,
+            pipe_name=rf"\\.\pipe\mws-unresponsive-pipe-{time.time_ns()}",
+            authkey_hex="abcdef0123456789abcdef0123456789",
+            config_path=None,
+            config_source="default",
+            http_host="127.0.0.1",
+            http_port=8080,
+            creation_time=live_ct,
+        )
+        write_secure_json_file(meta_file, meta_data.to_dict())
+
+        args = argparse.Namespace(
+            config=None,
+            force=False,
+            timeout=1.0,
+        )
+
+        started = []
+
+        def mock_start(a):
+            started.append(True)
+
+        with patch("mcp_win_stdio.core.hub.control.USER_DIR", tmp_path):
+            with patch("mcp_win_stdio.cli.USER_DIR", tmp_path):
+                with patch("mcp_win_stdio.cli.cmd_hub_start", side_effect=mock_start):
+                    with pytest.raises(SystemExit) as exc_info:
+                        cmd_hub_restart(args)
+
+                    assert exc_info.value.code == 1
+
+        # Assert no replacement was spawned!
+        assert len(started) == 0
+        # Dummy process must remain alive (not killed without --force)
+        assert is_pid_alive(live_pid) is True
+        # Metadata must still be preserved
+        assert meta_file.is_file() is True
+
+    finally:
+        try:
+            dummy.kill()
+            dummy.wait(timeout=2.0)
+        except Exception:
+            pass
