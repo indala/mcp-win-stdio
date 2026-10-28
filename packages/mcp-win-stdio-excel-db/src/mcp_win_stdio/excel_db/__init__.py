@@ -3,4 +3,4 @@ Excel & DB Power Engine MCP Server for mcp-win-stdio.
 High-Speed Streaming, Cross-Source Joins, and Diff Auditing.
 """
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
