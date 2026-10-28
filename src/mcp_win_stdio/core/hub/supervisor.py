@@ -126,8 +126,11 @@ class ProcessSupervisor:
             if not server_cfg.enabled:
                 raise ValueError(f"Server '{server_name}' is disabled in the Hub configuration.")
 
-            # 3. Construct Environment with security redaction awareness
+            # 3. Construct Environment with security redaction awareness and UTF-8 stdio defaults
             env = os.environ.copy()
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
             extra_paths = [p for p in sys.path if "packages" in p or "src" in p]
             if extra_paths:
                 combined = os.pathsep.join(extra_paths)
@@ -190,9 +193,6 @@ class ProcessSupervisor:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=env,
-                    text=True,
-                    bufsize=1,
-                    encoding="utf-8",
                     creationflags=creationflags,
                 )
             except Exception as spawn_exc:
@@ -253,31 +253,137 @@ class ProcessSupervisor:
 
             # 7. Start persistent stdout JSON-RPC reader thread
             def stdout_reader() -> None:
+                max_bytes = server_cfg.supervisor.max_line_bytes
+                policy = server_cfg.supervisor.line_overflow_policy
+                chunk_size = min(65536, max_bytes)
+
+                line_parts: List[bytes] = []
+                current_bytes = 0
+                discarding = False
+                overflow_occurred = False
+
+                def _process_line(raw_bytes: bytes) -> None:
+                    if not raw_bytes:
+                        return
+                    stripped = raw_bytes.strip()
+                    if not (stripped.startswith(b"{") or stripped.startswith(b"[")):
+                        logger.debug("Server '%s' non-JSON line ignored: %.100r", instance.server_name, stripped)
+                        return
+                    try:
+                        line_str = stripped.decode("utf-8", errors="replace")
+                        msg = json.loads(line_str)
+                    except Exception as parse_err:
+                        logger.debug(
+                            "Server '%s' invalid JSON ignored (%.100r): %s",
+                            instance.server_name,
+                            stripped,
+                            parse_err,
+                        )
+                        return
+
+                    if not isinstance(msg, dict):
+                        logger.debug(
+                            "Server '%s' non-object JSON payload ignored (type %s)",
+                            instance.server_name,
+                            type(msg).__name__,
+                        )
+                        return
+
+                    mid = msg.get("id")
+                    if mid is None:
+                        logger.debug("Server '%s' notification ignored", instance.server_name)
+                        return
+
+                    if isinstance(mid, bool):
+                        logger.debug("Server '%s' boolean ID ignored: %r", instance.server_name, mid)
+                        return
+
+                    delivered = instance.deliver_response(mid, msg)
+                    if not delivered:
+                        logger.debug(
+                            "Server '%s' unmatched, duplicate, or late response ID %r ignored",
+                            instance.server_name,
+                            mid,
+                        )
+
                 try:
                     if proc.stdout:
-                        for line in iter(proc.stdout.readline, ""):
-                            line_str = line.strip()
-                            if not line_str.startswith("{"):
-                                continue
+                        while True:
                             try:
-                                msg = json.loads(line_str)
-                                mid = msg.get("id")
-                                if mid is not None and mid in instance.response_queues:
-                                    instance.response_queues[mid].put(msg)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
+                                chunk = proc.stdout.readline(chunk_size)
+                            except (ValueError, OSError):
+                                break
+
+                            if not chunk:
+                                if line_parts and not discarding:
+                                    trailing_bytes = b"".join(line_parts).strip()
+                                    _process_line(trailing_bytes)
+                                break
+
+                            if discarding:
+                                if chunk.endswith(b"\n"):
+                                    discarding = False
+                                continue
+
+                            line_parts.append(chunk)
+                            current_bytes += len(chunk)
+
+                            if current_bytes > max_bytes:
+                                logger.warning(
+                                    "Server '%s' (PID %s) stdout line exceeded maximum allowable length (%d bytes); policy=%s",
+                                    instance.server_name,
+                                    proc.pid,
+                                    max_bytes,
+                                    policy,
+                                )
+                                if policy == "terminate":
+                                    overflow_occurred = True
+                                    err_overflow = {
+                                        "error": {
+                                            "code": -32000,
+                                            "message": (
+                                                f"Server '{instance.server_name}' stdout line exceeded maximum allowable length "
+                                                f"({max_bytes} bytes); process terminated"
+                                            ),
+                                        }
+                                    }
+                                    instance.fail_all_pending(err_overflow)
+                                    try:
+                                        proc.kill()
+                                    except Exception:
+                                        pass
+                                    if instance.job_object:
+                                        try:
+                                            instance.job_object.terminate()
+                                        except Exception:
+                                            pass
+                                    if instance.can_transition_to(ServerState.FAILED):
+                                        instance.transition_to(
+                                            ServerState.FAILED,
+                                            reason=f"Exceeded maximum line length ({max_bytes} bytes)",
+                                        )
+                                    break
+                                else:
+                                    discarding = not chunk.endswith(b"\n")
+                                    line_parts.clear()
+                                    current_bytes = 0
+                            elif chunk.endswith(b"\n"):
+                                full_line = b"".join(line_parts).strip()
+                                line_parts.clear()
+                                current_bytes = 0
+                                _process_line(full_line)
+                except Exception as reader_err:
+                    logger.debug("Exception in stdout reader for '%s': %s", instance.server_name, reader_err)
                 finally:
-                    # Notify any pending callers that process exited
-                    err_msg = {
-                        "error": {
-                            "code": -32000,
-                            "message": f"Server '{instance.server_name}' closed stdout prematurely",
+                    # Notify any pending callers that process exited or closed stdout (if not already handled)
+                    if not overflow_occurred:
+                        err_msg = {
+                            "error": {
+                                "code": -32000,
+                                "message": f"Server '{instance.server_name}' closed stdout prematurely",
+                            }
                         }
-                    }
-                    for q_item in list(instance.response_queues.values()):
-                        q_item.put(err_msg)
+                        instance.fail_all_pending(err_msg)
 
             reader_t = threading.Thread(
                 target=stdout_reader,
@@ -345,9 +451,11 @@ class ProcessSupervisor:
         timeout = sup_config.startup_timeout_seconds
 
         # Step 1: Send 'initialize' request
-        req_id = 1
+        with self._global_lock:
+            self._instance_seq += 1
+            req_id = self._instance_seq
         q_init: queue.Queue[Dict[str, Any]] = queue.Queue()
-        instance.response_queues[req_id] = q_init
+        instance.register_response_queue(req_id, q_init)
 
         init_req = {
             "jsonrpc": "2.0",
@@ -362,10 +470,10 @@ class ProcessSupervisor:
         try:
             if not proc.stdin:
                 raise RuntimeError("Process stdin pipe is not available")
-            proc.stdin.write(json.dumps(init_req) + "\n")
+            proc.stdin.write((json.dumps(init_req) + "\n").encode("utf-8"))
             proc.stdin.flush()
         except Exception as e:
-            instance.response_queues.pop(req_id, None)
+            instance.remove_response_queue(req_id)
             raise RuntimeError(f"Failed writing initialize request to '{instance.server_name}': {e}") from e
 
         # Step 2: Await matching initialize response
@@ -378,7 +486,7 @@ class ProcessSupervisor:
                 f"after {timeout:.1f}s (process exit code: {code})."
             )
         finally:
-            instance.response_queues.pop(req_id, None)
+            instance.remove_response_queue(req_id)
 
         if "error" in msg:
             err = msg["error"]
@@ -397,16 +505,18 @@ class ProcessSupervisor:
             "params": {},
         }
         try:
-            proc.stdin.write(json.dumps(notif) + "\n")
+            proc.stdin.write((json.dumps(notif) + "\n").encode("utf-8"))
             proc.stdin.flush()
         except Exception as e:
             raise RuntimeError(f"Failed sending notifications/initialized to '{instance.server_name}': {e}") from e
 
         # Step 4: Optional protocol ping check
         if sup_config.protocol_ping:
-            ping_id = 2
+            with self._global_lock:
+                self._instance_seq += 1
+                ping_id = self._instance_seq
             q_ping: queue.Queue[Dict[str, Any]] = queue.Queue()
-            instance.response_queues[ping_id] = q_ping
+            instance.register_response_queue(ping_id, q_ping)
 
             ping_req = {
                 "jsonrpc": "2.0",
@@ -415,10 +525,10 @@ class ProcessSupervisor:
                 "params": {},
             }
             try:
-                proc.stdin.write(json.dumps(ping_req) + "\n")
+                proc.stdin.write((json.dumps(ping_req) + "\n").encode("utf-8"))
                 proc.stdin.flush()
             except Exception as e:
-                instance.response_queues.pop(ping_id, None)
+                instance.remove_response_queue(ping_id)
                 raise RuntimeError(f"Failed sending ping to '{instance.server_name}': {e}") from e
 
             try:
@@ -430,7 +540,7 @@ class ProcessSupervisor:
                     f"{sup_config.probe_timeout_seconds:.1f}s (process exit code: {code})."
                 )
             finally:
-                instance.response_queues.pop(ping_id, None)
+                instance.remove_response_queue(ping_id)
 
             if "error" in ping_msg:
                 raise RuntimeError(f"Protocol ping error from '{instance.server_name}': {ping_msg['error']}")
@@ -467,7 +577,7 @@ class ProcessSupervisor:
                 req_id = self._instance_seq
 
             q: queue.Queue[Dict[str, Any]] = queue.Queue()
-            instance.response_queues[req_id] = q
+            instance.register_response_queue(req_id, q)
 
             payload = {
                 "jsonrpc": "2.0",
@@ -476,10 +586,10 @@ class ProcessSupervisor:
                 "params": {"name": tool_name, "arguments": arguments or {}},
             }
             try:
-                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
                 proc.stdin.flush()
             except Exception as write_err:
-                instance.response_queues.pop(req_id, None)
+                instance.remove_response_queue(req_id)
                 raise RuntimeError(f"Failed writing tools/call request to '{server_name}': {write_err}") from write_err
 
         # Lock is released before awaiting response, allowing concurrent multiplexed requests
@@ -490,7 +600,7 @@ class ProcessSupervisor:
                 f"Timed out executing tool '{tool_name}' on server '{server_name}' after {timeout:.1f}s."
             )
         finally:
-            instance.response_queues.pop(req_id, None)
+            instance.remove_response_queue(req_id)
 
         if "error" in msg:
             err = msg["error"]
@@ -521,7 +631,7 @@ class ProcessSupervisor:
                 req_id = self._instance_seq
 
             q: queue.Queue[Dict[str, Any]] = queue.Queue()
-            instance.response_queues[req_id] = q
+            instance.register_response_queue(req_id, q)
 
             payload = {
                 "jsonrpc": "2.0",
@@ -530,10 +640,10 @@ class ProcessSupervisor:
                 "params": {},
             }
             try:
-                proc.stdin.write(json.dumps(payload) + "\n")
+                proc.stdin.write((json.dumps(payload) + "\n").encode("utf-8"))
                 proc.stdin.flush()
             except Exception as write_err:
-                instance.response_queues.pop(req_id, None)
+                instance.remove_response_queue(req_id)
                 raise RuntimeError(f"Failed writing tools/list request to '{server_name}': {write_err}") from write_err
 
         try:
@@ -541,7 +651,7 @@ class ProcessSupervisor:
         except queue.Empty:
             raise TimeoutError(f"Timed out listing tools from server '{server_name}' after {timeout:.1f}s.")
         finally:
-            instance.response_queues.pop(req_id, None)
+            instance.remove_response_queue(req_id)
 
         if "error" in msg:
             err = msg["error"]
@@ -638,6 +748,10 @@ class ProcessSupervisor:
                 except Exception:
                     pass
                 instance.job_object = None
+
+            # Ensure reader thread terminates cleanly
+            if instance.reader_thread and instance.reader_thread.is_alive():
+                instance.reader_thread.join(timeout=2.0)
 
             instance.transition_to(ServerState.STOPPED, reason="process exited")
             return instance.snapshot()

@@ -128,6 +128,8 @@ class SupervisorConfig:
     restart_backoff_seconds: float = 2.0
     protocol_ping: bool = True
     probe_timeout_seconds: float = 5.0
+    max_line_bytes: int = 16 * 1024 * 1024
+    line_overflow_policy: str = "terminate"
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "SupervisorConfig":
@@ -160,6 +162,14 @@ class SupervisorConfig:
         if probe_timeout <= 0:
             raise ValueError(f"probe_timeout_seconds must be positive, got {probe_timeout}")
 
+        max_line_bytes = int(data.get("max_line_bytes", 16 * 1024 * 1024))
+        if max_line_bytes <= 0:
+            raise ValueError(f"max_line_bytes must be positive, got {max_line_bytes}")
+
+        overflow_policy = str(data.get("line_overflow_policy", "terminate")).lower().strip()
+        if overflow_policy not in ("terminate", "drain"):
+            raise ValueError(f"line_overflow_policy must be 'terminate' or 'drain', got '{overflow_policy}'")
+
         return cls(
             startup_timeout_seconds=startup,
             shutdown_grace_seconds=grace,
@@ -167,6 +177,8 @@ class SupervisorConfig:
             restart_backoff_seconds=backoff,
             protocol_ping=raw_ping,
             probe_timeout_seconds=probe_timeout,
+            max_line_bytes=max_line_bytes,
+            line_overflow_policy=overflow_policy,
         )
 
 
