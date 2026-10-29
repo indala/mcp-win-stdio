@@ -6,6 +6,7 @@ workspaces, workbooks, servers) once and have subsequent tool invocations
 inherit those values automatically without argument repetition or cross-agent pollution.
 """
 
+import copy
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -92,8 +93,9 @@ class SessionContext:
             result = {}
             for ctype, desc in SUPPORTED_CONTEXT_TYPES.items():
                 stack = self._stacks.get(ctype, [])
+                active_val = copy.deepcopy(stack[-1]) if stack else None
                 result[ctype] = {
-                    "active": stack[-1] if stack else None,
+                    "active": active_val,
                     "depth": len(stack),
                     "description": desc,
                 }

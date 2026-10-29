@@ -373,6 +373,8 @@ class HubControlServer:
     Responds to status, ping, and stop requests from CLI commands.
     """
 
+    MAX_CONCURRENT_CLIENTS = 8
+
     def __init__(
         self,
         orchestrator: HubOrchestrator,
@@ -389,6 +391,9 @@ class HubControlServer:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._is_accepting = False
+        self._active_connections: set[Any] = set()
+        self._conn_lock = threading.Lock()
+        self._worker_threads: list[threading.Thread] = []
 
     def start(self) -> None:
         """Initialize listener and start server background thread."""
@@ -408,7 +413,7 @@ class HubControlServer:
         self._thread.start()
 
     def _serve_loop(self) -> None:
-        """Listen and handle incoming authenticated client requests."""
+        """Listen and dispatch incoming authenticated client requests to bounded workers."""
         while not self._stop_event.is_set():
             conn = None
             try:
@@ -418,38 +423,39 @@ class HubControlServer:
                 conn = self._listener.accept()
                 self._is_accepting = False
                 if self._stop_event.is_set():
+                    if conn:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
                     break
-                req = conn.recv()
-                if not isinstance(req, dict):
-                    continue
 
-                cmd = req.get("cmd")
-                if cmd == "ping":
-                    conn.send({"status": "ok", "pid": os.getpid()})
-                elif cmd == "status":
-                    status_dict = self.orchestrator.status().to_dict()
-                    conn.send({"status": "ok", "data": status_dict})
-                elif cmd == "stop":
-                    conn.send({"status": "stopping"})
-                    conn.close()
-                    conn = None
-                    # Schedule shutdown asynchronously so response is delivered cleanly
-                    if self.on_stop_requested:
-                        threading.Thread(target=self.on_stop_requested, daemon=True).start()
-                    else:
-                        timeout = req.get("timeout", 10.0)
-                        threading.Thread(target=self.orchestrator.stop, args=(timeout,), daemon=True).start()
-                    break
+                with self._conn_lock:
+                    self._worker_threads = [t for t in self._worker_threads if t.is_alive()]
+                    if len(self._active_connections) >= self.MAX_CONCURRENT_CLIENTS:
+                        # Load shedding: drop connection if max concurrent handlers reached
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        continue
+                    self._active_connections.add(conn)
+
+                worker = threading.Thread(
+                    target=self._handle_client,
+                    args=(conn,),
+                    name=f"mws-hub-control-worker-{time.monotonic()}",
+                    daemon=True,
+                )
+                with self._conn_lock:
+                    self._worker_threads.append(worker)
+                worker.start()
             except Exception:
                 if self._stop_event.is_set():
                     break
             finally:
                 self._is_accepting = False
-                if conn:
-                    try:
-                        conn.close()
-                    except Exception:
-                        pass
+
         if self._listener:
             try:
                 self._listener.close()
@@ -457,10 +463,65 @@ class HubControlServer:
                 pass
             self._listener = None
 
+    def _handle_client(self, conn: Any) -> None:
+        """Process a single authenticated control client with bounded wait and strict cleanup."""
+        try:
+            # Bounded poll for incoming command (2.0s deadline) to prevent half-open clients
+            # from tying up resources indefinitely.
+            has_data = False
+            poll_deadline = time.monotonic() + 2.0
+            while not self._stop_event.is_set() and time.monotonic() < poll_deadline:
+                if conn.poll(0.1):
+                    has_data = True
+                    break
+
+            if not has_data or self._stop_event.is_set():
+                return
+
+            req = conn.recv()
+            if not isinstance(req, dict):
+                return
+
+            cmd = req.get("cmd")
+            if cmd == "ping":
+                conn.send({"status": "ok", "pid": os.getpid()})
+            elif cmd == "status":
+                status_dict = self.orchestrator.status().to_dict()
+                conn.send({"status": "ok", "data": status_dict})
+            elif cmd == "stop":
+                conn.send({"status": "stopping"})
+                self._stop_event.set()
+                # Schedule shutdown asynchronously so response is delivered cleanly
+                if self.on_stop_requested:
+                    threading.Thread(target=self.on_stop_requested, daemon=True).start()
+                else:
+                    timeout = req.get("timeout", 10.0)
+                    threading.Thread(target=self.orchestrator.stop, args=(timeout,), daemon=True).start()
+        except Exception:
+            pass
+        finally:
+            with self._conn_lock:
+                self._active_connections.discard(conn)
+            try:
+                conn.close()
+            except Exception:
+                pass
+
     def stop(self) -> None:
-        """Close control listener and stop server thread."""
+        """Close control listener, abort active connections, and join worker threads."""
         self._stop_event.set()
-        # Connect a lightweight dummy client only if the loop is blocked in accept()
+
+        # 1. Close all active client connections immediately so blocked polls or recvs abort
+        with self._conn_lock:
+            active_conns = list(self._active_connections)
+            self._active_connections.clear()
+        for c in active_conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+        # 2. Connect a lightweight dummy client only if the loop is blocked in accept()
         if self._is_accepting and self._thread and self._thread.is_alive():
             try:
                 family = get_ipc_family(self.pipe_name)
@@ -470,15 +531,25 @@ class HubControlServer:
             except Exception:
                 pass
 
+        # 3. Join main listener thread
         if self._thread and self._thread.is_alive() and self._thread != threading.current_thread():
             self._thread.join(timeout=1.5)
 
+        # 4. Close the listener object
         if self._listener:
             try:
                 self._listener.close()
             except Exception:
                 pass
             self._listener = None
+
+        # 5. Join worker threads with a short timeout
+        with self._conn_lock:
+            workers = list(self._worker_threads)
+            self._worker_threads.clear()
+        for w in workers:
+            if w.is_alive() and w != threading.current_thread():
+                w.join(timeout=0.5)
 
         if self._thread and self._thread.is_alive() and self._thread != threading.current_thread():
             self._thread.join(timeout=0.5)
