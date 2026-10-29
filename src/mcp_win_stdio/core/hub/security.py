@@ -31,6 +31,7 @@ WELL_KNOWN_ALLOWED_TRUSTEES: Set[str] = {
     "S-1-5-18",
     "BA",  # Built-in Administrators
     "S-1-5-32-544",
+    "LA",  # Local Administrator (RID 500)
     "OW",  # Owner Rights
     "S-1-3-4",
     "CO",  # Creator Owner
@@ -292,7 +293,7 @@ def verify_security_descriptor(path: Union[str, Path], is_directory: bool = Fals
                     f"DACL on '{path}' contains unauthorized trustee '{trustee}' outside allowlist (SDDL: {sddl})"
                 )
 
-            if trustee == user_sid.upper():
+            if trustee == user_sid.upper() or (trustee == "LA" and user_sid.endswith("-500")):
                 has_user_access = True
 
     if not has_user_access:

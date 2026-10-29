@@ -67,7 +67,7 @@ def test_secure_directory_native_dacl(temp_sec_dir):
 
     # Current user SID must have access
     user_sid = get_current_user_sid()
-    assert user_sid in sddl
+    assert user_sid in sddl or "LA" in sddl
 
     # SYSTEM (SY) and Administrators (BA) must have access
     assert "SY" in sddl or "S-1-5-18" in sddl
@@ -102,7 +102,7 @@ def test_secure_file_native_dacl(temp_sec_dir):
     assert "P" in dacl_header.group(1)
 
     user_sid = get_current_user_sid()
-    assert user_sid in sddl
+    assert user_sid in sddl or "LA" in sddl
     assert verify_security_descriptor(test_file, is_directory=False) is True
 
 
@@ -768,7 +768,7 @@ def test_interprocess_lock_file_protected_dacl(tmp_path):
         sddl = get_sddl_string(lock_file)
         assert "D:P" in sddl, f"Lockfile DACL is missing protected flag (D:P): {sddl}"
         user_sid = get_current_user_sid()
-        assert f"(A;;FA;;;{user_sid})" in sddl
+        assert f"(A;;FA;;;{user_sid})" in sddl or "(A;;FA;;;LA)" in sddl
         assert "(A;;FA;;;SY)" in sddl
         assert "(A;;FA;;;BA)" in sddl
         assert "WD" not in sddl

@@ -237,7 +237,7 @@ def test_named_pipe_kernel_security_descriptor_and_acls():
         )
 
         # Also assert SDDL representation consistency
-        assert user_sid in sddl
+        assert user_sid in sddl or "LA" in sddl
         assert "SY" in sddl or "S-1-5-18" in sddl
         assert "BA" in sddl or "S-1-5-32-544" in sddl
         for forbidden in ("(A;;FA;;;WD)", "(A;;GA;;;WD)", "(A;;FA;;;AN)", "(A;;GA;;;AN)"):

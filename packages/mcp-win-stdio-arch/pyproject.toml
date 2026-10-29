@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-arch"
-version = "0.4.3"
+version = "0.4.4"
 description = "Universal Architecture Knowledge Graph & Blueprint Model Context Protocol (MCP) server for full-stack codebases (Next.js, NestJS, Drizzle, PostgreSQL/MySQL)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -29,7 +29,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp-win-stdio>=0.4.3",
+    "mcp-win-stdio>=0.4.4",
     "mcp>=1.2.0",
     "networkx>=3.2.1",
 ]

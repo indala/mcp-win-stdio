@@ -3,6 +3,7 @@ Pytest configuration for mcp-win-stdio test suite.
 Ensures root src/ and all packages/*/src paths are resolved on sys.path and mcp_win_stdio namespace.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,3 +35,11 @@ mcp_win_stdio.__path__ = [str((ROOT_DIR / "src" / "mcp_win_stdio").resolve())] +
     for pkg in (ROOT_DIR / "packages").iterdir()
     if (ROOT_DIR / "packages" / pkg.name / "src" / "mcp_win_stdio").exists()
 ]
+
+# 5. Export PYTHONPATH to os.environ so spawned child subprocesses also resolve local packages
+all_src_paths = [root_src] + subpkg_paths
+existing_pythonpath = os.environ.get("PYTHONPATH", "")
+os.environ["PYTHONPATH"] = (
+    os.pathsep.join(all_src_paths)
+    + (f"{os.pathsep}{existing_pythonpath}" if existing_pythonpath else "")
+)
