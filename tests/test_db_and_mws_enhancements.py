@@ -304,3 +304,133 @@ def test_native_tools_accept_both_snake_and_camel():
 
     res_res_camel = restore_database(database="db", dumpFilePath="non_existent.sql")
     assert "Dump file not found" in res_res_camel.get("message", "")
+
+
+# -------------------------------------------------------------------------
+# 14. Option 2: Statement Parsing, Policy Guardrails, Before-Image & Undo
+# -------------------------------------------------------------------------
+from mcp_win_stdio.db.server import (
+    _check_write_policy,
+    _parse_modifying_statement,
+    get_audit_log,
+    undo_query,
+)
+
+
+def test_parse_modifying_statement():
+    # DELETE
+    del_res = _parse_modifying_statement("DELETE FROM prop_requisitions WHERE id = 42;")
+    assert del_res is not None
+    assert del_res["operation"] == "DELETE"
+    assert del_res["table"] == "prop_requisitions"
+    assert del_res["where"] == "id = 42"
+
+    # UPDATE
+    upd_res = _parse_modifying_statement("UPDATE items SET price = 100 WHERE item_id = 99;")
+    assert upd_res is not None
+    assert upd_res["operation"] == "UPDATE"
+    assert upd_res["table"] == "items"
+    assert upd_res["where"] == "item_id = 99"
+
+    # TRUNCATE
+    trunc_res = _parse_modifying_statement("TRUNCATE TABLE audit_logs CASCADE;")
+    assert trunc_res is not None
+    assert trunc_res["operation"] == "TRUNCATE"
+    assert "audit_logs" in trunc_res["table"]
+
+    # Naked DELETE (no WHERE)
+    naked_del = _parse_modifying_statement("DELETE FROM orders;")
+    assert naked_del is not None
+    assert naked_del["operation"] == "DELETE"
+    assert naked_del["where"] is None
+
+
+def test_guardrail_policy_naked_writes_and_truncate():
+    # Naked delete blocked by default
+    parsed_naked = _parse_modifying_statement("DELETE FROM users;")
+    err = _check_write_policy(parsed_naked, env="dev", allow_unfiltered=False)
+    assert err is not None
+    assert "Safety Guardrail" in err
+    assert "has no WHERE clause" in err
+
+    # Permitted with allow_unfiltered=True
+    err_allowed = _check_write_policy(parsed_naked, env="dev", allow_unfiltered=True)
+    assert err_allowed is None
+
+    # TRUNCATE on prod blocked unless allow_unfiltered=True
+    parsed_trunc = _parse_modifying_statement("TRUNCATE TABLE transactions;")
+    err_prod_trunc = _check_write_policy(parsed_trunc, env="prod", allow_unfiltered=False)
+    assert err_prod_trunc is not None
+    assert "TRUNCATE is blocked on production" in err_prod_trunc
+
+    err_prod_trunc_allowed = _check_write_policy(parsed_trunc, env="prod", allow_unfiltered=True)
+    assert err_prod_trunc_allowed is None
+
+
+def test_execute_query_blocks_naked_delete(tmp_path):
+    with patch("mcp_win_stdio.db.server._get_connection") as mock_conn:
+        mock_conn.return_value = {
+            "name": "test_db",
+            "engine": "postgres",
+            "mode": "read_write",
+            "env": "dev",
+        }
+        res = execute_query(sql="DELETE FROM users;")
+        assert res.get("error") is True
+        assert "Safety Guardrail" in res.get("message", "")
+        assert "allow_unfiltered=True" in res.get("message", "")
+
+
+def test_undo_query_and_audit_log(tmp_path):
+    audit_file = tmp_path / "db_audit.jsonl"
+    with patch("mcp_win_stdio.db.server.DB_CONNECTIONS_FILE", tmp_path / "db_connections.json"):
+        # Log a mutating write record with before_image
+        audit_id = _log_statement_audit(
+            connection="test_db",
+            sql="DELETE FROM prop_requisitions WHERE id = 42;",
+            rows_affected=1,
+            dry_run=False,
+            status="SUCCESS",
+            before_image={
+                "operation": "DELETE",
+                "table": "prop_requisitions",
+                "rows": [{"id": 42, "req_num": "RET-0042", "status": "draft"}],
+                "cascaded_children": {
+                    "prop_requisition_items": {
+                        "foreign_key": "requisition_id",
+                        "parent_key": "id",
+                        "rows": [{"id": 101, "requisition_id": 42, "item": "Widget"}],
+                    }
+                },
+            },
+        )
+        assert audit_id.startswith("aud_")
+
+        # 1. Inspect audit log
+        log_res = get_audit_log(limit=10)
+        assert log_res.get("count") >= 1
+        record = log_res["audit_records"][0]
+        assert record.get("audit_id") == audit_id
+        assert record.get("before_image_summary", {}).get("operation") == "DELETE"
+
+        # 2. Simulate undo via dry_run
+        with patch("mcp_win_stdio.db.server._get_connection") as mock_conn,              patch("mcp_win_stdio.db.server._get_pg_client") as mock_client:
+            mock_conn.return_value = {
+                "name": "test_db",
+                "engine": "postgres",
+                "mode": "read_write",
+                "env": "dev",
+            }
+            mock_cur = MagicMock()
+            mock_pg = MagicMock()
+            mock_pg.cursor.return_value.__enter__.return_value = mock_cur
+            mock_client.return_value = mock_pg
+
+            undo_res = undo_query(audit_id=audit_id, dry_run=True)
+            assert undo_res.get("dryRun") is True
+            assert undo_res.get("operation") == "DELETE"
+            assert undo_res.get("mainRowsRestored") == 1
+            assert undo_res.get("cascadedRowsRestored", {}).get("prop_requisition_items") == 1
+            # Verified cursor executed INSERTs for both main and cascaded child rows
+            assert mock_cur.execute.call_count == 2
+            mock_pg.rollback.assert_called_once()

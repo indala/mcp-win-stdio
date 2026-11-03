@@ -39,6 +39,10 @@ COMMON_ALIASES: Dict[str, List[str]] = {
     "setactive": ["setActive", "set_active", "active"],
     "confirm": ["confirm", "confirmName", "confirm_name"],
     "confirmname": ["confirmName", "confirm_name", "confirm"],
+    "auditid": ["audit_id", "auditId", "id"],
+    "audit_id": ["audit_id", "auditId", "id"],
+    "allowunfiltered": ["allow_unfiltered", "allowUnfiltered", "force"],
+    "allow_unfiltered": ["allow_unfiltered", "allowUnfiltered", "force"],
 
     # Files & Paths
     "file": ["file_path", "filepath", "path", "remote_path", "local_path", "dumpFilePath"],

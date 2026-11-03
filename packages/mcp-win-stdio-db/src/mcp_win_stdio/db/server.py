@@ -144,12 +144,16 @@ def _log_statement_audit(
     dry_run: bool,
     status: str,
     duration_ms: float = 0.0,
-) -> None:
+    before_image: Optional[Dict[str, Any]] = None,
+    audit_id: Optional[str] = None,
+) -> str:
     """Append non-SELECT SQL execution records to persistent ~/.mcp-win-stdio/db_audit.jsonl."""
+    eff_audit_id = audit_id or f"aud_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     try:
         ensure_workspace_dirs()
         audit_file = DB_CONNECTIONS_FILE.parent / "db_audit.jsonl"
-        record = {
+        record: Dict[str, Any] = {
+            "audit_id": eff_audit_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "connection": connection,
             "sql": sql,
@@ -158,10 +162,179 @@ def _log_statement_audit(
             "status": status,
             "duration_ms": round(duration_ms, 2),
         }
+        if before_image:
+            record["before_image"] = before_image
         with open(audit_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(record, default=str) + "\n")
     except Exception:
         pass
+    return eff_audit_id
+
+
+def _clean_sql_comments(sql: str) -> str:
+    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+    sql = re.sub(r"--[^\r\n]*", "", sql)
+    return sql.strip()
+
+
+def _parse_modifying_statement(sql: str) -> Optional[Dict[str, Any]]:
+    cleaned = _clean_sql_comments(sql)
+    del_match = re.search(
+        r"^\s*DELETE\s+FROM\s+(?:ONLY\s+)?([`\"\w\.]+)(?:\s+(?:AS\s+)?([`\"\w]+))?(?:\s+WHERE\s+([\s\S]+?))?(?:\s+RETURNING\s+[\s\S]+)?\s*;?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if del_match:
+        table = del_match.group(1)
+        alias = del_match.group(2)
+        if alias and alias.upper() in ("WHERE", "RETURNING", "USING"):
+            alias = None
+        where = del_match.group(3)
+        return {
+            "operation": "DELETE",
+            "table": table,
+            "alias": alias,
+            "where": where.strip() if where else None,
+        }
+
+    upd_match = re.search(
+        r"^\s*UPDATE\s+(?:ONLY\s+)?([`\"\w\.]+)(?:\s+(?:AS\s+)?([`\"\w]+))?\s+SET\s+[\s\S]+?(?:\s+WHERE\s+([\s\S]+?))?(?:\s+RETURNING\s+[\s\S]+)?\s*;?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if upd_match:
+        table = upd_match.group(1)
+        alias = upd_match.group(2)
+        if alias and alias.upper() in ("SET", "WHERE", "RETURNING"):
+            alias = None
+        where = upd_match.group(3)
+        return {
+            "operation": "UPDATE",
+            "table": table,
+            "alias": alias,
+            "where": where.strip() if where else None,
+        }
+
+    trunc_match = re.search(
+        r"^\s*TRUNCATE\s+(?:TABLE\s+)?([`\"\w\.,\s]+?)(?:\s+(?:CASCADE|RESTRICT))?\s*;?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if trunc_match:
+        return {
+            "operation": "TRUNCATE",
+            "table": trunc_match.group(1).strip(),
+            "alias": None,
+            "where": None,
+        }
+
+    return None
+
+
+def _check_write_policy(parsed: Optional[Dict[str, Any]], env: str, allow_unfiltered: bool) -> Optional[str]:
+    if not parsed:
+        return None
+    op = parsed.get("operation")
+    has_where = bool(parsed.get("where"))
+    table = parsed.get("table")
+    is_prod = env in ("prod", "production")
+
+    if op in ("UPDATE", "DELETE") and not has_where:
+        if not allow_unfiltered:
+            return (
+                f"Safety Guardrail: {op} statement has no WHERE clause on table '{table}'. "
+                "Naked table-wide operations are blocked to prevent accidental data loss. "
+                "Pass a specific WHERE clause, or explicitly set allow_unfiltered=True to bypass."
+            )
+    if op == "TRUNCATE" and is_prod and not allow_unfiltered:
+        return (
+            f"Safety Guardrail: TRUNCATE is blocked on production environment for table '{table}'. "
+            "Pass allow_unfiltered=True with confirm=True if you really intend to truncate."
+        )
+    return None
+
+
+def _capture_before_image(
+    cur: Any,
+    parsed: Dict[str, Any],
+    engine: str,
+    limit: int = 100,
+) -> Optional[Dict[str, Any]]:
+    op = parsed.get("operation")
+    if op not in ("UPDATE", "DELETE"):
+        return None
+
+    table = parsed["table"]
+    alias = parsed.get("alias")
+    where = parsed.get("where")
+
+    from_clause = f"{table} AS {alias}" if alias else table
+    if where:
+        select_sql = f"SELECT * FROM {from_clause} WHERE {where} LIMIT {limit}"
+    else:
+        select_sql = f"SELECT * FROM {from_clause} LIMIT {limit}"
+
+    try:
+        cur.execute(select_sql)
+        rows, _, col_names, _ = _fetch_rows_safe(cur, max_rows=limit, max_chars_per_cell=2000)
+    except Exception:
+        return None
+
+    result: Dict[str, Any] = {
+        "operation": op,
+        "table": table,
+        "where": where,
+        "rows": rows,
+        "columns": col_names,
+        "cascaded_children": {},
+    }
+
+    if op == "DELETE" and engine == "postgres" and rows:
+        try:
+            cur.execute(
+                """
+                SELECT
+                    conrelid::regclass::text AS child_table,
+                    conname AS constraint_name,
+                    pg_get_constraintdef(oid) AS definition
+                FROM pg_constraint
+                WHERE contype = 'f'
+                  AND confrelid = %s::regclass
+                  AND confdeltype = 'c';
+                """,
+                (table,),
+            )
+            child_constraints = cur.fetchall()
+            for row in child_constraints:
+                child_tbl = row["child_table"] if isinstance(row, dict) else row[0]
+                def_str = row["definition"] if isinstance(row, dict) else row[2]
+                fk_m = re.search(r"FOREIGN KEY\s*\(([^)]+)\)\s*REFERENCES\s*([^(]+)\(([^)]+)\)", def_str, re.IGNORECASE)
+                if not fk_m:
+                    continue
+                child_fk_cols = [c.strip().strip('"') for c in fk_m.group(1).split(",")]
+                parent_pk_cols = [c.strip().strip('"') for c in fk_m.group(3).split(",")]
+
+                if len(parent_pk_cols) == 1 and len(child_fk_cols) == 1:
+                    pk_name = parent_pk_cols[0]
+                    fk_name = child_fk_cols[0]
+                    parent_ids = list({r[pk_name] for r in rows if pk_name in r and r[pk_name] is not None})
+                    if parent_ids:
+                        cur.execute(
+                            f'SELECT * FROM {child_tbl} WHERE "{fk_name}" = ANY(%s) LIMIT 500;',
+                            (parent_ids,),
+                        )
+                        c_rows, _, c_cols, _ = _fetch_rows_safe(cur, max_rows=500, max_chars_per_cell=2000)
+                        if c_rows:
+                            result["cascaded_children"][child_tbl] = {
+                                "foreign_key": fk_name,
+                                "parent_key": pk_name,
+                                "rows": c_rows,
+                                "columns": c_cols,
+                            }
+        except Exception:
+            pass
+
+    return result
 
 
 def _get_db_config_file() -> Path:
@@ -2098,27 +2271,37 @@ def execute_query(
     sql: str,
     params: Optional[List[Any]] = None,
     dry_run: bool = False,
+    dryRun: Optional[bool] = None,
     confirm: bool = False,
+    allow_unfiltered: bool = False,
+    allowUnfiltered: Optional[bool] = None,
     connection: Optional[str] = None,
     server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute INSERT, UPDATE, DELETE, or DDL statement(s).
     Supports transactional multi-statement batch execution with statement-by-statement progress,
-    exact line/statement failure diagnostics, dry_run rollback support, and statement audit logging.
+    exact line/statement failure diagnostics, dry_run rollback support with before-image row preview,
+    safety guardrails against naked updates/deletes and prod truncates, and statement audit logging with undo support.
 
     Safety Guards:
     - Connections configured as mode='read_only' automatically block all write statements.
     - Connections flagged with env='prod' require explicit confirm=True for non-dry-run writes.
+    - Naked UPDATE or DELETE statements without a WHERE clause and TRUNCATE on prod require allow_unfiltered=True.
 
     Args:
         sql: SQL statement or semicolon-separated batch (e.g. CREATE TABLE ...; ALTER TABLE ...;).
         params: Optional parameter list for single statements (e.g. [123, "active"]).
-        dry_run: If True, executes inside a transaction and rolls back (default False).
+        dry_run: If True, executes inside a transaction and rolls back while previewing affected rows (default False).
+        dryRun: CamelCase alias for dry_run.
         confirm: Must be True to execute live non-dry-run writes on 'prod' environment connections.
+        allow_unfiltered: Set to True to intentionally permit table-wide UPDATE/DELETE without WHERE or TRUNCATE on prod.
+        allowUnfiltered: CamelCase alias for allow_unfiltered.
         connection: Connection name to target (defaults to active connection).
         server: Optional server or connection alias.
     """
+    effective_dry_run = dry_run or (dryRun is True)
+    effective_allow_unfiltered = allow_unfiltered or (allowUnfiltered is True)
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -2139,7 +2322,7 @@ def execute_query(
         }
 
     # 2. Production safety guard
-    if not dry_run and not confirm and conn_env in ("prod", "production"):
+    if not effective_dry_run and not confirm and conn_env in ("prod", "production"):
         return {
             "error": True,
             "isError": True,
@@ -2157,11 +2340,26 @@ def execute_query(
     if not statements:
         return {"error": True, "message": "SQL statement string is empty."}
 
+    # 3. Policy guardrail checks across statements
+    for stmt_check in statements:
+        p_check = _parse_modifying_statement(stmt_check)
+        p_err = _check_write_policy(p_check, conn_env, effective_allow_unfiltered)
+        if p_err:
+            return {
+                "error": True,
+                "isError": True,
+                "message": p_err,
+                "connection": conn_name,
+                "environment": conn_env,
+                "statement": stmt_check,
+            }
+
     # =========================================================================
     # SINGLE STATEMENT EXECUTION
     # =========================================================================
     if len(statements) == 1:
         single_sql = statements[0]
+        parsed_single = _parse_modifying_statement(single_sql)
         if info["engine"] == "postgres":
             try:
                 conn = _get_pg_client(info)
@@ -2170,6 +2368,10 @@ def execute_query(
 
             try:
                 with conn.cursor() as cur:
+                    before_img = None
+                    if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
+                        before_img = _capture_before_image(cur, parsed_single, "postgres")
+
                     if params:
                         cur.execute(single_sql, tuple(params))
                     else:
@@ -2186,10 +2388,9 @@ def execute_query(
                         except Exception:
                             pass
 
-                    _log_statement_audit(info["name"], single_sql, rowcount, dry_run, status)
-
-                    if dry_run:
+                    if effective_dry_run:
                         conn.rollback()
+                        _log_statement_audit(info["name"], single_sql, rowcount, True, f"{status} (ROLLED BACK)", before_image=before_img)
                         res_obj = {
                             "connection": info["name"],
                             "dryRun": True,
@@ -2197,6 +2398,8 @@ def execute_query(
                             "rowCount": rowcount,
                             "statusMessage": status,
                         }
+                        if before_img:
+                            res_obj["beforeImage"] = before_img
                         if returned_rows is not None:
                             res_obj["returned_rows"] = returned_rows
                         if cols_ret:
@@ -2206,7 +2409,20 @@ def execute_query(
                         return res_obj
                     else:
                         conn.commit()
-                        res_obj = {"connection": info["name"], "status": status, "rowCount": rowcount}
+                        audit_id = _log_statement_audit(info["name"], single_sql, rowcount, False, status, before_image=before_img)
+                        res_obj = {
+                            "connection": info["name"],
+                            "status": status,
+                            "rowCount": rowcount,
+                            "auditId": audit_id,
+                        }
+                        if before_img and (before_img.get("rows") or before_img.get("cascaded_children")):
+                            res_obj["beforeImageSummary"] = {
+                                "operation": before_img.get("operation"),
+                                "table": before_img.get("table"),
+                                "rowsAffected": len(before_img.get("rows", [])),
+                                "cascadedTables": list(before_img.get("cascaded_children", {}).keys()),
+                            }
                         if returned_rows is not None:
                             res_obj["returned_rows"] = returned_rows
                         if cols_ret:
@@ -2231,25 +2447,45 @@ def execute_query(
             try:
                 with conn.cursor() as cur:
                     cur.execute("START TRANSACTION;")
+                    before_img = None
+                    if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
+                        before_img = _capture_before_image(cur, parsed_single, "mysql")
+
                     if params:
                         cur.execute(single_sql, tuple(params))
                     else:
                         cur.execute(single_sql)
 
                     rowcount = cur.rowcount
-                    status = "SUCCESS (ROLLED BACK)" if dry_run else "SUCCESS"
-                    _log_statement_audit(info["name"], single_sql, rowcount, dry_run, status)
-                    if dry_run:
+                    status = "SUCCESS (ROLLED BACK)" if effective_dry_run else "SUCCESS"
+                    if effective_dry_run:
                         cur.execute("ROLLBACK;")
-                        return {
+                        _log_statement_audit(info["name"], single_sql, rowcount, True, status, before_image=before_img)
+                        res_obj = {
                             "connection": info["name"],
                             "dryRun": True,
                             "status": status,
                             "rowCount": rowcount,
                         }
+                        if before_img:
+                            res_obj["beforeImage"] = before_img
+                        return res_obj
                     else:
                         cur.execute("COMMIT;")
-                        return {"connection": info["name"], "status": "SUCCESS", "rowCount": rowcount}
+                        audit_id = _log_statement_audit(info["name"], single_sql, rowcount, False, status, before_image=before_img)
+                        res_obj = {
+                            "connection": info["name"],
+                            "status": "SUCCESS",
+                            "rowCount": rowcount,
+                            "auditId": audit_id,
+                        }
+                        if before_img and before_img.get("rows"):
+                            res_obj["beforeImageSummary"] = {
+                                "operation": before_img.get("operation"),
+                                "table": before_img.get("table"),
+                                "rowsAffected": len(before_img.get("rows", [])),
+                            }
+                        return res_obj
             except Exception as e:
                 try:
                     conn.rollback()
@@ -2295,14 +2531,14 @@ def execute_query(
                         err_res["failed_statement"] = stmt
                         return err_res
 
-                _log_statement_audit(
+                audit_id = _log_statement_audit(
                     info["name"],
                     f"BATCH: {len(statements)} statements",
                     total_rows_affected,
-                    dry_run,
-                    "BATCH SUCCESS (ROLLED BACK)" if dry_run else "BATCH SUCCESS",
+                    effective_dry_run,
+                    "BATCH SUCCESS (ROLLED BACK)" if effective_dry_run else "BATCH SUCCESS",
                 )
-                if dry_run:
+                if effective_dry_run:
                     conn.rollback()
                     return {
                         "connection": info["name"],
@@ -2318,6 +2554,7 @@ def execute_query(
                         "connection": info["name"],
                         "dryRun": False,
                         "status": "BATCH SUCCESS",
+                        "auditId": audit_id,
                         "total_statements": len(statements),
                         "total_rows_affected": total_rows_affected,
                         "executed_statements": executed_statements,
@@ -2358,7 +2595,14 @@ def execute_query(
                         err_res["failed_statement"] = stmt
                         return err_res
 
-                if dry_run:
+                audit_id = _log_statement_audit(
+                    info["name"],
+                    f"BATCH: {len(statements)} statements",
+                    total_rows_affected,
+                    effective_dry_run,
+                    "BATCH SUCCESS (ROLLED BACK)" if effective_dry_run else "BATCH SUCCESS",
+                )
+                if effective_dry_run:
                     cur.execute("ROLLBACK;")
                     return {
                         "connection": info["name"],
@@ -2374,12 +2618,466 @@ def execute_query(
                         "connection": info["name"],
                         "dryRun": False,
                         "status": "BATCH SUCCESS",
+                        "auditId": audit_id,
                         "total_statements": len(statements),
                         "total_rows_affected": total_rows_affected,
                         "executed_statements": executed_statements,
                     }
         finally:
             conn.close()
+
+
+def _execute_undo_delete(
+    info: Dict[str, Any],
+    record: Dict[str, Any],
+    table: str,
+    rows: List[Dict[str, Any]],
+    cascaded: Dict[str, Any],
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    engine = info["engine"]
+    audit_id = record.get("audit_id", "unknown")
+    if engine == "postgres":
+        conn = _get_pg_client(info)
+        try:
+            restored_main_count = 0
+            restored_child_counts: Dict[str, int] = {}
+            with conn.cursor() as cur:
+                for r in rows:
+                    cols = list(r.keys())
+                    vals = [r[c] for c in cols]
+                    col_names = ", ".join(f'"{c}"' for c in cols)
+                    placeholders = ", ".join(["%s"] * len(cols))
+                    insert_sql = f'INSERT INTO {table} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
+                    cur.execute(insert_sql, tuple(vals))
+                    restored_main_count += 1
+
+                for child_tbl, child_data in cascaded.items():
+                    c_rows = child_data.get("rows", [])
+                    c_count = 0
+                    for cr in c_rows:
+                        cols = list(cr.keys())
+                        vals = [cr[c] for c in cols]
+                        col_names = ", ".join(f'"{c}"' for c in cols)
+                        placeholders = ", ".join(["%s"] * len(cols))
+                        insert_sql = f'INSERT INTO {child_tbl} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
+                        cur.execute(insert_sql, tuple(vals))
+                        c_count += 1
+                    restored_child_counts[child_tbl] = c_count
+
+                if dry_run:
+                    conn.rollback()
+                    return {
+                        "connection": info["name"],
+                        "dryRun": True,
+                        "status": "UNDO SIMULATED (ROLLED BACK)",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "DELETE",
+                        "mainRowsRestored": restored_main_count,
+                        "cascadedRowsRestored": restored_child_counts,
+                        "sampleRestoredRows": rows[:5],
+                    }
+                else:
+                    conn.commit()
+                    _log_statement_audit(
+                        info["name"],
+                        f"UNDO DELETE (audit: {audit_id}) on {table}",
+                        restored_main_count,
+                        dry_run=False,
+                        status="UNDO SUCCESS",
+                    )
+                    return {
+                        "connection": info["name"],
+                        "success": True,
+                        "status": "UNDO SUCCESS",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "DELETE",
+                        "mainRowsRestored": restored_main_count,
+                        "cascadedRowsRestored": restored_child_counts,
+                    }
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return _format_db_error(e, "postgres")
+        finally:
+            conn.close()
+    else:
+        conn = _get_mysql_client(info)
+        try:
+            restored_main_count = 0
+            with conn.cursor() as cur:
+                cur.execute("START TRANSACTION;")
+                for r in rows:
+                    cols = list(r.keys())
+                    vals = [r[c] for c in cols]
+                    col_names = ", ".join(f'`{c}`' for c in cols)
+                    placeholders = ", ".join(["%s"] * len(cols))
+                    insert_sql = f'INSERT IGNORE INTO {table} ({col_names}) VALUES ({placeholders});'
+                    cur.execute(insert_sql, tuple(vals))
+                    restored_main_count += 1
+
+                if dry_run:
+                    cur.execute("ROLLBACK;")
+                    return {
+                        "connection": info["name"],
+                        "dryRun": True,
+                        "status": "UNDO SIMULATED (ROLLED BACK)",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "DELETE",
+                        "mainRowsRestored": restored_main_count,
+                        "sampleRestoredRows": rows[:5],
+                    }
+                else:
+                    cur.execute("COMMIT;")
+                    _log_statement_audit(
+                        info["name"],
+                        f"UNDO DELETE (audit: {audit_id}) on {table}",
+                        restored_main_count,
+                        dry_run=False,
+                        status="UNDO SUCCESS",
+                    )
+                    return {
+                        "connection": info["name"],
+                        "success": True,
+                        "status": "UNDO SUCCESS",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "DELETE",
+                        "mainRowsRestored": restored_main_count,
+                    }
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return _format_db_error(e, "mysql")
+        finally:
+            conn.close()
+
+
+def _execute_undo_update(
+    info: Dict[str, Any],
+    record: Dict[str, Any],
+    table: str,
+    rows: List[Dict[str, Any]],
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    engine = info["engine"]
+    audit_id = record.get("audit_id", "unknown")
+    if engine == "postgres":
+        conn = _get_pg_client(info)
+        try:
+            with conn.cursor() as cur:
+                clean_tbl = table.split(".")[-1].strip('"')
+                cur.execute(
+                    """
+                    SELECT kcu.column_name
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_name = kcu.constraint_name
+                     AND tc.table_schema = kcu.table_schema
+                    WHERE tc.constraint_type = 'PRIMARY KEY'
+                      AND tc.table_name = %s;
+                    """,
+                    (clean_tbl,),
+                )
+                pk_rows = cur.fetchall()
+                pk_cols = [r["column_name"] if isinstance(r, dict) else r[0] for r in pk_rows]
+                if not pk_cols and rows and "id" in rows[0]:
+                    pk_cols = ["id"]
+
+                restored_count = 0
+                for r in rows:
+                    if pk_cols and all(pk in r for pk in pk_cols):
+                        set_cols = [c for c in r.keys() if c not in pk_cols]
+                        set_clause = ", ".join(f'"{c}" = %s' for c in set_cols)
+                        where_clause = " AND ".join(f'"{c}" = %s' for c in pk_cols)
+                        vals = [r[c] for c in set_cols] + [r[c] for c in pk_cols]
+                        cur.execute(f'UPDATE {table} SET {set_clause} WHERE {where_clause};', tuple(vals))
+                        restored_count += 1
+                    else:
+                        all_cols = list(r.keys())
+                        set_clause = ", ".join(f'"{c}" = %s' for c in all_cols)
+                        where_clause = " AND ".join(f'("{c}" = %s OR ("{c}" IS NULL AND %s IS NULL))' for c in all_cols)
+                        where_vals = []
+                        for c in all_cols:
+                            where_vals.extend([r[c], r[c]])
+                        cur.execute(f'UPDATE {table} SET {set_clause} WHERE {where_clause};', tuple([r[c] for c in all_cols] + where_vals))
+                        restored_count += 1
+
+                if dry_run:
+                    conn.rollback()
+                    return {
+                        "connection": info["name"],
+                        "dryRun": True,
+                        "status": "UNDO SIMULATED (ROLLED BACK)",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "UPDATE",
+                        "rowsRestored": restored_count,
+                        "sampleRestoredRows": rows[:5],
+                    }
+                else:
+                    conn.commit()
+                    _log_statement_audit(
+                        info["name"],
+                        f"UNDO UPDATE (audit: {audit_id}) on {table}",
+                        restored_count,
+                        dry_run=False,
+                        status="UNDO SUCCESS",
+                    )
+                    return {
+                        "connection": info["name"],
+                        "success": True,
+                        "status": "UNDO SUCCESS",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "UPDATE",
+                        "rowsRestored": restored_count,
+                    }
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return _format_db_error(e, "postgres")
+        finally:
+            conn.close()
+    else:
+        conn = _get_mysql_client(info)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("START TRANSACTION;")
+                cur.execute(f"SHOW KEYS FROM `{table}` WHERE Key_name = 'PRIMARY';")
+                pk_rows = cur.fetchall()
+                pk_cols = [r["Column_name"] if isinstance(r, dict) else r[4] for r in pk_rows]
+                if not pk_cols and rows and "id" in rows[0]:
+                    pk_cols = ["id"]
+
+                restored_count = 0
+                for r in rows:
+                    if pk_cols and all(pk in r for pk in pk_cols):
+                        set_cols = [c for c in r.keys() if c not in pk_cols]
+                        set_clause = ", ".join(f'`{c}` = %s' for c in set_cols)
+                        where_clause = " AND ".join(f'`{c}` = %s' for c in pk_cols)
+                        vals = [r[c] for c in set_cols] + [r[c] for c in pk_cols]
+                        cur.execute(f'UPDATE {table} SET {set_clause} WHERE {where_clause};', tuple(vals))
+                        restored_count += 1
+
+                if dry_run:
+                    cur.execute("ROLLBACK;")
+                    return {
+                        "connection": info["name"],
+                        "dryRun": True,
+                        "status": "UNDO SIMULATED (ROLLED BACK)",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "UPDATE",
+                        "rowsRestored": restored_count,
+                    }
+                else:
+                    cur.execute("COMMIT;")
+                    _log_statement_audit(
+                        info["name"],
+                        f"UNDO UPDATE (audit: {audit_id}) on {table}",
+                        restored_count,
+                        dry_run=False,
+                        status="UNDO SUCCESS",
+                    )
+                    return {
+                        "connection": info["name"],
+                        "success": True,
+                        "status": "UNDO SUCCESS",
+                        "auditId": audit_id,
+                        "table": table,
+                        "operation": "UPDATE",
+                        "rowsRestored": restored_count,
+                    }
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return _format_db_error(e, "mysql")
+        finally:
+            conn.close()
+
+
+@mcp.tool()
+def undo_query(
+    audit_id: Optional[str] = None,
+    auditId: Optional[str] = None,
+    connection: Optional[str] = None,
+    server: Optional[str] = None,
+    dry_run: bool = False,
+    dryRun: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Safely undo the previous mutating SQL statement (UPDATE or DELETE) using captured before-image snapshots.
+    Re-inserts deleted records (including cascading child records in topological FK order) or restores pre-update values.
+
+    Args:
+        audit_id: Optional specific audit ID (e.g. 'aud_20261103_093120_1a2b'). If omitted, finds the latest undoable write for the connection.
+        auditId: CamelCase alias for audit_id.
+        connection: Optional connection name (defaults to active connection).
+        server: Optional server alias.
+        dry_run: If True, simulates and previews the restoration without committing (default False).
+        dryRun: CamelCase alias for dry_run.
+    """
+    eff_audit_id = audit_id or auditId
+    effective_dry_run = dry_run or (dryRun is True)
+    try:
+        info = _get_connection(_resolve_conn(connection, server))
+    except Exception as e:
+        return _format_db_error(e, "unknown")
+
+    conn_name = info.get("name", "unknown")
+    conn_mode = info.get("mode", "read_write")
+    if conn_mode == "read_only":
+        return {
+            "error": True,
+            "message": f"Connection '{conn_name}' is read-only (mode='read_only'). Cannot perform undo on read-only connection.",
+        }
+
+    audit_file = DB_CONNECTIONS_FILE.parent / "db_audit.jsonl"
+    if not audit_file.exists():
+        return {"error": True, "message": f"No statement audit history found at {audit_file}."}
+
+    matched_record = None
+    try:
+        with open(audit_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in reversed(lines):
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                rec = json.loads(line_str)
+            except Exception:
+                continue
+
+            if eff_audit_id:
+                if rec.get("audit_id") == eff_audit_id:
+                    matched_record = rec
+                    break
+            else:
+                if (
+                    rec.get("connection") == conn_name
+                    and not rec.get("dry_run")
+                    and rec.get("before_image")
+                    and rec.get("status") in ("SUCCESS", "OK")
+                    and not rec.get("undone")
+                ):
+                    matched_record = rec
+                    break
+    except Exception as e:
+        return {"error": True, "message": f"Failed to read audit log: {e}"}
+
+    if not matched_record:
+        if eff_audit_id:
+            return {"error": True, "message": f"No audit record found with audit_id='{eff_audit_id}'."}
+        return {
+            "error": True,
+            "message": f"No undoable mutation record with before-image snapshot found for connection '{conn_name}'.",
+        }
+
+    before_image = matched_record.get("before_image")
+    if not before_image:
+        return {
+            "error": True,
+            "message": f"Audit record '{matched_record.get('audit_id')}' does not have a before-image snapshot to restore.",
+        }
+
+    op = before_image.get("operation")
+    table = before_image.get("table")
+    rows = before_image.get("rows", [])
+    cascaded = before_image.get("cascaded_children", {})
+
+    if not rows and not cascaded:
+        return {
+            "success": True,
+            "message": f"Audit record '{matched_record.get('audit_id')}' affected 0 rows; nothing to restore.",
+            "audit_id": matched_record.get("audit_id"),
+        }
+
+    if op == "DELETE":
+        return _execute_undo_delete(info, matched_record, table, rows, cascaded, dry_run=effective_dry_run)
+    elif op == "UPDATE":
+        return _execute_undo_update(info, matched_record, table, rows, dry_run=effective_dry_run)
+    else:
+        return {
+            "error": True,
+            "message": f"Operation '{op}' cannot be automatically undone. Supported operations: DELETE, UPDATE.",
+        }
+
+
+@mcp.tool()
+def get_audit_log(
+    limit: int = 20,
+    connection: Optional[str] = None,
+    server: Optional[str] = None,
+    include_snapshots: bool = False,
+    includeSnapshots: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    Retrieve recent database statement execution history and audit records.
+    Displays executed statements, timestamps, status, rows affected, and available audit_ids for undo.
+
+    Args:
+        limit: Maximum number of audit records to return (default 20).
+        connection: Optional filter by connection alias.
+        server: Optional alias for connection.
+        include_snapshots: If True, includes full before-image row data in records (default False).
+        includeSnapshots: CamelCase alias for include_snapshots.
+    """
+    eff_include = include_snapshots or (includeSnapshots is True)
+    audit_file = DB_CONNECTIONS_FILE.parent / "db_audit.jsonl"
+    if not audit_file.exists():
+        return {"audit_records": [], "count": 0, "file": str(audit_file)}
+
+    target_conn = _resolve_conn(connection, server) if (connection or server) else None
+    records = []
+    try:
+        with open(audit_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in reversed(lines):
+            line_str = line.strip()
+            if not line_str:
+                continue
+            try:
+                rec = json.loads(line_str)
+            except Exception:
+                continue
+
+            if target_conn and rec.get("connection", "").lower() != target_conn.lower():
+                continue
+
+            if not eff_include and "before_image" in rec:
+                bi = rec["before_image"]
+                rec["before_image_summary"] = {
+                    "operation": bi.get("operation"),
+                    "table": bi.get("table"),
+                    "rows_count": len(bi.get("rows", [])),
+                    "cascaded_tables": list(bi.get("cascaded_children", {}).keys()),
+                }
+                del rec["before_image"]
+
+            records.append(rec)
+            if len(records) >= limit:
+                break
+
+        return {
+            "audit_records": records,
+            "count": len(records),
+            "file": str(audit_file),
+        }
+    except Exception as e:
+        return {"error": True, "message": f"Failed to read audit log: {e}"}
 
 
 @mcp.tool()
