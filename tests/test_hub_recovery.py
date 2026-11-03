@@ -121,7 +121,7 @@ def test_hung_ipc_never_purges_live_process_metadata(tmp_path):
     mgr = HubInstanceManager(metadata_path=meta_file)
 
     # Spawn real running process that will keep running
-    dummy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    dummy = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         live_pid = dummy.pid
         live_ct = get_process_creation_time(live_pid)

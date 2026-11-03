@@ -20,25 +20,91 @@ from .process_pool import GLOBAL_POOL
 _IN_MEMORY_CACHE: Dict[str, Dict[str, Any]] = {}
 
 COMMON_ALIASES: Dict[str, List[str]] = {
-    "sql": ["sql_query", "query", "sql"],
-    "query": ["sql_query", "query", "sql"],
-    "sqlquery": ["sql_query", "query"],
-    "table": ["table_name", "tablename", "table"],
-    "tablename": ["table_name", "tableName"],
-    "file": ["file_path", "filepath", "path"],
-    "path": ["file_path", "filepath", "path"],
-    "filepath": ["file_path"],
-    "sheet": ["sheet_name", "sheetname"],
-    "sheetname": ["sheet_name"],
-    "searchterm": ["search_term", "query", "searchTerm"],
-    "term": ["search_term", "searchTerm"],
-    "conn": ["connection", "connection_name"],
+    # SQL & Database
+    "sql": ["sql", "query", "sql_query", "statement"],
+    "query": ["query", "sql", "sql_query", "search_term", "pattern"],
+    "sqlquery": ["sql_query", "query", "sql"],
+    "statement": ["sql", "query"],
+    "table": ["tableName", "table_name", "table", "table1"],
+    "tablename": ["tableName", "table_name", "table"],
+    "targettable": ["tableName", "table_name", "table", "targetDatabase"],
+    "schema": ["schema", "table_schema"],
+    "schemaname": ["schema", "table_schema"],
+    "database": ["database", "dbname", "db"],
+    "dbname": ["database", "dbname", "db"],
+    "db": ["database", "dbname", "db", "connection"],
+    "conn": ["connection", "connection_name", "server"],
+    "connection": ["connection", "connection_name", "server", "host"],
     "connectionname": ["connection_name", "connection"],
-    "dir": ["project_path", "directory_path", "directory"],
-    "directory": ["project_path", "directory_path"],
-    "project": ["project_path", "project_name"],
-    "repo": ["repo_path"],
-    "url": ["db_url", "url", "connection_string"],
+    "setactive": ["setActive", "set_active", "active"],
+    "confirm": ["confirm", "confirmName", "confirm_name"],
+    "confirmname": ["confirmName", "confirm_name", "confirm"],
+
+    # Files & Paths
+    "file": ["file_path", "filepath", "path", "remote_path", "local_path", "dumpFilePath"],
+    "path": ["file_path", "filepath", "path", "project_path", "remote_path", "local_path", "directory_path"],
+    "filepath": ["file_path", "path", "dumpFilePath"],
+    "document": ["file_path", "path", "document_path"],
+    "dumpfilepath": ["dumpFilePath", "dump_file_path", "file_path", "path"],
+    "outputpath": ["outputPath", "output_path", "output_pdf_path", "path"],
+    "dir": ["project_path", "directory_path", "directory", "cwd", "repo_path"],
+    "directory": ["project_path", "directory_path", "project", "repo_path"],
+    "folder": ["project_path", "directory_path", "directory"],
+    "project": ["project_path", "project_name", "project"],
+    "projectpath": ["project_path", "project"],
+    "repo": ["repo_path", "repo_url", "repo"],
+    "repopath": ["repo_path", "repo"],
+
+    # Excel & Documents
+    "sheet": ["sheet_name", "sheetname", "sheet"],
+    "sheetname": ["sheet_name", "sheetname", "sheet"],
+    "workbook": ["file_path", "path", "workbook"],
+    "workbookpath": ["file_path", "path", "workbook"],
+    "cell": ["start_cell", "range_address", "cells"],
+    "range": ["range_address", "start_cell"],
+    "rows": ["rows", "data", "updates"],
+    "font": ["font_name", "font"],
+    "fontsize": ["font_size_pt", "font_size"],
+
+    # SSH & Shell
+    "command": ["command", "cmd", "script", "script_content"],
+    "cmd": ["command", "script_content", "script"],
+    "script": ["script_content", "command", "script"],
+    "scriptcontent": ["script_content", "script", "command"],
+    "code": ["script_content", "command", "script", "content"],
+    "interpreter": ["interpreter", "shell"],
+    "shell": ["interpreter", "shell"],
+    "host": ["host", "hostname", "server"],
+    "hostname": ["hostname", "host"],
+    "user": ["user", "username"],
+    "username": ["username", "user"],
+    "remotepath": ["remote_path", "path", "file_path"],
+    "localpath": ["local_path", "path", "file_path"],
+    "content": ["content", "script_content", "text", "data"],
+    "text": ["content", "text", "search_text", "new_text", "script_content"],
+
+    # Search & Text
+    "searchterm": ["search_term", "query", "searchTerm", "search_text", "pattern", "filter"],
+    "search": ["search_term", "query", "searchTerm", "search_text", "pattern", "filter"],
+    "term": ["search_term", "searchTerm", "query", "search_text"],
+    "find": ["search_text", "search_term", "pattern"],
+    "replace": ["replace_text", "replacement"],
+    "replacetext": ["replace_text", "replacement"],
+    "pattern": ["filter", "search_term", "query"],
+
+    # Git
+    "branch": ["branch_name", "branch"],
+    "branchname": ["branch_name", "branch"],
+    "message": ["commit_message", "message", "msg"],
+    "commitmessage": ["commit_message", "message"],
+    "msg": ["commit_message", "message"],
+
+    # General & Meta
+    "url": ["db_url", "url", "connection_string", "target_url", "repo_url"],
+    "name": ["name", "tool_name", "tool", "workflow_name", "tableName", "table_name"],
+    "toolname": ["name", "tool_name", "tool"],
+    "workflow": ["workflow_name", "name"],
+    "workflowname": ["workflow_name", "name"],
 }
 
 
@@ -102,6 +168,12 @@ def normalize_arguments(server: str, tool_name: str, arguments: Optional[Dict[st
         snake_k = _to_snake_case(k)
         if snake_k in props:
             normalized[snake_k] = v
+            continue
+
+        # 2b. Convert snake_case to camelCase (e.g. table_name -> tableName, search_term -> searchTerm)
+        camel_k = re.sub(r"_([a-z])", lambda m: m.group(1).upper(), k)
+        if camel_k in props:
+            normalized[camel_k] = v
             continue
 
         # 3. Lowercase match
@@ -318,20 +390,22 @@ def get_server_catalog(
 
 
 def search_tools(
-    query: str,
+    query: str = "",
     server: Optional[str] = None,
-    limit: int = 10,
+    limit: int = 25,
     detail: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Dynamically search all tools across all servers or within a specific server.
     Matches tool names, descriptions, and parameter properties.
     Returns compact signatures by default (saving context tokens), or full schemas when detail=True.
+    When query is empty or '*', returns tools for target server(s) with clean 1-line signatures.
     """
     available = discover_available_servers()
     targets = [server.lower()] if server and server.lower() in available else list(available.keys())
 
-    query_tokens = [tok.lower() for tok in re.findall(r"\w+", query) if len(tok) > 1]
+    is_wildcard = not query or not query.strip() or query.strip() == "*"
+    query_tokens = [] if is_wildcard else [tok.lower() for tok in re.findall(r"\w+", query) if len(tok) > 1]
     results: List[Dict[str, Any]] = []
 
     for srv in targets:
@@ -342,39 +416,45 @@ def search_tools(
             params = t.get("parameters", {})
             param_names = list(params.get("properties", {}).keys()) if isinstance(params, dict) else []
 
-            # Scoring algorithm
-            haystack = f"{name} {desc} {' '.join(param_names)} {srv}".lower()
-            score = 0
+            if is_wildcard:
+                score = 1
+            else:
+                # Scoring algorithm
+                haystack = f"{name} {desc} {' '.join(param_names)} {srv}".lower()
+                score = 0
 
-            # Exact match boost
-            if query.lower() in name.lower():
-                score += 100
-            if query.lower() in haystack:
-                score += 50
+                # Exact match boost
+                if query.lower() in name.lower():
+                    score += 100
+                if query.lower() in haystack:
+                    score += 50
 
-            # Token overlap score
-            for tok in query_tokens:
-                if tok in name.lower():
-                    score += 25
-                elif tok in param_names:
-                    score += 15
-                elif tok in desc.lower():
-                    score += 10
+                # Token overlap score
+                for tok in query_tokens:
+                    if tok in name.lower():
+                        score += 25
+                    elif tok in param_names:
+                        score += 15
+                    elif tok in desc.lower():
+                        score += 10
 
             if score > 0:
+                clean_desc = desc.splitlines()[0].strip() if desc else ""
                 item: Dict[str, Any] = {
                     "score": score,
                     "server": srv,
+                    "name": name,
                     "tool": name,
                     "signature": generate_compact_signature(name, params),
-                    "description": desc,
+                    "description": clean_desc if not detail else desc,
                 }
                 if detail:
                     item["parameters"] = params
                 results.append(item)
 
-    # Sort by relevance score descending
-    results.sort(key=lambda x: x["score"], reverse=True)
+    if not is_wildcard:
+        # Sort by relevance score descending
+        results.sort(key=lambda x: x["score"], reverse=True)
     top_results = results[:limit]
 
     # Clean score from final output for cleaner token usage
@@ -403,8 +483,9 @@ def describe_tool(server: str, tool_name: str) -> Optional[Dict[str, Any]]:
     for t in tools:
         if t.get("name", "").lower() == tool_name.lower():
             return {
-                "server": server.lower(),
+                "name": t.get("name"),
                 "tool": t.get("name"),
+                "server": server.lower(),
                 "description": t.get("description", ""),
                 "parameters": t.get("parameters", {}),
             }

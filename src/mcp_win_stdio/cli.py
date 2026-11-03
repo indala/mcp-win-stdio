@@ -2389,7 +2389,7 @@ def cmd_hub_stop(args: argparse.Namespace) -> None:
     def _force_kill(pid: int) -> None:
         print(f"Force-terminating MCP Hub process (PID {pid})...")
         if sys.platform == "win32":
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, stdin=subprocess.DEVNULL)
         else:
             try:
                 os.kill(pid, signal.SIGKILL)

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 SUPPORTED_CONTEXT_TYPES = {
     "server": "Active MCP server namespace (e.g. 'db', 'excel', 'ssh', 'git')",
+    "tool": "Active tool name for stacked execution (e.g. 'execute_query', 'read_query')",
     "db_connection": "Active database connection alias (e.g. 'postgres_prod', 'ijitest')",
     "ssh_host": "Active SSH remote host alias (e.g. 'hostinger-prod', 'staging')",
     "workspace": "Active workspace or repository directory path",

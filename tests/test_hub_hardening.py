@@ -355,6 +355,7 @@ def test_job_object_suspended_process_lifecycle():
             "import sys; sys.stdout.write('SUSPENDED_LIFECYCLE_OK\\n'); sys.stdout.flush()",
         ],
         stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         creationflags=0x00000004,  # CREATE_SUSPENDED
         text=True,
     )
@@ -509,6 +510,7 @@ time.sleep(60)
     parent = subprocess.Popen(
         [sys.executable, str(helper_file)],
         stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         text=True,
     )
 
@@ -594,6 +596,7 @@ time.sleep(60)
     proc = subprocess.Popen(
         [sys.executable, str(child_file), str(os.getpid())],
         stdout=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         creationflags=CREATE_SUSPENDED,
         text=True,
     )

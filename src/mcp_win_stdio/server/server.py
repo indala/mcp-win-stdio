@@ -3,9 +3,10 @@ FastMCP Server definition for mws.
 Universal Dynamic On-Demand MCP Gateway & Tool Router.
 """
 
+import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 try:
     from mcp.server.mcpserver import Context
@@ -252,9 +253,9 @@ def list_servers(
 
 @mcp.tool()
 def search_tools(
-    query: str,
+    query: str = "",
     server: Optional[str] = None,
-    limit: int = 10,
+    limit: int = 25,
     detail: bool = False,
 ) -> List[Dict[str, Any]]:
     """
@@ -271,27 +272,57 @@ def search_tools(
 
 
 @mcp.tool()
-def describe_tool(server: str, tool_name: str) -> Dict[str, Any]:
+def describe_tool(
+    name: Optional[str] = None,
+    server: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    tool: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Get full parameter schema, data types, required fields, and docstring for a specific tool.
 
     Args:
-        server: The target server name (e.g. 'db', 'excel', 'git', 'ssh', 'tsc', 'arch').
-        tool_name: The exact tool name (e.g. 'read_query', 'get_workbook_info').
+        name: The tool name (e.g. 'read_query', 'get_workbook_info').
+        server: Optional target server name. Auto-resolved from catalog if omitted.
+        tool_name: Alias for name.
+        tool: Alias for name.
     """
-    res = catalog_describe_tool(server, tool_name)
+    raw_tool = name or tool_name or tool
+    if not raw_tool:
+        return {
+            "error": "Missing 'name' parameter. Please specify the name of the tool to describe (e.g. name='read_query').",
+        }
+    target_tool = str(raw_tool).strip()
+    target_server = (server or "").lower().strip()
+
+    if not target_server:
+        candidates = find_servers_for_tool(target_tool)
+        if len(candidates) == 1:
+            target_server = candidates[0]
+        elif len(candidates) > 1:
+            return {
+                "error": f"Tool '{target_tool}' exists on multiple servers: {candidates}. Please specify 'server'.",
+                "candidate_servers": candidates,
+            }
+        else:
+            return {
+                "error": f"Tool '{target_tool}' not found on any registered server. Use search_tools to discover available tools."
+            }
+
+    res = catalog_describe_tool(target_server, target_tool)
     if not res:
         return {
-            "error": f"Tool '{tool_name}' not found on server '{server}'. Use search_tools to discover available tools."
+            "error": f"Tool '{target_tool}' not found on server '{target_server}'. Use search_tools to discover available tools."
         }
     return res
 
 
 @mcp.tool()
 def call_tool(
+    name: Optional[str] = None,
+    arguments: Optional[Union[Dict[str, Any], str]] = None,
     server: Optional[str] = None,
     tool_name: Optional[str] = None,
-    arguments: Optional[Dict[str, Any]] = None,
     tool: Optional[str] = None,
     ctx: Optional[Context] = None,
 ) -> Any:
@@ -305,23 +336,52 @@ def call_tool(
     - If 'server' is omitted, 'call_tool' automatically routes using the active server or tool catalog.
     - Contextual parameters ('connection', 'host', 'workspace', 'workbook') are auto-injected from session context.
     - Supports dot notation (e.g. 'db.read_query', 'excel.preview_sheet').
-    - Accepts either 'tool_name' or 'tool'.
+    - Accepts 'name' (primary) as well as legacy aliases ('tool_name', 'tool').
     - Sessions are isolated via transport-level session identity to prevent multi-agent crosstalk.
 
     Args:
-        server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
-        tool_name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info').
+        name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info').
         arguments: Dictionary of arguments matching the tool's parameter schema.
-        tool: Alias for tool_name.
+        server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
+        tool_name: Alias for name.
+        tool: Alias for name.
     """
-    # Accept 'tool' if tool_name is not explicitly passed
-    raw_tool = tool_name or tool
+    # Accept 'name' (primary), 'tool_name', or 'tool'
+    raw_tool = name or tool_name or tool
     target_tool = str(raw_tool or "").strip()
     target_server = (server or "").lower().strip()
 
     available_servers = discover_available_servers()
     sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
+
+    # Argument validation & JSON string handling
+    if isinstance(arguments, str):
+        try:
+            parsed_args = json.loads(arguments)
+            if isinstance(parsed_args, dict):
+                arguments = parsed_args
+            else:
+                return {
+                    "isError": True,
+                    "error": f"Invalid 'arguments' parameter: expected a JSON object/dictionary, got {type(parsed_args).__name__}. Example: {{\"key\": \"value\"}}",
+                }
+        except Exception as json_err:
+            return {
+                "isError": True,
+                "error": f"Invalid 'arguments' parameter: could not parse string as JSON object ({json_err}). Received: {arguments[:120]}",
+            }
+    elif arguments is not None and not isinstance(arguments, dict):
+        return {
+            "isError": True,
+            "error": f"Invalid 'arguments' parameter: expected a dictionary/object, got {type(arguments).__name__}.",
+        }
+
+    # Stacking fallback: check session stack for active tool if omitted
+    if not target_tool:
+        stacked_tool = session.get("tool") or session.get("active_tool")
+        if stacked_tool:
+            target_tool = str(stacked_tool).strip()
 
     # 1. Handle dot notation (e.g. 'db.read_query' or 'excel.preview_sheet')
     if "." in target_tool:
@@ -341,7 +401,7 @@ def call_tool(
     if not target_tool:
         return {
             "isError": True,
-            "error": "Missing 'tool_name' parameter. Please specify the name of the tool to execute.",
+            "error": "Missing 'name' parameter. Please specify the name of the tool to execute (e.g. name='read_query').",
         }
 
     # 3. If target_server is still missing, check active server context from session

@@ -403,7 +403,8 @@ def disconnect_host(host: Optional[str] = None) -> Dict[str, Any]:
 
 @mcp.tool()
 def ssh_exec(
-    command: str,
+    command: Optional[str] = None,
+    cmd: Optional[str] = None,
     host: Optional[str] = None,
     cwd: Optional[str] = None,
     timeout: int = 60,
@@ -414,16 +415,20 @@ def ssh_exec(
     Returns exit code, stdout, stderr, execution duration, and structured results.
 
     Args:
-        command: The shell command line string to run.
+        command: The shell command line string to run (or alias 'cmd').
+        cmd: Alias for command.
         host: Target SSH host (defaults to active host).
         cwd: Remote working directory to cd into before executing.
         timeout: Execution timeout in seconds (default: 60).
         env: Optional environment variables dictionary to export.
     """
+    actual_cmd = command or cmd
+    if not actual_cmd:
+        return {"error": True, "message": "Missing command. Please specify 'command' or 'cmd'."}
     try:
         host_info = resolve_host_info(host)
         client = get_cached_or_connect(host_info["name"])
-        res = _run_exec_channel(client, command, cwd=cwd, env=env, timeout=timeout)
+        res = _run_exec_channel(client, actual_cmd, cwd=cwd, env=env, timeout=timeout)
         res["host"] = host_info["name"]
         return res
     except Exception as e:
@@ -489,8 +494,11 @@ def ssh_exec_sudo(
 
 @mcp.tool()
 def ssh_exec_script(
-    script_content: str,
+    script_content: Optional[str] = None,
+    script: Optional[str] = None,
+    content: Optional[str] = None,
     interpreter: str = "bash",
+    shell: Optional[str] = None,
     host: Optional[str] = None,
     timeout: int = 120,
 ) -> Dict[str, Any]:
@@ -498,11 +506,18 @@ def ssh_exec_script(
     Upload and execute a multi-line script (bash, sh, python, node) on the remote server, returning execution results.
 
     Args:
-        script_content: Full multi-line script code.
-        interpreter: Interpreter to run script with ('bash', 'sh', 'python3', 'node', 'pwsh').
+        script_content: Full multi-line script code (or alias 'script' / 'content').
+        script: Alias for script_content.
+        content: Alias for script_content.
+        interpreter: Interpreter to run script with ('bash', 'sh', 'python3', 'node', 'pwsh') (or alias 'shell').
+        shell: Alias for interpreter.
         host: Target SSH host (defaults to active host).
         timeout: Execution timeout in seconds (default: 120).
     """
+    actual_script = script_content or script or content
+    if not actual_script:
+        return {"error": True, "message": "Missing script content. Please specify 'script' or 'script_content'."}
+    actual_interpreter = shell or interpreter or "bash"
     try:
         host_info = resolve_host_info(host)
         client = get_cached_or_connect(host_info["name"])
@@ -512,18 +527,18 @@ def ssh_exec_script(
         remote_tmp = f"/tmp/mcp_script_{int(time.time())}_{os.getpid()}.sh"
         try:
             with sftp.open(remote_tmp, "w") as f:
-                f.write(script_content)
+                f.write(actual_script)
             sftp.chmod(remote_tmp, 0o755)
         except Exception:
             # Fallback to local /tmp equivalent if /tmp doesn't exist
             remote_tmp = f"mcp_script_{int(time.time())}.sh"
             with sftp.open(remote_tmp, "w") as f:
-                f.write(script_content)
+                f.write(actual_script)
 
         sftp.close()
 
         # Execute
-        run_cmd = f"{interpreter} {shlex.quote(remote_tmp)}"
+        run_cmd = f"{actual_interpreter} {shlex.quote(remote_tmp)}"
         res = _run_exec_channel(client, run_cmd, timeout=timeout)
 
         # Cleanup

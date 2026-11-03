@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 import uuid
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 from urllib.parse import unquote, urlparse
@@ -121,6 +121,49 @@ def _parse_url(url: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _hydrate_conn_info(entry: Union[str, Dict[str, Any]], name: str, url: str) -> Dict[str, Any]:
+    """Hydrate structured connection dictionary with safety metadata (mode, env, description)."""
+    info = _parse_url(url)
+    info["name"] = name
+    info["url"] = url
+    if isinstance(entry, dict):
+        info["mode"] = entry.get("mode", "read_write").strip().lower()
+        info["env"] = entry.get("env", "dev").strip().lower()
+        info["description"] = str(entry.get("description", "")).strip()
+    else:
+        info["mode"] = "read_write"
+        info["env"] = "dev"
+        info["description"] = ""
+    return info
+
+
+def _log_statement_audit(
+    connection: str,
+    sql: str,
+    rows_affected: int,
+    dry_run: bool,
+    status: str,
+    duration_ms: float = 0.0,
+) -> None:
+    """Append non-SELECT SQL execution records to persistent ~/.mcp-win-stdio/db_audit.jsonl."""
+    try:
+        ensure_workspace_dirs()
+        audit_file = DB_CONNECTIONS_FILE.parent / "db_audit.jsonl"
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "connection": connection,
+            "sql": sql,
+            "rows_affected": rows_affected,
+            "dry_run": dry_run,
+            "status": status,
+            "duration_ms": round(duration_ms, 2),
+        }
+        with open(audit_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
+
+
 def _get_db_config_file() -> Path:
     config_file_env = os.environ.get("CONFIG_FILE")
     if config_file_env:
@@ -161,13 +204,13 @@ def _save_db_config_data(data: Dict[str, Any]) -> None:
         pass
 
 
-def _save_connection(name: str, url: str) -> None:
+def _save_connection(name: str, config_or_url: Union[str, Dict[str, Any]]) -> None:
     """Persist new or updated connection to db_connections.json."""
     data = _load_db_config_data()
     if "connections" not in data or not isinstance(data["connections"], dict):
         flat_conns = {k: v for k, v in data.items() if k not in ("default", "active_connection") and (_is_db_url(v) or isinstance(v, dict))}
         data = {"default": data.get("default", name), "connections": flat_conns}
-    data["connections"][name] = url
+    data["connections"][name] = config_or_url
     if not data.get("default"):
         data["default"] = name
     _save_db_config_data(data)
@@ -476,9 +519,7 @@ def _get_connection(
     if target_name and target_name in _RAW_CONFIG:
         entry = _RAW_CONFIG[target_name]
         url = entry if isinstance(entry, str) else entry.get("url", "")
-        info = _parse_url(url)
-        info["name"] = target_name
-        info["url"] = url
+        info = _hydrate_conn_info(entry, target_name, url)
         _CONNECTION_REGISTRY[target_name] = info
         return info
 
@@ -508,9 +549,7 @@ def _get_connection(
     if name in _RAW_CONFIG:
         entry = _RAW_CONFIG[name]
         url = entry if isinstance(entry, str) else entry.get("url", "")
-        info = _parse_url(url)
-        info["name"] = name
-        info["url"] = url
+        info = _hydrate_conn_info(entry, name, url)
         _CONNECTION_REGISTRY[name] = info
         return info
 
@@ -695,6 +734,51 @@ def _truncate_row(row: Any, max_chars: int = 500, mask_sensitive: bool = False) 
     return res
 
 
+def _disambiguate_columns(col_names: List[str]) -> Tuple[List[str], List[str]]:
+    """
+    Ensure every column name is unique by appending __2, __3, etc. to duplicate names.
+    Returns (unique_column_names, list_of_duplicated_originals).
+    """
+    counts: Dict[str, int] = {}
+    unique_cols: List[str] = []
+    duplicates: List[str] = []
+    for c in col_names:
+        c_str = str(c) if c is not None else "col"
+        counts[c_str] = counts.get(c_str, 0) + 1
+        if counts[c_str] == 1:
+            unique_cols.append(c_str)
+        else:
+            if c_str not in duplicates:
+                duplicates.append(c_str)
+            unique_cols.append(f"{c_str}__{counts[c_str]}")
+    return unique_cols, duplicates
+
+
+def _fetch_rows_safe(
+    cur: Any, limit: int, max_cell_chars: int = 2000
+) -> Tuple[List[Dict[str, Any]], bool, List[str], List[str]]:
+    """
+    Fetch up to limit + 1 rows from cursor using tuple extraction to guarantee
+    that duplicate column names (e.g. from SQL JOINs) are never collapsed or silently overwritten.
+    Returns (cleaned_rows, has_more, unique_columns, duplicate_columns).
+    """
+    col_names = [col[0] for col in cur.description] if cur.description else []
+    unique_cols, duplicates = _disambiguate_columns(col_names)
+    fetched = cur.fetchmany(limit + 1)
+    has_more = len(fetched) > limit
+    display_rows = fetched[:limit]
+
+    cleaned_rows = []
+    for r in display_rows:
+        if isinstance(r, dict):
+            row_dict = r
+        else:
+            row_dict = dict(zip(unique_cols, r))
+        cleaned_rows.append(_truncate_row(row_dict, max_cell_chars))
+
+    return cleaned_rows, has_more, unique_cols, duplicates
+
+
 # ==========================================
 # MCP TOOLS
 # ==========================================
@@ -710,9 +794,7 @@ def list_connections() -> Dict[str, Any]:
                 info: Dict[str, Any] = _CONNECTION_REGISTRY[k]
             else:
                 url = v if isinstance(v, str) else v.get("url", "")
-                info = _parse_url(url)
-                info["name"] = k
-                info["url"] = url
+                info = _hydrate_conn_info(v, k, url)
                 _CONNECTION_REGISTRY[k] = info
 
             conns.append(
@@ -722,6 +804,9 @@ def list_connections() -> Dict[str, Any]:
                     "host": info.get("host", ""),
                     "port": info.get("port", ""),
                     "database": info.get("database", ""),
+                    "mode": info.get("mode", "read_write"),
+                    "env": info.get("env", "dev"),
+                    "description": info.get("description", ""),
                     "isActive": k == _ACTIVE_CONNECTION,
                     "status": "connected",
                 }
@@ -1091,9 +1176,20 @@ def list_schemas(connection: Optional[str] = None, server: Optional[str] = None)
 
 @mcp.tool()
 def describe_table(
-    tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
+    tableName: Optional[str] = None,
+    table: Optional[str] = None,
+    table_name: Optional[str] = None,
+    schema: Optional[str] = None,
+    connection: Optional[str] = None,
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Deep inspection of a table: column types, defaults, nullability, PKs, FKs, indexes, and sizes."""
+    """
+    Deep inspection of a table: column types, defaults, nullability, PKs, inbound/outbound FKs, indexes, and sizes.
+    Accepts 'table', 'table_name', or 'tableName'.
+    """
+    target_table = tableName or table or table_name
+    if not target_table:
+        return {"error": True, "message": "Missing table parameter. Please specify 'table' or 'tableName'."}
     info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -1101,7 +1197,7 @@ def describe_table(
             conn = _get_pg_client(info)
             try:
                 with conn.cursor() as cur:
-                    resolved = _resolve_pg_table(cur, tableName, schema)
+                    resolved = _resolve_pg_table(cur, target_table, schema)
                     if resolved.get("notFound"):
                         return {
                             "error": True,
@@ -1156,7 +1252,82 @@ def describe_table(
                     )
                     stats = _fetch_one(cur) or {}
 
-                    return {
+                    # Inbound Foreign Keys (child tables referencing this table)
+                    inbound_fks = []
+                    try:
+                        table_reg = f'\"{s}\".\"{t}\"'
+                        cur.execute(
+                            """
+                            SELECT conrelid::regclass::text AS child_table,
+                                   conname AS constraint_name,
+                                   pg_get_constraintdef(oid) AS definition,
+                                   CASE confdeltype
+                                       WHEN 'c' THEN 'CASCADE'
+                                       WHEN 'n' THEN 'SET NULL'
+                                       WHEN 'r' THEN 'RESTRICT'
+                                       WHEN 'a' THEN 'NO ACTION'
+                                       ELSE confdeltype::text
+                                   END AS on_delete,
+                                   CASE confupdtype
+                                       WHEN 'c' THEN 'CASCADE'
+                                       WHEN 'n' THEN 'SET NULL'
+                                       WHEN 'r' THEN 'RESTRICT'
+                                       WHEN 'a' THEN 'NO ACTION'
+                                       ELSE confupdtype::text
+                                   END AS on_update
+                            FROM pg_constraint
+                            WHERE contype = 'f' AND confrelid = %s::regclass;
+                            """,
+                            (table_reg,),
+                        )
+                        inbound_fks = _fetch_all(cur)
+                    except Exception:
+                        pass
+
+                    # Potential unconstrained references (orphan risk check)
+                    unconstrained_candidates = []
+                    try:
+                        candidate_cols = [f"{t}_id"]
+                        if t.endswith("ies") and len(t) > 3:
+                            candidate_cols.append(f"{t[:-3]}y_id")
+                        elif t.endswith("es") and len(t) > 4:
+                            candidate_cols.append(f"{t[:-2]}_id")
+                        elif t.endswith("s") and len(t) > 3:
+                            candidate_cols.append(f"{t[:-1]}_id")
+                        candidate_cols = list(dict.fromkeys(candidate_cols))
+
+                        cur.execute(
+                            """
+                            SELECT table_name, column_name, data_type
+                            FROM information_schema.columns
+                            WHERE table_schema = %s
+                              AND table_name != %s
+                              AND column_name = ANY(%s)
+                            ORDER BY table_name;
+                            """,
+                            (s, t, candidate_cols),
+                        )
+                        cand_rows = _fetch_all(cur)
+                        known_children = {
+                            str(r.get("child_table", "")).split(".")[-1].strip('"')
+                            for r in inbound_fks
+                        }
+                        for r in cand_rows:
+                            tbl = r.get("table_name", "")
+                            if tbl not in known_children:
+                                unconstrained_candidates.append({
+                                    "table": tbl,
+                                    "column": r.get("column_name", ""),
+                                    "data_type": r.get("data_type", ""),
+                                    "warning": (
+                                        f"Column '{r.get('column_name')}' matches target entity ID pattern "
+                                        "but has NO foreign key constraint. Rows may become orphaned upon delete."
+                                    ),
+                                })
+                    except Exception:
+                        pass
+
+                    res_desc: Dict[str, Any] = {
                         "connection": info["name"],
                         "database": info["database"],
                         "table": t,
@@ -1167,21 +1338,25 @@ def describe_table(
                         "columns": cols,
                         "primaryKeys": pks,
                         "foreignKeys": out_fks,
+                        "referencedBy": inbound_fks,
                         "indexes": indexes,
                     }
+                    if unconstrained_candidates:
+                        res_desc["unconstrainedCandidateReferences"] = unconstrained_candidates
+                    return res_desc
             finally:
                 conn.close()
         else:
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SHOW FULL COLUMNS FROM `{tableName}`;")
+                    cur.execute(f"SHOW FULL COLUMNS FROM `{target_table}`;")
                     cols = _fetch_all(cur)
-                    cur.execute(f"SHOW INDEX FROM `{tableName}`;")
+                    cur.execute(f"SHOW INDEX FROM `{target_table}`;")
                     indexes = _fetch_all(cur)
                     cur.execute(
                         "SELECT table_rows AS estimated_rows, ROUND((data_length + index_length) / 1024, 2) AS total_size_kb FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s",
-                        (tableName,),
+                        (target_table,),
                     )
                     t_info = _fetch_one(cur) or {}
                     return {
@@ -1197,24 +1372,34 @@ def describe_table(
                 conn.close()
     except Exception as e:
         engine = info.get("engine", "unknown") if (info is not None) else "unknown"
-        return _format_db_error(e, engine, tableName)
+        return _format_db_error(e, engine, target_table)
 
 
 @mcp.tool()
 def get_table_ddl(
-    tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
+    tableName: Optional[str] = None,
+    table: Optional[str] = None,
+    table_name: Optional[str] = None,
+    schema: Optional[str] = None,
+    connection: Optional[str] = None,
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Reconstruct and return the complete, ground-truth CREATE TABLE DDL statement for a table.
     Includes all column types, defaults, nullability, primary keys, foreign keys (with ON DELETE/ON UPDATE actions),
-    unique/check constraints, and separate table indexes.
+    unique/check constraints, and separate table indexes. Accepts 'table', 'table_name', or 'tableName'.
 
     Args:
-        tableName: Name of the table.
+        tableName: Name of the table (or alias 'table' / 'table_name').
+        table: Alias for tableName.
+        table_name: Alias for tableName.
         schema: Optional schema name (defaults to 'public' or auto-resolves in PostgreSQL).
         connection: Optional connection or server name (defaults to active connection).
         server: Optional server or connection alias.
     """
+    target_table = tableName or table or table_name
+    if not target_table:
+        return {"error": True, "message": "Missing table parameter. Please specify 'table' or 'tableName'."}
     info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -1222,7 +1407,7 @@ def get_table_ddl(
             conn = _get_pg_client(info)
             try:
                 with conn.cursor() as cur:
-                    resolved = _resolve_pg_table(cur, tableName, schema)
+                    resolved = _resolve_pg_table(cur, target_table, schema)
                     if resolved.get("notFound"):
                         return {
                             "error": True,
@@ -1354,7 +1539,7 @@ def get_table_ddl(
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SHOW CREATE TABLE `{tableName}`;")
+                    cur.execute(f"SHOW CREATE TABLE `{target_table}`;")
                     row = _fetch_one(cur)
                     ddl = row.get("Create Table") or row.get("CREATE TABLE") or str(row)
                     return {
@@ -1368,7 +1553,7 @@ def get_table_ddl(
                 conn.close()
     except Exception as e:
         engine = info.get("engine", "unknown") if (info is not None) else "unknown"
-        return _format_db_error(e, engine, tableName)
+        return _format_db_error(e, engine, target_table)
 
 
 @mcp.tool()
@@ -1623,7 +1808,9 @@ def compact_schema_overview(
 
 @mcp.tool()
 def get_table_sample(
-    tableName: str,
+    tableName: Optional[str] = None,
+    table: Optional[str] = None,
+    table_name: Optional[str] = None,
     limit: int = 5,
     schema: Optional[str] = None,
     mask_sensitive: bool = True,
@@ -1633,15 +1820,21 @@ def get_table_sample(
     """
     Fetch sample rows from a table along with column metadata and row count estimate.
     Automatically masks PII and credentials (passwords, tokens, keys) unless mask_sensitive=False.
+    Accepts 'table', 'table_name', or 'tableName'.
 
     Args:
-        tableName: Name of the table to sample.
+        tableName: Name of the table to sample (or alias 'table' / 'table_name').
+        table: Alias for tableName.
+        table_name: Alias for tableName.
         limit: Number of sample rows to retrieve (default 5, max 100).
         schema: Optional schema name (PostgreSQL).
         mask_sensitive: Whether to redact sensitive columns like passwords, secrets, and tokens (default True).
         connection: Optional target database connection or server alias.
         server: Optional server or connection alias.
     """
+    target_table = tableName or table or table_name
+    if not target_table:
+        return {"error": True, "message": "Missing table parameter. Please specify 'table' or 'tableName'."}
     info: Optional[Dict[str, Any]] = None
     lim = min(max(limit, 1), 100)
     try:
@@ -1650,7 +1843,7 @@ def get_table_sample(
             conn = _get_pg_client(info)
             try:
                 with conn.cursor() as cur:
-                    resolved = _resolve_pg_table(cur, tableName, schema)
+                    resolved = _resolve_pg_table(cur, target_table, schema)
                     s = resolved["schema"]
                     t = resolved["table"]
                     cur.execute(f'SELECT * FROM "{s}"."{t}" LIMIT %s;', (lim,))
@@ -1671,7 +1864,7 @@ def get_table_sample(
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT * FROM `{tableName}` LIMIT %s;", (lim,))
+                    cur.execute(f"SELECT * FROM `{target_table}` LIMIT %s;", (lim,))
                     rows = _fetch_all(cur)
                     cleaned_rows = [_truncate_row(r, mask_sensitive=mask_sensitive) for r in rows]
                     return {
@@ -1686,21 +1879,29 @@ def get_table_sample(
                 conn.close()
     except Exception as e:
         engine = info.get("engine", "unknown") if (info is not None) else "unknown"
-        return _format_db_error(e, engine, tableName)
+        return _format_db_error(e, engine, target_table)
 
 
 @mcp.tool()
 def search_schema(
-    searchTerm: str,
+    search_term: Optional[str] = None,
+    searchTerm: Optional[str] = None,
+    query: Optional[str] = None,
     schema: Optional[str] = "all",
     max_results: int = 50,
     connection: Optional[str] = None,
     server: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Search across tables and column names for a keyword with safety limits to protect context window."""
+    """
+    Search across tables and column names for a keyword with safety limits to protect context window.
+    Accepts both snake_case ('search_term') and camelCase ('searchTerm'), or 'query'.
+    """
+    term = search_term or searchTerm or query
+    if not term:
+        return {"error": True, "message": "Missing search term. Please specify 'search_term' or 'searchTerm'."}
     info: Optional[Dict[str, Any]] = None
     safe_max = min(max(1, max_results), 100)
-    pat = f"%{searchTerm}%"
+    pat = f"%{term}%"
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
@@ -1814,25 +2015,29 @@ def read_query(
 
         try:
             conn.set_session(readonly=True, autocommit=False)
-            with conn.cursor() as cur:
+            import psycopg2.extensions as ext
+            with conn.cursor(cursor_factory=ext.cursor) as cur:
                 # Issue #4 fix: NEVER pass empty tuple () to avoid psycopg2 parsing % in LIKE '%...' as %s placeholder
                 if params:
                     cur.execute(sql, tuple(params))
                 else:
                     cur.execute(sql)
 
-                fetched = cur.fetchmany(safe_limit + 1)
-                has_more = len(fetched) > safe_limit
-                display_rows = fetched[:safe_limit]
-                cleaned_rows = [_truncate_row(r, max_cell_chars) for r in display_rows]
+                cleaned_rows, has_more, unique_cols, duplicates = _fetch_rows_safe(cur, safe_limit, max_cell_chars)
 
                 result: Dict[str, Any] = {
                     "connection": info["name"],
                     "database": info["database"],
                     "returned_rows": len(cleaned_rows),
                     "has_more": has_more,
+                    "columns": unique_cols,
                     "rows": cleaned_rows,
                 }
+                if duplicates:
+                    result["warning"] = (
+                        f"Duplicate column names detected in query result: {duplicates}. "
+                        "Renamed duplicates with numeric suffix (e.g. '__2') to prevent silent data loss."
+                    )
                 if has_more:
                     result["notice"] = (
                         f"... [TRUNCATED: Showing first {safe_limit} rows. Additional rows omitted to protect "
@@ -1854,24 +2059,28 @@ def read_query(
             return _format_db_error(e, "mysql", sql)
 
         try:
-            with conn.cursor() as cur:
+            import pymysql.cursors
+            with conn.cursor(pymysql.cursors.Cursor) as cur:
                 if params:
                     cur.execute(sql, tuple(params))
                 else:
                     cur.execute(sql)
 
-                fetched = cur.fetchmany(safe_limit + 1)
-                has_more = len(fetched) > safe_limit
-                display_rows = fetched[:safe_limit]
-                cleaned_rows = [_truncate_row(r, max_cell_chars) for r in display_rows]
+                cleaned_rows, has_more, unique_cols, duplicates = _fetch_rows_safe(cur, safe_limit, max_cell_chars)
 
                 result: Dict[str, Any] = {
                     "connection": info["name"],
                     "database": info["database"],
                     "returned_rows": len(cleaned_rows),
                     "has_more": has_more,
+                    "columns": unique_cols,
                     "rows": cleaned_rows,
                 }
+                if duplicates:
+                    result["warning"] = (
+                        f"Duplicate column names detected in query result: {duplicates}. "
+                        "Renamed duplicates with numeric suffix (e.g. '__2') to prevent silent data loss."
+                    )
                 if has_more:
                     result["notice"] = (
                         f"... [TRUNCATED: Showing first {safe_limit} rows. Additional rows omitted to protect "
@@ -1889,18 +2098,24 @@ def execute_query(
     sql: str,
     params: Optional[List[Any]] = None,
     dry_run: bool = False,
+    confirm: bool = False,
     connection: Optional[str] = None,
     server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Execute INSERT, UPDATE, DELETE, or DDL statement(s).
     Supports transactional multi-statement batch execution with statement-by-statement progress,
-    exact line/statement failure diagnostics, and dry_run rollback support.
+    exact line/statement failure diagnostics, dry_run rollback support, and statement audit logging.
+
+    Safety Guards:
+    - Connections configured as mode='read_only' automatically block all write statements.
+    - Connections flagged with env='prod' require explicit confirm=True for non-dry-run writes.
 
     Args:
         sql: SQL statement or semicolon-separated batch (e.g. CREATE TABLE ...; ALTER TABLE ...;).
         params: Optional parameter list for single statements (e.g. [123, "active"]).
         dry_run: If True, executes inside a transaction and rolls back (default False).
+        confirm: Must be True to execute live non-dry-run writes on 'prod' environment connections.
         connection: Connection name to target (defaults to active connection).
         server: Optional server or connection alias.
     """
@@ -1908,6 +2123,35 @@ def execute_query(
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
         return _format_db_error(e, "unknown", sql)
+
+    conn_name = info.get("name", "unknown")
+    conn_mode = info.get("mode", "read_write")
+    conn_env = info.get("env", "dev")
+
+    # 1. Read-only guard
+    if conn_mode == "read_only":
+        return {
+            "error": True,
+            "isError": True,
+            "message": f"Connection '{conn_name}' is configured as read-only (mode='read_only'). Writes are blocked. Update mode to 'read_write' using edit_connection to allow writes.",
+            "connection": conn_name,
+            "mode": conn_mode,
+        }
+
+    # 2. Production safety guard
+    if not dry_run and not confirm and conn_env in ("prod", "production"):
+        return {
+            "error": True,
+            "isError": True,
+            "message": (
+                f"Production safety guard: Connection '{conn_name}' is designated as environment='{conn_env}'. "
+                "Non-dry-run writes require explicit 'confirm=True' to execute. "
+                "Alternatively, run with 'dry_run=True' to simulate and inspect affected rows first."
+            ),
+            "connection": conn_name,
+            "env": conn_env,
+            "requires_confirm": True,
+        }
 
     statements = _split_sql_statements(sql)
     if not statements:
@@ -1934,12 +2178,15 @@ def execute_query(
                     rowcount = cur.rowcount
                     status = cur.statusmessage or "SUCCESS"
                     returned_rows = None
+                    cols_ret = None
+                    dups_ret = None
                     if cur.description:
                         try:
-                            raw_fetched = cur.fetchmany(100)
-                            returned_rows = [_truncate_row(r, 2000) for r in raw_fetched]
+                            returned_rows, _, cols_ret, dups_ret = _fetch_rows_safe(cur, 100, 2000)
                         except Exception:
                             pass
+
+                    _log_statement_audit(info["name"], single_sql, rowcount, dry_run, status)
 
                     if dry_run:
                         conn.rollback()
@@ -1952,12 +2199,20 @@ def execute_query(
                         }
                         if returned_rows is not None:
                             res_obj["returned_rows"] = returned_rows
+                        if cols_ret:
+                            res_obj["columns"] = cols_ret
+                        if dups_ret:
+                            res_obj["warning"] = f"Duplicate column names in RETURNING clause: {dups_ret}."
                         return res_obj
                     else:
                         conn.commit()
                         res_obj = {"connection": info["name"], "status": status, "rowCount": rowcount}
                         if returned_rows is not None:
                             res_obj["returned_rows"] = returned_rows
+                        if cols_ret:
+                            res_obj["columns"] = cols_ret
+                        if dups_ret:
+                            res_obj["warning"] = f"Duplicate column names in RETURNING clause: {dups_ret}."
                         return res_obj
             except Exception as e:
                 try:
@@ -1982,12 +2237,14 @@ def execute_query(
                         cur.execute(single_sql)
 
                     rowcount = cur.rowcount
+                    status = "SUCCESS (ROLLED BACK)" if dry_run else "SUCCESS"
+                    _log_statement_audit(info["name"], single_sql, rowcount, dry_run, status)
                     if dry_run:
                         cur.execute("ROLLBACK;")
                         return {
                             "connection": info["name"],
                             "dryRun": True,
-                            "status": "SUCCESS (ROLLED BACK)",
+                            "status": status,
                             "rowCount": rowcount,
                         }
                     else:
@@ -2038,6 +2295,13 @@ def execute_query(
                         err_res["failed_statement"] = stmt
                         return err_res
 
+                _log_statement_audit(
+                    info["name"],
+                    f"BATCH: {len(statements)} statements",
+                    total_rows_affected,
+                    dry_run,
+                    "BATCH SUCCESS (ROLLED BACK)" if dry_run else "BATCH SUCCESS",
+                )
                 if dry_run:
                     conn.rollback()
                     return {
@@ -2244,18 +2508,49 @@ def add_connection(
     name: str,
     url: str,
     type: Optional[str] = None,
-    setActive: bool = True,
+    setActive: Optional[bool] = None,
+    set_active: Optional[bool] = None,
     test_connect: bool = True,
+    mode: str = "read_write",
+    env: str = "dev",
+    description: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Dynamically add a new PostgreSQL or MySQL connection at runtime."""
+    """
+    Dynamically add a new PostgreSQL or MySQL connection at runtime.
+
+    Args:
+        name: Unique alias for this connection (e.g. 'aws_showreel', 'local_dev').
+        url: Database URL (postgresql://user:pass@host:5432/db).
+        type: Optional engine override ('postgres' or 'mysql').
+        setActive: Set as default active connection.
+        test_connect: Verify connectivity upon registration.
+        mode: Access mode: 'read_only' (blocks writes) or 'read_write' (default).
+        env: Target environment: 'prod', 'staging', or 'dev' (default). 'prod' requires confirm=True on writes.
+        description: Human-readable note or host mapping (e.g. 'Postgres on showreel-prod').
+    """
     info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
     try:
-        info = _parse_url(url)
+        clean_mode = (mode or "read_write").strip().lower()
+        if clean_mode not in ("read_only", "read_write"):
+            return {"error": True, "message": f"Invalid mode '{mode}'. Must be 'read_only' or 'read_write'."}
+        clean_env = (env or "dev").strip().lower()
+        clean_desc = (description or "").strip()
+
+        entry_data: Union[str, Dict[str, Any]]
+        if clean_mode == "read_write" and clean_env == "dev" and not clean_desc:
+            entry_data = url
+        else:
+            entry_data = {
+                "url": url,
+                "mode": clean_mode,
+                "env": clean_env,
+                "description": clean_desc,
+            }
+
+        info = _hydrate_conn_info(entry_data, name, url)
         if type:
             info["engine"] = type.lower()
-        info["name"] = name
-        info["url"] = url
 
         warning = None
         if test_connect:
@@ -2279,15 +2574,19 @@ def add_connection(
                 warning = f"Could not connect immediately ({e}). Connection configuration was saved."
 
         _CONNECTION_REGISTRY[name] = info
-        _RAW_CONFIG[name] = url
-        _save_connection(name, url)
-        if setActive:
+        _RAW_CONFIG[name] = entry_data
+        _save_connection(name, entry_data)
+        is_active = True if (setActive is None and set_active is None) else bool(setActive if setActive is not None else set_active)
+        if is_active:
             _ACTIVE_CONNECTION = name
             _save_active_connection(_ACTIVE_CONNECTION)
 
         res: Dict[str, Any] = {
             "success": True,
             "message": f"Connection '{name}' ({info['engine']}) registered successfully.",
+            "mode": clean_mode,
+            "env": clean_env,
+            "description": clean_desc,
             "isActive": _ACTIVE_CONNECTION == name,
         }
         if warning:
@@ -2304,7 +2603,11 @@ def edit_connection(
     new_name: Optional[str] = None,
     type: Optional[str] = None,
     setActive: Optional[bool] = None,
+    set_active: Optional[bool] = None,
     test_connect: bool = True,
+    mode: Optional[str] = None,
+    env: Optional[str] = None,
+    description: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Dynamically update an existing database connection's URL, credentials, or alias name at runtime.
@@ -2386,11 +2689,35 @@ def edit_connection(
             data["connections"].pop(matched_key, None)
         _save_db_config_data(data)
 
-    _RAW_CONFIG[target_name] = target_url
-    _CONNECTION_REGISTRY[target_name] = info
-    _save_connection(target_name, target_url)
+    curr_mode = current_val.get("mode", "read_write") if isinstance(current_val, dict) else "read_write"
+    curr_env = current_val.get("env", "dev") if isinstance(current_val, dict) else "dev"
+    curr_desc = current_val.get("description", "") if isinstance(current_val, dict) else ""
 
-    if setActive or (setActive is None and _ACTIVE_CONNECTION == matched_key):
+    target_mode = mode.strip().lower() if mode else curr_mode
+    target_env = env.strip().lower() if env else curr_env
+    target_desc = description.strip() if description is not None else curr_desc
+
+    entry_data: Union[str, Dict[str, Any]]
+    if target_mode == "read_write" and target_env == "dev" and not target_desc:
+        entry_data = target_url
+    else:
+        entry_data = {
+            "url": target_url,
+            "mode": target_mode,
+            "env": target_env,
+            "description": target_desc,
+        }
+
+    info["mode"] = target_mode
+    info["env"] = target_env
+    info["description"] = target_desc
+
+    _RAW_CONFIG[target_name] = entry_data
+    _CONNECTION_REGISTRY[target_name] = info
+    _save_connection(target_name, entry_data)
+
+    effective_set_active = setActive if setActive is not None else set_active
+    if effective_set_active or (effective_set_active is None and _ACTIVE_CONNECTION == matched_key):
         _ACTIVE_CONNECTION = target_name
         _save_active_connection(target_name)
 
@@ -2479,9 +2806,15 @@ def create_database(
 
 @mcp.tool()
 def drop_database(
-    database: str, confirmName: str, force: bool = False, server: Optional[str] = None, connection: Optional[str] = None
+    database: str,
+    confirm_name: Optional[str] = None,
+    confirmName: Optional[str] = None,
+    confirm: Optional[str] = None,
+    force: bool = False,
+    server: Optional[str] = None,
+    connection: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Safely drop a database. Requires exact 'confirmName' matching the database name. Supports 'force' to kill active connections."""
+    """Safely drop a database. Requires exact 'confirm_name' matching the database name. Supports 'force' to kill active connections."""
     info: Optional[Dict[str, Any]] = None
     global _ACTIVE_CONNECTION
     protected = {
@@ -2497,10 +2830,11 @@ def drop_database(
     if database.lower() in protected:
         return {"error": True, "message": f"Forbidden: Cannot drop protected system database '{database}'."}
 
-    if confirmName != database:
+    effective_confirm = confirm_name or confirmName or confirm
+    if effective_confirm != database:
         return {
             "error": True,
-            "message": f"Safety Confirmation Failed: 'confirmName' ({confirmName}) does not match 'database' ({database}). You must pass confirmName='{database}' to explicitly confirm deletion.",
+            "message": f"Safety Confirmation Failed: 'confirm_name' ({effective_confirm}) does not match 'database' ({database}). You must pass confirm_name='{database}' to explicitly confirm deletion.",
         }
 
     try:
@@ -2556,17 +2890,28 @@ def drop_database(
 
 @mcp.tool()
 def clone_database(
-    sourceDatabase: str, targetDatabase: str, server: Optional[str] = None, connection: Optional[str] = None
+    sourceDatabase: Optional[str] = None,
+    targetDatabase: Optional[str] = None,
+    source_database: Optional[str] = None,
+    target_database: Optional[str] = None,
+    source: Optional[str] = None,
+    target: Optional[str] = None,
+    server: Optional[str] = None,
+    connection: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Instantly clone an entire database (schema, tables, indexes, data). Uses native template cloning in PostgreSQL."""
+    src = source_database or sourceDatabase or source
+    tgt = target_database or targetDatabase or target
+    if not src or not tgt:
+        return {"error": True, "message": "Both source and target database names must be provided (e.g. source_database='src', target_database='tgt')."}
     info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
         if info["engine"] == "postgres":
             admin_conn = _get_pg_client(info, dbname="postgres")
             admin_conn.autocommit = True
-            src_esc = sourceDatabase.replace('"', '""')
-            tgt_esc = targetDatabase.replace('"', '""')
+            src_esc = src.replace('"', '""')
+            tgt_esc = tgt.replace('"', '""')
             try:
                 with admin_conn.cursor() as cur:
                     try:
@@ -2575,7 +2920,7 @@ def clone_database(
                         pass
                     cur.execute(
                         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s AND pid <> pg_backend_pid();",
-                        (sourceDatabase,),
+                        (src,),
                     )
                     cur.execute(f'CREATE DATABASE "{tgt_esc}" WITH TEMPLATE "{src_esc}";')
             finally:
@@ -2587,13 +2932,13 @@ def clone_database(
                 admin_conn.close()
 
             u = urlparse(info["url"])
-            new_url = f"{u.scheme}://{u.netloc}/{targetDatabase}"
-            _RAW_CONFIG[targetDatabase] = new_url
+            new_url = f"{u.scheme}://{u.netloc}/{tgt}"
+            _RAW_CONFIG[tgt] = new_url
             return {
                 "success": True,
-                "message": f"Database '{sourceDatabase}' cloned to '{targetDatabase}' successfully via native template cloning.",
-                "source": sourceDatabase,
-                "target": targetDatabase,
+                "message": f"Database '{src}' cloned to '{tgt}' successfully via native template cloning.",
+                "source": src,
+                "target": tgt,
             }
         else:
             conn = _get_mysql_client(info)
@@ -2727,12 +3072,19 @@ def list_active_queries(
 @mcp.tool()
 def dump_database(
     database: Optional[str] = None,
+    output_path: Optional[str] = None,
     outputPath: Optional[str] = None,
-    schemaOnly: bool = False,
+    schema_only: Optional[bool] = None,
+    schemaOnly: Optional[bool] = None,
     server: Optional[str] = None,
     connection: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Export an SQL dump snapshot of the database using native pg_dump or mysqldump."""
+    """
+    Export an SQL dump snapshot of the database using native pg_dump or mysqldump.
+    Accepts both snake_case ('output_path', 'schema_only') and camelCase ('outputPath', 'schemaOnly').
+    """
+    effective_out = output_path or outputPath
+    effective_schema_only = bool(schema_only if schema_only is not None else (schemaOnly or False))
     info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2743,7 +3095,7 @@ def dump_database(
 
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         out_file = (
-            Path(outputPath) if outputPath else backup_dir / f"{target_db}_{'schema_' if schemaOnly else ''}{ts}.sql"
+            Path(effective_out) if effective_out else backup_dir / f"{target_db}_{'schema_' if effective_schema_only else ''}{ts}.sql"
         )
 
         if info["engine"] == "postgres":
@@ -2815,13 +3167,24 @@ def dump_database(
 
 @mcp.tool()
 def restore_database(
-    database: str, dumpFilePath: str, server: Optional[str] = None, connection: Optional[str] = None
+    database: str,
+    dump_file_path: Optional[str] = None,
+    dumpFilePath: Optional[str] = None,
+    file_path: Optional[str] = None,
+    server: Optional[str] = None,
+    connection: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Restore a database from a .sql dump file using native psql or mysql."""
+    """
+    Restore a database from a .sql dump file using native psql or mysql.
+    Accepts both snake_case ('dump_file_path', 'file_path') and camelCase ('dumpFilePath').
+    """
+    effective_dump = dump_file_path or dumpFilePath or file_path
+    if not effective_dump:
+        return {"error": True, "message": "Missing dump file path. Please specify 'dump_file_path' or 'dumpFilePath'."}
     info: Optional[Dict[str, Any]] = None
-    fpath = Path(dumpFilePath)
+    fpath = Path(effective_dump)
     if not fpath.exists():
-        return {"error": True, "message": f"Dump file not found: {dumpFilePath}"}
+        return {"error": True, "message": f"Dump file not found: {effective_dump}"}
 
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2849,7 +3212,7 @@ def restore_database(
 
             return {
                 "success": True,
-                "message": f"PostgreSQL database '{database}' successfully restored from '{dumpFilePath}'.",
+                "message": f"PostgreSQL database '{database}' successfully restored from '{effective_dump}'.",
             }
         else:
             cmd = [
@@ -2873,8 +3236,8 @@ def restore_database(
 
             return {
                 "success": True,
-                "message": f"MySQL database '{database}' successfully restored from '{dumpFilePath}'.",
-                "dumpFilePath": str(fpath),
+                "message": f"MySQL database '{database}' successfully restored from '{effective_dump}'.",
+                "dumpFilePath": str(fpath), "dump_file_path": str(fpath),
             }
     except Exception as e:
         engine = info.get("engine", "unknown") if (info is not None) else "unknown"
@@ -2888,20 +3251,30 @@ def restore_database(
 
 @mcp.tool()
 def analyze_table_indexes(
-    tableName: str, schema: Optional[str] = None, connection: Optional[str] = None, server: Optional[str] = None
+    tableName: Optional[str] = None,
+    table: Optional[str] = None,
+    table_name: Optional[str] = None,
+    schema: Optional[str] = None,
+    connection: Optional[str] = None,
+    server: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Perform deep index analysis on a database table.
     Identifies defined indexes, primary keys, unindexed foreign keys
     (unindexed FKs cause full table scans during joins and cascaded deletes),
-    and unused indexes.
+    and unused indexes. Accepts 'table', 'table_name', or 'tableName'.
 
     Args:
-        tableName: Name of the table.
+        tableName: Name of the table (or alias 'table' / 'table_name').
+        table: Alias for tableName.
+        table_name: Alias for tableName.
         schema: Target schema (Postgres). If None, auto-resolved.
         connection: Connection name to query.
         server: Optional server or connection alias.
     """
+    target_table = tableName or table or table_name
+    if not target_table:
+        return {"error": True, "message": "Missing table parameter. Please specify 'table' or 'tableName'."}
     info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))
@@ -2909,7 +3282,7 @@ def analyze_table_indexes(
             conn = _get_pg_client(info)
             try:
                 with conn.cursor() as cur:
-                    resolved = _resolve_pg_table(cur, tableName, schema)
+                    resolved = _resolve_pg_table(cur, target_table, schema)
                     s = resolved["schema"]
                     t = resolved["table"]
 
@@ -2992,7 +3365,7 @@ def analyze_table_indexes(
             conn = _get_mysql_client(info)
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SHOW INDEX FROM `{tableName}`;")
+                    cur.execute(f"SHOW INDEX FROM `{target_table}`;")
                     raw_indexes = _fetch_all(cur)
 
                     cur.execute(
@@ -3001,7 +3374,7 @@ def analyze_table_indexes(
                     FROM information_schema.KEY_COLUMN_USAGE
                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND REFERENCED_TABLE_NAME IS NOT NULL
                     """,
-                        (tableName,),
+                        (target_table,),
                     )
                     fks = _fetch_all(cur)
 
@@ -3021,7 +3394,7 @@ def analyze_table_indexes(
                                     "constraint": fk.get("CONSTRAINT_NAME") or fk.get("constraint_name"),
                                     "referenced_table": fk.get("REFERENCED_TABLE_NAME")
                                     or fk.get("referenced_table_name"),
-                                    "recommended_sql": f"CREATE INDEX `idx_{tableName}_{col}` ON `{tableName}` (`{col}`);",
+                                    "recommended_sql": f"CREATE INDEX `idx_{target_table}_{col}` ON `{target_table}` (`{col}`);",
                                 }
                             )
 
