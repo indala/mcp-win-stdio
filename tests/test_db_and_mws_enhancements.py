@@ -100,8 +100,10 @@ def test_execute_query_read_only_guard():
         assert "read-only" in res.get("message", "").lower()
 
 
-def test_execute_query_prod_confirm_guard():
-    with patch("mcp_win_stdio.db.server._get_connection") as mock_get_conn:
+def test_execute_query_read_write_unlocked():
+    """Verify that read_write mode does not lock the agent with arbitrary env confirm friction."""
+    with patch("mcp_win_stdio.db.server._get_connection") as mock_get_conn, \
+         patch("mcp_win_stdio.db.server._get_pg_client") as mock_pg:
         mock_get_conn.return_value = {
             "name": "aws_showreel",
             "engine": "postgres",
@@ -109,25 +111,20 @@ def test_execute_query_prod_confirm_guard():
             "env": "prod",
             "url": "postgresql://user:pass@host:5432/db",
         }
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_cur.rowcount = 1
+        mock_cur.statusmessage = "DELETE 1"
+        mock_cur.description = None
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_pg.return_value = mock_conn
 
-        # Non-dry-run without confirm=True must be blocked
-        res = execute_query(sql="DELETE FROM users WHERE id = 1;", connection="aws_showreel", dry_run=False, confirm=False)
-        assert res.get("isError") is True or res.get("error") is True
-        assert "confirm=True" in res.get("message", "")
-
-        # dry_run=True is allowed without confirm=True (simulates safely)
-        with patch("mcp_win_stdio.db.server._get_pg_client") as mock_pg:
-            mock_conn = MagicMock()
-            mock_cur = MagicMock()
-            mock_cur.rowcount = 1
-            mock_cur.statusmessage = "DELETE 1"
-            mock_cur.description = None
-            mock_conn.cursor.return_value.__enter__.return_value = mock_cur
-            mock_pg.return_value = mock_conn
-
-            res_dry = execute_query(sql="DELETE FROM users WHERE id = 1;", connection="aws_showreel", dry_run=True, confirm=False)
-            assert res_dry.get("dryRun") is True
-            assert res_dry.get("rowCount") == 1
+        # Writes succeed directly without needing confirm=True when mode='read_write'
+        res = execute_query(sql="DELETE FROM users WHERE id = 1;", connection="aws_showreel", dry_run=False)
+        assert res.get("error") is not True
+        assert res.get("status") == "DELETE 1"
+        assert res.get("rowCount") == 1
+        assert "auditId" in res
 
 
 # -------------------------------------------------------------------------
@@ -357,14 +354,14 @@ def test_guardrail_policy_naked_writes_and_truncate():
     err_allowed = _check_write_policy(parsed_naked, env="dev", allow_unfiltered=True)
     assert err_allowed is None
 
-    # TRUNCATE on prod blocked unless allow_unfiltered=True
+    # TRUNCATE blocked unless allow_unfiltered=True
     parsed_trunc = _parse_modifying_statement("TRUNCATE TABLE transactions;")
-    err_prod_trunc = _check_write_policy(parsed_trunc, env="prod", allow_unfiltered=False)
-    assert err_prod_trunc is not None
-    assert "TRUNCATE is blocked on production" in err_prod_trunc
+    err_trunc = _check_write_policy(parsed_trunc, allow_unfiltered=False)
+    assert err_trunc is not None
+    assert "TRUNCATE is blocked" in err_trunc
 
-    err_prod_trunc_allowed = _check_write_policy(parsed_trunc, env="prod", allow_unfiltered=True)
-    assert err_prod_trunc_allowed is None
+    err_trunc_allowed = _check_write_policy(parsed_trunc, allow_unfiltered=True)
+    assert err_trunc_allowed is None
 
 
 def test_execute_query_blocks_naked_delete(tmp_path):

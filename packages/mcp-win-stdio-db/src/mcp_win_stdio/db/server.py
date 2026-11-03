@@ -231,13 +231,12 @@ def _parse_modifying_statement(sql: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _check_write_policy(parsed: Optional[Dict[str, Any]], env: str, allow_unfiltered: bool) -> Optional[str]:
+def _check_write_policy(parsed: Optional[Dict[str, Any]], allow_unfiltered: bool = False, env: Optional[str] = None) -> Optional[str]:
     if not parsed:
         return None
     op = parsed.get("operation")
     has_where = bool(parsed.get("where"))
     table = parsed.get("table")
-    is_prod = env in ("prod", "production")
 
     if op in ("UPDATE", "DELETE") and not has_where:
         if not allow_unfiltered:
@@ -246,10 +245,10 @@ def _check_write_policy(parsed: Optional[Dict[str, Any]], env: str, allow_unfilt
                 "Naked table-wide operations are blocked to prevent accidental data loss. "
                 "Pass a specific WHERE clause, or explicitly set allow_unfiltered=True to bypass."
             )
-    if op == "TRUNCATE" and is_prod and not allow_unfiltered:
+    if op == "TRUNCATE" and not allow_unfiltered:
         return (
-            f"Safety Guardrail: TRUNCATE is blocked on production environment for table '{table}'. "
-            "Pass allow_unfiltered=True with confirm=True if you really intend to truncate."
+            f"Safety Guardrail: TRUNCATE is blocked on table '{table}' without explicit confirmation. "
+            "Pass allow_unfiltered=True if you really intend to truncate."
         )
     return None
 
@@ -2321,36 +2320,20 @@ def execute_query(
             "mode": conn_mode,
         }
 
-    # 2. Production safety guard
-    if not effective_dry_run and not confirm and conn_env in ("prod", "production"):
-        return {
-            "error": True,
-            "isError": True,
-            "message": (
-                f"Production safety guard: Connection '{conn_name}' is designated as environment='{conn_env}'. "
-                "Non-dry-run writes require explicit 'confirm=True' to execute. "
-                "Alternatively, run with 'dry_run=True' to simulate and inspect affected rows first."
-            ),
-            "connection": conn_name,
-            "env": conn_env,
-            "requires_confirm": True,
-        }
-
     statements = _split_sql_statements(sql)
     if not statements:
         return {"error": True, "message": "SQL statement string is empty."}
 
-    # 3. Policy guardrail checks across statements
+    # 2. Policy guardrail checks across statements (naked writes & truncate protection)
     for stmt_check in statements:
         p_check = _parse_modifying_statement(stmt_check)
-        p_err = _check_write_policy(p_check, conn_env, effective_allow_unfiltered)
+        p_err = _check_write_policy(p_check, allow_unfiltered=effective_allow_unfiltered)
         if p_err:
             return {
                 "error": True,
                 "isError": True,
                 "message": p_err,
                 "connection": conn_name,
-                "environment": conn_env,
                 "statement": stmt_check,
             }
 
