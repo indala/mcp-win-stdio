@@ -479,3 +479,45 @@ def test_workflow_accounting_executed_equals_successful_plus_failed():
     assert res["steps_executed"] == 3
     assert res["steps_completed"] == 2
 
+
+
+def test_call_tool_legacy_positional_recovery():
+    """Verify call_tool automatically recovers when invoked with legacy positional args (server, tool, args_dict)."""
+    from unittest.mock import MagicMock, patch
+
+    from mcp_win_stdio.server.server import call_tool
+
+    with patch("mcp_win_stdio.server.server.discover_available_servers") as mock_disc, \
+         patch("mcp_win_stdio.server.process_pool.GLOBAL_POOL.get_or_spawn") as mock_spawn:
+        mock_disc.return_value = {"ssh": MagicMock()}
+        mock_proc = MagicMock()
+        mock_proc.call_tool.return_value = {"output": "ok"}
+        mock_spawn.return_value = mock_proc
+
+        # Call with old positional order: server, tool, arguments
+        res = call_tool("ssh", "ssh_exec", {"command": "echo test"})
+        assert res == {"output": "ok"}
+        mock_proc.call_tool.assert_called_once_with("ssh_exec", {"command": "echo test"})
+
+
+def test_server_run_workflow_invokes_call_tool_correctly(tmp_path):
+    """Verify server.py run_workflow correctly maps (server, tool, args) to call_tool."""
+    from unittest.mock import MagicMock, patch
+
+    from mcp_win_stdio.server.server import run_workflow as server_run_workflow
+
+    wf_def = {
+        "title": "Redeploy Test",
+        "steps": [
+            {"id": "step1", "server": "ssh", "tool": "ssh_exec", "arguments": {"command": "uptime", "host": "prod"}},
+        ],
+    }
+
+    with patch("mcp_win_stdio.core.workflows.load_workflow") as mock_load, \
+         patch("mcp_win_stdio.server.server.call_tool") as mock_call_tool:
+        mock_load.return_value = wf_def
+        mock_call_tool.return_value = {"stdout": "up 10 days"}
+
+        res = server_run_workflow(name="redeploy_test")
+        assert res.get("status") == "success"
+        mock_call_tool.assert_called_once_with(name="ssh_exec", arguments={"command": "uptime", "host": "prod"}, server="ssh")

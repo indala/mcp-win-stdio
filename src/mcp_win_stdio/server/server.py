@@ -346,6 +346,15 @@ def call_tool(
         tool_name: Alias for name.
         tool: Alias for name.
     """
+    # Defensive recovery for legacy positional invocations: call_tool(server, tool, args)
+    if isinstance(server, (dict, list)) and isinstance(arguments, str) and isinstance(name, str):
+        actual_server = name
+        actual_tool = arguments
+        actual_args = server
+        name = actual_tool
+        arguments = actual_args
+        server = actual_server
+
     # Accept 'name' (primary), 'tool_name', or 'tool'
     raw_tool = name or tool_name or tool
     target_tool = str(raw_tool or "").strip()
@@ -542,7 +551,7 @@ def run_workflow(
     return core_run_workflow(
         name_or_def=name,
         parameters=parameters,
-        call_tool_fn=lambda s, t, a: call_tool(s, t, a),
+        call_tool_fn=lambda s, t, a: call_tool(name=t, arguments=a, server=s),
         dry_run=dry_run,
     )
 
