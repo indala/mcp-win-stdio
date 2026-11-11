@@ -2310,12 +2310,22 @@ def execute_query(
     conn_mode = info.get("mode", "read_write")
     conn_env = info.get("env", "dev")
 
+    # Check global/workspace config overrides if set to read_only or safe_writes toggled
+    try:
+        from mcp_win_stdio.core.config import get_effective_mode, is_safe_writes_enabled
+        effective_cfg_mode = get_effective_mode()
+        if effective_cfg_mode == "read_only":
+            conn_mode = "read_only"
+        cfg_safe_writes = is_safe_writes_enabled()
+    except Exception:
+        cfg_safe_writes = True
+
     # 1. Read-only guard
     if conn_mode == "read_only":
         return {
             "error": True,
             "isError": True,
-            "message": f"Connection '{conn_name}' is configured as read-only (mode='read_only'). Writes are blocked. Update mode to 'read_write' using edit_connection to allow writes.",
+            "message": f"Connection '{conn_name}' is configured as read-only (mode='read_only'). Writes are blocked. Update mode to 'read_write' using edit_connection or 'mws config set mode read_write' to allow writes.",
             "connection": conn_name,
             "mode": conn_mode,
         }
@@ -2325,17 +2335,18 @@ def execute_query(
         return {"error": True, "message": "SQL statement string is empty."}
 
     # 2. Policy guardrail checks across statements (naked writes & truncate protection)
-    for stmt_check in statements:
-        p_check = _parse_modifying_statement(stmt_check)
-        p_err = _check_write_policy(p_check, allow_unfiltered=effective_allow_unfiltered)
-        if p_err:
-            return {
-                "error": True,
-                "isError": True,
-                "message": p_err,
-                "connection": conn_name,
-                "statement": stmt_check,
-            }
+    if cfg_safe_writes:
+        for stmt_check in statements:
+            p_check = _parse_modifying_statement(stmt_check)
+            p_err = _check_write_policy(p_check, allow_unfiltered=effective_allow_unfiltered)
+            if p_err:
+                return {
+                    "error": True,
+                    "isError": True,
+                    "message": p_err,
+                    "connection": conn_name,
+                    "statement": stmt_check,
+                }
 
     # =========================================================================
     # SINGLE STATEMENT EXECUTION

@@ -1932,5 +1932,150 @@ def find_duplicate_files(
     }
 
 
+# ==========================================
+# 14. SAFE WORKSPACE FILE EDITING & WRITING
+# ==========================================
+
+
+@mcp.tool()
+def replace_in_file(
+    file_path: str,
+    target: str,
+    replacement: str,
+    encoding: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Safely replace a single, exact contiguous block of code or text in a file.
+    Verifies that 'target' matches exactly once in the file to prevent ambiguous
+    or unintended modifications. Returns a unified diff of the change.
+
+    Args:
+        file_path: Absolute or relative path to the file to edit.
+        target: The exact string to find and replace (including indentation/whitespace).
+        replacement: The replacement text to insert.
+        encoding: Optional explicit file encoding (default auto-detects utf-8).
+    """
+    try:
+        from mcp_win_stdio.core.config import get_effective_mode
+        if get_effective_mode() == "read_only":
+            return {
+                "error": True,
+                "message": "File editing is disabled because system/workspace configuration is set to read-only (mode='read_only'). Run 'mws config set mode read_write' to permit edits.",
+            }
+    except Exception:
+        pass
+
+    p = Path(file_path).resolve()
+    if not p.exists():
+        return {"error": f"File not found: {p}"}
+    if not p.is_file():
+        return {"error": f"Path is a directory, not a file: {p}"}
+
+    if not target:
+        return {"error": "Target string cannot be empty."}
+
+    try:
+        content, enc = _read_file_text_with_fallback(p)
+        count = content.count(target)
+        if count == 0:
+            return {
+                "error": "Target string not found in file.",
+                "file_path": str(p),
+                "target_length": len(target),
+            }
+        if count > 1:
+            return {
+                "error": f"Target string matched {count} times in the file. Provide additional surrounding context so it matches exactly once.",
+                "file_path": str(p),
+                "match_count": count,
+            }
+
+        # Apply single replacement
+        new_content = content.replace(target, replacement, 1)
+
+        # Generate unified diff
+        import difflib
+        diff_lines = list(
+            difflib.unified_diff(
+                content.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=str(p),
+                tofile=str(p),
+                n=3,
+            )
+        )
+        diff_text = "".join(diff_lines)
+
+        chosen_enc = encoding or enc or "utf-8"
+        p.write_text(new_content, encoding=chosen_enc)
+
+        return {
+            "success": True,
+            "file_path": str(p),
+            "replacements_made": 1,
+            "encoding": chosen_enc,
+            "diff": diff_text,
+        }
+    except Exception as e:
+        return {"error": f"Failed to edit file: {str(e)}"}
+
+
+@mcp.tool()
+def write_file(
+    file_path: str,
+    content: str,
+    overwrite: bool = False,
+    append: bool = False,
+    encoding: str = "utf-8",
+) -> Dict[str, Any]:
+    """
+    Create a new file or write content to an existing file.
+    Includes overwrite safeguard to prevent accidental data loss.
+
+    Args:
+        file_path: Absolute or relative path to the file.
+        content: The text content to write.
+        overwrite: Set to True to allow overwriting an existing file.
+        append: Set to True to append content to the end of the file.
+        encoding: File character encoding (default utf-8).
+    """
+    try:
+        from mcp_win_stdio.core.config import get_effective_mode
+        if get_effective_mode() == "read_only":
+            return {
+                "error": True,
+                "message": "File writing is disabled because system/workspace configuration is set to read-only (mode='read_only'). Run 'mws config set mode read_write' to permit edits.",
+            }
+    except Exception:
+        pass
+
+    p = Path(file_path).resolve()
+
+    if p.exists() and p.is_dir():
+        return {"error": f"Path is an existing directory: {p}"}
+
+    if p.exists() and not overwrite and not append:
+        return {
+            "error": f"File '{p}' already exists. Pass overwrite=True to overwrite or append=True to append.",
+            "file_path": str(p),
+            "size_bytes": p.stat().st_size,
+        }
+
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a" if append else "w"
+        with open(p, mode, encoding=encoding) as f:
+            f.write(content)
+
+        return {
+            "success": True,
+            "file_path": str(p),
+            "operation": "append" if append else ("overwrite" if p.exists() else "create"),
+            "bytes_written": len(content.encode(encoding)),
+        }
+    except Exception as e:
+        return {"error": f"Failed to write file: {str(e)}"}
+
+
 if __name__ == "__main__":
     mcp.run()

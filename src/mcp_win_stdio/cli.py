@@ -847,10 +847,92 @@ def cmd_server(args: argparse.Namespace) -> None:
 
 
 def cmd_config(args: argparse.Namespace) -> None:
-    """Launch interactive configuration hub for DB, SSH, TSC, and Gateway."""
-    from mcp_win_stdio.core.wizard import main_config_interactive
+    """Handle mws config commands: view, get, set, enable, disable, or interactive wizard."""
+    from mcp_win_stdio.core.config import (
+        get_workspace_config_path,
+        load_config,
+        load_hierarchical_config,
+        load_workspace_config,
+        save_config,
+    )
 
-    main_config_interactive(getattr(args, "domain", None))
+    action = getattr(args, "action", None)
+    domain = getattr(args, "domain", None)
+
+    # 1. Action-based non-interactive subcommands: mws config [view|get|set|enable|disable]
+    if action or (domain in ("view", "status", "list")):
+        act = (action or domain or "view").lower().strip()
+        scope = "workspace" if getattr(args, "workspace", False) else ("global" if getattr(args, "global_scope", False) else "merged")
+
+        if act in ("view", "status", "list"):
+            if scope == "global":
+                cfg = load_config()
+                print("\n=== Global Configuration (~/.mcp-win-stdio/config.json) ===")
+            elif scope == "workspace":
+                cfg = load_workspace_config()
+                ws_path, exists = get_workspace_config_path()
+                status = f"({ws_path})" if exists else "(No workspace config file found)"
+                print(f"\n=== Workspace Configuration {status} ===")
+            else:
+                cfg = load_hierarchical_config()
+                sources = cfg.get("_resolved_sources", {})
+                print("\n=== Hierarchically Resolved Configuration (Workspace overrides Global) ===")
+                print(f"  • Global Path:    {sources.get('global_path')}")
+                print(f"  • Workspace Path: {sources.get('workspace_path')} (Active: {sources.get('workspace_active')})")
+                print("-" * 70)
+
+            clean_cfg = {k: v for k, v in cfg.items() if not k.startswith("_")}
+            print(json.dumps(clean_cfg, indent=2))
+            return
+
+        key = getattr(args, "key", None)
+        if not key:
+            print("Error: Missing key for config command. Example: 'mws config get mode'")
+            return
+
+        if act == "get":
+            target_cfg = load_workspace_config() if scope == "workspace" else (load_config() if scope == "global" else load_hierarchical_config())
+            val = target_cfg.get(key)
+            if val is not None:
+                print(f"{key} = {val}")
+            else:
+                print(f"Key '{key}' is not set in {scope} configuration.")
+            return
+
+        target_scope = "workspace" if getattr(args, "workspace", False) else "global"
+        active_cfg = load_workspace_config() if target_scope == "workspace" else load_config()
+
+        if act in ("set", "enable", "disable"):
+            if act == "enable":
+                parsed_val = True
+            elif act == "disable":
+                parsed_val = False
+            else:
+                raw_val = getattr(args, "value", None)
+                if raw_val is None:
+                    print("Error: Missing value for config set. Example: 'mws config set mode read_only'")
+                    return
+                # Auto-parse booleans, numbers, or JSON strings
+                if raw_val.lower() == "true":
+                    parsed_val = True
+                elif raw_val.lower() == "false":
+                    parsed_val = False
+                elif raw_val.isdigit():
+                    parsed_val = int(raw_val)
+                else:
+                    try:
+                        parsed_val = json.loads(raw_val)
+                    except Exception:
+                        parsed_val = raw_val
+
+            active_cfg[key] = parsed_val
+            saved_file = save_config(active_cfg, scope=target_scope)
+            print(f"✅ Set {key} = {json.dumps(parsed_val)} in {target_scope} config ({saved_file})")
+            return
+
+    # 2. Interactive Wizard fallback for domains (db, ssh, tsc, etc.)
+    from mcp_win_stdio.core.wizard import main_config_interactive
+    main_config_interactive(domain)
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -2551,18 +2633,41 @@ def main() -> None:
     )
     sub_run.set_defaults(func=cmd_run)
 
-    # 4. config: interactive configuration hub
+    # 4. config: hierarchical configuration manager and interactive hub
     sub_config = subparsers.add_parser(
         "config",
         aliases=["cfg", "configure"],
-        help="Interactive configuration hub for DB, SSH, TSC, and Gateway (~/.mcp-win-stdio/)",
+        help="Hierarchical configuration manager and interactive hub (~/.mcp-win-stdio/ and ./.mws/)",
     )
     sub_config.add_argument(
-        "domain",
+        "action",
         nargs="?",
         default=None,
-        choices=["db", "database", "ssh", "tsc", "typescript", "server", "gateway", "list", "view", "status", "all"],
-        help="Configuration domain to edit ('db', 'ssh', 'tsc', 'server', 'list')",
+        help="Action ('view', 'get', 'set', 'enable', 'disable') or domain ('db', 'ssh', 'tsc', 'gateway')",
+    )
+    sub_config.add_argument(
+        "key",
+        nargs="?",
+        default=None,
+        help="Setting key (e.g. 'mode', 'safe_writes', 'require_confirm_on_prod')",
+    )
+    sub_config.add_argument(
+        "value",
+        nargs="?",
+        default=None,
+        help="Setting value for 'set' action",
+    )
+    sub_config.add_argument(
+        "--workspace",
+        "-w",
+        action="store_true",
+        help="Target the workspace configuration (.mws/config.json)",
+    )
+    sub_config.add_argument(
+        "--global",
+        dest="global_scope",
+        action="store_true",
+        help="Target the global user configuration (~/.mcp-win-stdio/config.json)",
     )
     sub_config.set_defaults(func=cmd_config)
 

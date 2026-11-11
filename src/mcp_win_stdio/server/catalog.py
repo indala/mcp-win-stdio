@@ -92,7 +92,12 @@ COMMON_ALIASES: Dict[str, List[str]] = {
     "search": ["search_term", "query", "searchTerm", "search_text", "pattern", "filter"],
     "term": ["search_term", "searchTerm", "query", "search_text"],
     "find": ["search_text", "search_term", "pattern"],
-    "replace": ["replace_text", "replacement"],
+    "target": ["target", "target_string", "search_text", "pattern", "old_text"],
+    "targetstring": ["target", "target_string", "search_text", "pattern"],
+    "replacement": ["replacement", "replace_text", "new_text", "content"],
+    "overwrite": ["overwrite", "force"],
+    "append": ["append"],
+    "replace": ["replace_text", "replacement", "target"],
     "replacetext": ["replace_text", "replacement"],
     "pattern": ["filter", "search_term", "query"],
 

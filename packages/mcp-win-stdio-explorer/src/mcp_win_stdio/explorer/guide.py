@@ -30,11 +30,15 @@ in-file grep, RapidFuzz fuzzy search, and code symbol extraction.
   - grep_search(query, search_path, is_regex, context_lines, max_matches):
     Search text or regex INSIDE file contents across the workspace.
 
-* Token-Safe Reading:
+* Token-Safe Reading & Authoring:
   - read_file(file_path, start_line, end_line, line_numbers, max_lines):
     Windowed file reader with automatic binary detection/protection.
   - read_head_tail(file_path, mode, lines):
     Quick top N (head) or bottom N (tail) line peek for logs/CSVs.
+  - replace_in_file(file_path, target, replacement):
+    Safely replace an exact contiguous block of text in a file with unified diff output.
+  - write_file(file_path, content, overwrite, append):
+    Create or edit workspace files with overwrite guardrails.
 
 * Code Structure & Diagnostics:
   - get_code_outline(file_path):

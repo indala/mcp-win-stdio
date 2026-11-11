@@ -530,6 +530,9 @@ def query_rows(
         "format": format,
         "rows": data,
     }
+    # Backward compatibility for compact/tsv formats where callers inspect 'data'
+    if format in ("compact", "tsv"):
+        result["data"] = data
 
     if total_matches > (offset + limit):
         result["context_protection_notice"] = (
@@ -607,6 +610,8 @@ def read_range(
     res_range: Dict[str, Any] = {
         "start_row": start_row,
         "end_row": start_row + returned_count - 1 if returned_count > 0 else start_row,
+        "limit": max_allowed,
+        "returned_rows": returned_count,
         "row_count": returned_count,
         "requested_count": requested_count,
         "has_more": has_more,
@@ -614,6 +619,9 @@ def read_range(
         "format": format,
         "rows": data,
     }
+    # Backward compatibility for compact/tsv formats where callers inspect 'data'
+    if format in ("compact", "tsv"):
+        res_range["data"] = data
 
     if requested_count > max_allowed:
         res_range["context_protection_notice"] = (
