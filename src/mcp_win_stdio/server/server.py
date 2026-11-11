@@ -93,33 +93,59 @@ def _resolve_session_id(ctx: Any = None) -> str:
 
 
 @mcp.tool()
-def use_server(
+def call_server(
     server: str,
+    stack: bool = True,
+    include_signatures: bool = True,
     ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
-    Switch or declare the active MCP server context for subsequent tool calls.
-    Once set, agents can execute tools without providing the 'server' parameter.
+    Select and stack target MCP server in session context, immediately returning
+    its tools, compact parameter signatures, active targets, and ready status.
+    Eliminates wasteful extra roundtrips.
 
     Args:
-        server: Target MCP server name (e.g. 'db', 'excel', 'git', 'ssh', 'rag', 'word', 'tsc', 'arch').
+        server: Target MCP server name (e.g. 'db', 'excel', 'git', 'ssh', 'rag', 'word', 'tsc', 'arch', 'explorer').
+        stack: Whether to set/stack this server as active in session context (default True).
+        include_signatures: Include compact parameter signatures for each tool (default True).
     """
     clean = server.lower().strip()
     available = discover_available_servers()
     if clean not in available:
         return {
-            "success": False,
+            "isError": True,
             "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
         }
+
     sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
-    session.set("server", clean)
+    if stack:
+        session.set("server", clean)
+
+    catalog_data = get_server_catalog(
+        server=clean,
+        include_tools=True,
+        include_signatures=include_signatures,
+    )
+    server_info = catalog_data.get("servers", {}).get(clean, {})
+    tools = server_info.get("tools", [])
+
     return {
         "success": True,
-        "session_id": session.session_id,
-        "message": f"Active server set to '{clean}'. Subsequent tool calls without 'server' will default to '{clean}'.",
         "active_server": clean,
+        "status": server_info.get("status", "ready"),
+        "installed": server_info.get("installed", True),
+        "total_tools": len(tools),
+        "description": server_info.get("description", ""),
+        "active_context": session.snapshot(),
+        "tools": tools,
+        "message": f"Server '{clean}' active ({len(tools)} tools available). Subsequent call_tool calls can omit 'server'.",
     }
+
+
+def use_server(server: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+    """Legacy compatibility redirect to call_server."""
+    return call_server(server=server, ctx=ctx)
 
 
 @mcp.tool()
@@ -432,7 +458,7 @@ def call_tool(
                 else:
                     return {
                         "isError": True,
-                        "error": f"Tool '{target_tool}' exists on multiple servers: {candidates}. Please specify 'server' or call use_server().",
+                        "error": f"Tool '{target_tool}' exists on multiple servers: {candidates}. Please specify 'server' or call call_server('{candidates[0]}').",
                         "candidate_servers": candidates,
                         "active_server": active_ctx_server,
                     }
