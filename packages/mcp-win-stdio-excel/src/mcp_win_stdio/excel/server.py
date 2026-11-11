@@ -369,6 +369,65 @@ def get_workbook_info(file_path: str) -> Dict[str, Any]:
     }
 
 
+def _auto_detect_header_row(file_path: str, sheet_name: Optional[Union[str, int]] = None, max_scan: int = 10) -> int:
+    """
+    Auto-detect the 0-indexed header row by scanning the first few rows.
+    Finds the row containing multiple meaningful string headers.
+    Skips empty rows, single-cell title banners, or blank metadata rows.
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            target_sheet = sheet_name
+            if target_sheet is None or target_sheet == 0:
+                ws = wb.active
+            elif isinstance(target_sheet, int):
+                ws = wb.worksheets[target_sheet] if target_sheet < len(wb.worksheets) else wb.active
+            else:
+                ws = wb[str(target_sheet)] if str(target_sheet) in wb.sheetnames else wb.active
+
+            candidates = []
+            for idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_scan, values_only=True)):
+                non_empty = [c for c in row if c is not None and str(c).strip() != ""]
+                text_cells = [c for c in non_empty if isinstance(c, str) and not str(c).strip().isdigit()]
+                candidates.append((idx, len(non_empty), len(text_cells)))
+
+            if candidates and candidates[0][2] >= 2:
+                return 0
+
+            best_row = 0
+            best_score = -1
+            for idx, total, texts in candidates:
+                if texts >= 2 and texts > best_score:
+                    best_score = texts
+                    best_row = idx
+            return best_row
+        finally:
+            wb.close()
+    except Exception:
+        return 0
+
+
+def _clean_and_deduplicate_columns(columns: List[Any]) -> List[str]:
+    """Ensure every column has a unique, non-empty name and no duplicates."""
+    seen: Dict[str, int] = {}
+    new_cols: List[str] = []
+    for idx, c in enumerate(columns):
+        raw = str(c).strip() if (c is not None and str(c).strip() != "") else ""
+        if not raw or raw.lower().startswith("unnamed:"):
+            base = f"Column_{idx + 1}"
+        else:
+            base = raw
+
+        if base not in seen:
+            seen[base] = 1
+            new_cols.append(base)
+        else:
+            seen[base] += 1
+            new_cols.append(f"{base}_{seen[base]}")
+    return new_cols
+
+
 @mcp.tool()
 def preview_sheet(
     file_path: str,
@@ -379,11 +438,12 @@ def preview_sheet(
 ) -> Dict[str, Any]:
     """
     Preview the first N rows of a sheet. Loads only requested rows for speed and minimal token consumption.
+    Automatically detects header row if not specified and cleans duplicate or missing column names.
 
     Args:
         file_path: Path to the Excel file (.xlsx, .xls, .xlsm).
         sheet_name: Sheet name or index (default is first sheet).
-        header_row: 0-indexed row number containing headers (e.g. 5 if header is row 6).
+        header_row: 0-indexed row number containing headers. If omitted, automatically detects header row.
         nrows: Number of preview rows (default 10, max 50).
         format: 'records' (list of dicts), 'compact' (list of lists), or 'tsv'.
     """
@@ -391,18 +451,19 @@ def preview_sheet(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     nrows = max(1, min(nrows, 50))
-    h_idx = header_row if header_row is not None else 0
+    h_idx = header_row if header_row is not None else _auto_detect_header_row(file_path, sheet_name)
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0, nrows=nrows, header=h_idx)
+    df.columns = _clean_and_deduplicate_columns(list(df.columns))
     data = _format_dataframe_output(df, format)
 
     return {
         "sheet_name": sheet_name or "First Sheet",
+        "header_row_used": h_idx,
         "preview_row_count": len(df),
         "columns": [c for c in df.columns],
         "column_types": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
         "format": format,
         "rows": data,
-        "data": data,
     }
 
 
@@ -446,8 +507,9 @@ def query_rows(
     limit = max(1, min(limit, max_allowed))
     offset = max(0, offset)
 
-    h_idx = header_row if header_row is not None else 0
+    h_idx = header_row if header_row is not None else _auto_detect_header_row(file_path, sheet_name)
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns, header=h_idx)
+    df.columns = _clean_and_deduplicate_columns(list(df.columns))
 
     if query:
         try:
@@ -467,7 +529,6 @@ def query_rows(
         "columns": [c for c in df.columns],
         "format": format,
         "rows": data,
-        "data": data,
     }
 
     if total_matches > (offset + limit):
@@ -552,7 +613,6 @@ def read_range(
         "columns": [c for c in df.columns],
         "format": format,
         "rows": data,
-        "data": data,
     }
 
     if requested_count > max_allowed:
@@ -1888,8 +1948,9 @@ def export_to_csv(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    h_idx = header_row if header_row is not None else 0
+    h_idx = header_row if header_row is not None else _auto_detect_header_row(file_path, sheet_name)
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns, header=h_idx)
+    df.columns = _clean_and_deduplicate_columns(list(df.columns))
     df.to_csv(output_csv_path, index=False)
 
     return {
@@ -1932,8 +1993,9 @@ def export_to_json(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    h_idx = header_row if header_row is not None else 0
+    h_idx = header_row if header_row is not None else _auto_detect_header_row(file_path, sheet_name)
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0, usecols=columns, header=h_idx)
+    df.columns = _clean_and_deduplicate_columns(list(df.columns))
 
     clean_records = _df_to_clean_records(df)
     with open(output_json_path, "w", encoding="utf-8") as f:
@@ -1965,27 +2027,36 @@ def profile_sheet(
     Generate an instant high-level statistical profile and data quality audit of an entire Excel sheet.
     Provides complete analytics (null rates, unique counts, top frequent values, numeric distributions)
     in a single compact response (~400 tokens) without dumping raw rows into the chat context.
+    Automatically handles duplicate columns, missing headers, and detects the header row.
 
     Args:
         file_path: Path to the Excel file.
         sheet_name: Sheet name or index (default first sheet).
-        header_row: Row containing column headers (0-indexed, default 0).
+        header_row: Row containing column headers (0-indexed, default auto-detected).
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    h_idx = header_row if header_row is not None else 0
+    h_idx = header_row if header_row is not None else _auto_detect_header_row(file_path, sheet_name)
     df = pd.read_excel(file_path, sheet_name=sheet_name or 0, header=h_idx)
+    df.columns = _clean_and_deduplicate_columns(list(df.columns))
     total_rows = len(df)
     total_cols = len(df.columns)
 
     col_profiles = {}
-    for col in df.columns:
-        series = df[col]
-        null_count = series.isnull().sum()
+    for i in range(total_cols):
+        col_name = df.columns[i]
+        series = df.iloc[:, i]
+        null_count = int(series.isnull().sum())
         non_null_count = total_rows - null_count
         null_pct = round((null_count / max(total_rows, 1)) * 100, 2)
-        unique_count = series.nunique()
+        try:
+            unique_count = int(series.nunique())
+        except Exception:
+            try:
+                unique_count = len(set(series.dropna()))
+            except Exception:
+                unique_count = 0
 
         profile: Dict[str, Any] = {
             "dtype": str(series.dtype),
@@ -1995,24 +2066,28 @@ def profile_sheet(
             "unique_count": unique_count,
         }
 
-        if pd.api.types.is_numeric_dtype(series):
-            valid = series.dropna()
-            if len(valid) > 0:
-                profile["numeric_stats"] = {
-                    "min": float(valid.min()),
-                    "max": float(valid.max()),
-                    "mean": round(float(valid.mean()), 2),
-                    "sum": round(float(valid.sum()), 2),
-                }
-        else:
-            top_vals = series.dropna().value_counts().head(5).to_dict()
-            profile["top_frequent"] = {str(k)[:40]: v for k, v in top_vals.items()}
+        try:
+            if pd.api.types.is_numeric_dtype(series):
+                valid = series.dropna()
+                if len(valid) > 0:
+                    profile["numeric_stats"] = {
+                        "min": float(valid.min()),
+                        "max": float(valid.max()),
+                        "mean": round(float(valid.mean()), 2),
+                        "sum": round(float(valid.sum()), 2),
+                    }
+            else:
+                top_vals = series.dropna().value_counts().head(5).to_dict()
+                profile["top_frequent"] = {str(k)[:40]: int(v) for k, v in top_vals.items()}
+        except Exception:
+            pass
 
-        col_profiles[col] = profile
+        col_profiles[col_name] = profile
 
     return {
         "file_path": file_path,
         "sheet_name": sheet_name or "First Sheet",
+        "header_row_used": h_idx,
         "total_rows": total_rows,
         "total_columns": total_cols,
         "columns": [c for c in df.columns],
