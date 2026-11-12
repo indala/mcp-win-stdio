@@ -62,10 +62,6 @@ from mcp_win_stdio.core.environment import (
 from mcp_win_stdio.core.external_updater import spawn_external_updater
 from mcp_win_stdio.core.installer import (
     cleanup_old_executables,
-    generate_claude_cli_command,
-    generate_claude_desktop_snippet,
-    get_claude_cli_config_path,
-    get_claude_desktop_config_path,
     get_installed_mws_packages,
     install_pip_dependencies,
     remove_server_from_cli,
@@ -1116,23 +1112,6 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             print("       👉 Run: playwright install chromium (or mws install rag)")
     except ImportError:
         print("[INFO] Playwright Browser Engine: Playwright not installed")
-
-    # 9. Claude Config Files
-
-    print("\n--- Claude Configuration Targets ---")
-    desktop_cfg = get_claude_desktop_config_path()
-    if desktop_cfg and desktop_cfg.exists():
-        print(f"[OK] Claude Desktop: {desktop_cfg}")
-    else:
-        desktop_str = str(desktop_cfg) if desktop_cfg else r"Not found in %APPDATA%\Claude"
-        print(f"[INFO] Claude Desktop config: {desktop_str}")
-
-    cli_cfg = get_claude_cli_config_path()
-    if cli_cfg and cli_cfg.exists():
-        print(f"[OK] Claude Code CLI: {cli_cfg}")
-    else:
-        cli_str = str(cli_cfg) if cli_cfg else "Not found in ~/.claude.json"
-        print(f"[INFO] Claude Code CLI config: {cli_str}")
 
     # 8. PyPI Version & Update Status
     print("\n--- PyPI Version & Update Status ---")
