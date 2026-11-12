@@ -39,6 +39,7 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "installed_servers": {},
     "tunnel": {
         "mode": "read_only",           # default remote security mode
+        "auth_mode": "bearer",         # "bearer" | "none" | "oauth"
         "port": 8080,                  # local bridge port
         "token": None,                 # optional static bearer token; if None, random token is generated
         "host": "127.0.0.1",
@@ -173,8 +174,19 @@ def load_hierarchical_config(workspace_dir: Optional[Path] = None) -> Dict[str, 
     return merged
 
 
+_RUNTIME_MODE_OVERRIDE: Optional[str] = None
+
+
+def set_runtime_mode_override(mode: Optional[str]) -> None:
+    """Set process-wide runtime override for access mode (e.g. forced 'read_only' during public tunnel)."""
+    global _RUNTIME_MODE_OVERRIDE
+    _RUNTIME_MODE_OVERRIDE = mode.lower().strip() if mode else None
+
+
 def get_effective_mode(workspace_dir: Optional[Path] = None) -> str:
-    """Return effective access mode ('read_write' or 'read_only') from hierarchical config."""
+    """Return effective access mode ('read_write' or 'read_only') from hierarchical config or runtime override."""
+    if _RUNTIME_MODE_OVERRIDE:
+        return _RUNTIME_MODE_OVERRIDE
     cfg = load_hierarchical_config(workspace_dir)
     return cfg.get("mode", "read_write").lower().strip()
 

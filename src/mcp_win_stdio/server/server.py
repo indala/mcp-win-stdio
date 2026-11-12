@@ -647,6 +647,21 @@ def call_tool(
     )
 
     norm_args = normalize_arguments(target_server, target_tool, resolved_args)
+
+    # Permission enforcement guard
+    from mcp_win_stdio.core.config import get_effective_mode
+    from mcp_win_stdio.core.permissions import check_tool_permission
+
+    eff_mode = get_effective_mode()
+    permitted, perm_err = check_tool_permission(target_server, target_tool, mode=eff_mode)
+    if not permitted:
+        return {
+            "isError": True,
+            "error": perm_err,
+            "server": target_server,
+            "tool": target_tool,
+        }
+
     start_time = time.perf_counter()
     try:
         proc = GLOBAL_POOL.get_or_spawn(target_server)
@@ -788,6 +803,13 @@ def save_workflow(
                     Each step must specify 'server', 'tool', and 'arguments' (with optional {{ param }} templating).
         scope: Where to store: 'project' (default, in .mws/workflows/) or 'global' (in ~/.mcp-win-stdio/workflows/).
     """
+    from mcp_win_stdio.core.config import get_effective_mode
+
+    if get_effective_mode() == "read_only":
+        return {
+            "isError": True,
+            "error": "Permission Denied: Saving workflows is a modifying operation and is blocked in 'read_only' mode.",
+        }
     return core_save_workflow(name=name, definition=definition, scope=scope)
 
 

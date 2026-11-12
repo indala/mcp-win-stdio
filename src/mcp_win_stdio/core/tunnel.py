@@ -22,7 +22,16 @@ import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
-from mcp_win_stdio.core.config import get_tunnel_config, load_hierarchical_config
+from mcp_win_stdio.core.config import (
+    get_tunnel_config,
+    load_hierarchical_config,
+    set_runtime_mode_override,
+)
+from mcp_win_stdio.core.tunnel_auth import (
+    AuthProvider,
+    BearerAuthProvider,
+    create_auth_provider,
+)
 from mcp_win_stdio.server.catalog import get_server_catalog
 from mcp_win_stdio.server.discovery import discover_available_servers
 from mcp_win_stdio.server.server import mcp
@@ -30,15 +39,15 @@ from mcp_win_stdio.server.server import mcp
 logger = logging.getLogger("mcp_win_stdio.tunnel")
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
+class TunnelAuthMiddleware(BaseHTTPMiddleware):
     """
-    Mandatory Bearer token authentication middleware for the public MCP tunnel.
-    Permits unauthenticated access strictly to /health and /status endpoints.
+    Generic authentication middleware delegating verification to an AuthProvider.
+    Bypasses authentication strictly for health and status endpoints.
     """
 
-    def __init__(self, app: Any, token: str):
+    def __init__(self, app: Any, auth_provider: AuthProvider):
         super().__init__(app)
-        self.token = token.strip()
+        self.auth_provider = auth_provider
 
     async def dispatch(self, request: Any, call_next: Callable[..., Any]) -> Any:
         path = request.url.path
@@ -46,35 +55,29 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return JSONResponse({
                 "status": "ok",
                 "service": "mws-tunnel",
+                "auth_mode": self.auth_provider.auth_mode,
                 "timestamp": time.time(),
             })
 
-        auth_header = request.headers.get("Authorization", "")
-        if not auth_header.startswith("Bearer "):
-            return JSONResponse(
-                {
-                    "error": "Unauthorized",
-                    "message": "Missing or malformed Authorization header. Expected 'Bearer <token>'.",
-                },
-                status_code=401,
-            )
-
-        received_token = auth_header[7:].strip()
-        if not secrets.compare_digest(received_token, self.token):
-            return JSONResponse(
-                {
-                    "error": "Unauthorized",
-                    "message": "Invalid Bearer token.",
-                },
-                status_code=401,
-            )
+        auth_response = await self.auth_provider.authenticate(request)
+        if auth_response is not None:
+            return auth_response
 
         return await call_next(request)
 
 
+class BearerAuthMiddleware(TunnelAuthMiddleware):
+    """
+    Backward-compatibility alias for BearerAuthMiddleware.
+    """
+
+    def __init__(self, app: Any, token: str):
+        super().__init__(app, auth_provider=BearerAuthProvider(token=token))
+
+
 class MwsTunnelManager:
     """
-    Orchestrates the local uvicorn StreamableHTTP server and the cloudflared quick tunnel.
+    Orchestrates the local uvicorn StreamableHTTP server, auth provider, and cloudflared quick tunnel.
     """
 
     def __init__(
@@ -82,14 +85,26 @@ class MwsTunnelManager:
         port: int = 8080,
         mode: str = "read_only",
         token: Optional[str] = None,
+        auth_mode: str = "bearer",
         host: str = "127.0.0.1",
         workspace_dir: Optional[Path] = None,
     ):
         self.port = port
         self.mode = mode.lower().strip()
+        self.auth_mode = (auth_mode or "bearer").lower().strip()
         self.host = host
         self.workspace_dir = workspace_dir
-        self.token = token or secrets.token_urlsafe(32)
+
+        # Initialize modular AuthProvider
+        self.auth_provider = create_auth_provider(self.auth_mode, token=token)
+
+        # Enforce read_only if auth provider requires it (e.g. unauthenticated 'none' mode)
+        if self.auth_provider.requires_read_only and self.mode != "read_only":
+            logger.warning("Auth mode '%s' mandates 'read_only' permissions. Overriding mode to 'read_only'.", self.auth_mode)
+            self.mode = "read_only"
+
+        # Expose token property for backward compatibility (None in 'none' mode)
+        self.token = getattr(self.auth_provider, "token", None)
 
         self._uvicorn_server: Optional[uvicorn.Server] = None
         self._uvicorn_thread: Optional[threading.Thread] = None
@@ -152,13 +167,16 @@ class MwsTunnelManager:
         return False
 
     def start_local_bridge(self) -> None:
-        """Launch uvicorn StreamableHTTP server with Bearer auth in a worker thread."""
+        """Launch uvicorn StreamableHTTP server with configured auth provider in a worker thread."""
         from mcp.server.transport_security import TransportSecuritySettings
+
+        # Set runtime mode override (e.g. read_only) for gateway tool call permission enforcement
+        set_runtime_mode_override(self.mode)
 
         # Disable DNS rebinding protections so Cloudflare proxy Host headers pass through
         sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
         base_app = mcp.streamable_http_app(transport_security=sec)
-        base_app.add_middleware(BearerAuthMiddleware, token=self.token)
+        base_app.add_middleware(TunnelAuthMiddleware, auth_provider=self.auth_provider)
 
         config = uvicorn.Config(
             app=base_app,
@@ -244,21 +262,25 @@ class MwsTunnelManager:
 
     def get_client_config(self) -> Dict[str, Any]:
         """Generate ready-to-paste client JSON configurations for ChatGPT, Gemini, Claude, Cursor."""
-        mcp_endpoint = f"{self._public_url}/mcp" if self._public_url else ""
-        return {
-            "mcpServers": {
-                "mws": {
-                    "url": mcp_endpoint,
-                    "headers": {
-                        "Authorization": f"Bearer {self.token}",
-                    },
-                }
-            }
-        }
+        return self.auth_provider.get_client_config(self._public_url or "")
 
     def stop(self) -> None:
-        """Gracefully shut down Cloudflare tunnel and local uvicorn bridge."""
+        """Gracefully shut down Cloudflare tunnel, local uvicorn bridge, and auth provider."""
         self._stop_event.set()
+
+        # Clear runtime mode override
+        set_runtime_mode_override(None)
+
+        # Shutdown auth provider
+        try:
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self.auth_provider.shutdown())
+            except RuntimeError:
+                asyncio.run(self.auth_provider.shutdown())
+        except Exception:
+            pass
 
         if self._cf_proc:
             try:
