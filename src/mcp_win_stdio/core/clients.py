@@ -138,17 +138,18 @@ SUPPORTED_CLIENTS: Dict[str, Dict[str, Any]] = {
     },
     "copilot": {
         "id": "copilot",
-        "name": "GitHub Copilot (VS Code)",
-        "aliases": ["copilot", "vscode", "code"],
+        "name": "GitHub Copilot (VS Code & gh copilot CLI)",
+        "aliases": ["copilot", "gh-copilot", "vscode", "code"],
         "paths": [
+            r"%USERPROFILE%\.copilot\mcp-config.json",
             r"%APPDATA%\Code\User\mcp.json",
             r"<workspace>\.mcp.json",
         ],
         "format": "json",
         "instructions": (
-            "1. In VS Code 1.106+, create or open .mcp.json in your project workspace root,\n"
-            "   or open %APPDATA%\\Code\\User\\mcp.json for global access.\n"
-            "2. Paste the JSON snippet inside 'mcpServers'."
+            "1. For GitHub Copilot CLI (gh copilot), create or edit %USERPROFILE%\\.copilot\\mcp-config.json.\n"
+            "2. For VS Code Copilot, open %APPDATA%\\Code\\User\\mcp.json or <workspace>\\.mcp.json.\n"
+            "3. Paste the JSON snippet inside 'mcpServers'."
         ),
     },
     "codex": {
