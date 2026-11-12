@@ -541,7 +541,31 @@ def call_tool(
 
     norm_args = normalize_arguments(target_server, target_tool, resolved_args)
     proc = GLOBAL_POOL.get_or_spawn(target_server)
+    start_time = time.perf_counter()
     res = proc.call_tool(target_tool, norm_args)
+    duration_ms = (time.perf_counter() - start_time) * 1000
+
+    # Structured audit logging
+    is_err = isinstance(res, dict) and bool(res.get("isError") or res.get("status") == "error")
+    err_msg = res.get("error") if isinstance(res, dict) else None
+    out_bytes = len(str(res).encode("utf-8", errors="ignore"))
+
+    try:
+        from mcp_win_stdio.core.audit import log_audit_event
+
+        log_audit_event(
+            event_type="tool_call",
+            server=target_server,
+            tool=target_tool,
+            duration_ms=duration_ms,
+            status="error" if is_err else "success",
+            arguments=norm_args,
+            session_id=session.session_id,
+            output_bytes=out_bytes,
+            error=err_msg,
+        )
+    except Exception:
+        pass
 
     # If tool call failed, enrich with schema guidance to enable immediate self-correction
     if isinstance(res, dict) and res.get("isError"):
@@ -553,8 +577,41 @@ def call_tool(
             res["expected_signature"] = sig
             res["required_parameters"] = req
             res["available_parameters"] = props
+        return res
+
+    # Context Protection: Check for artifact spilling on large successful payloads (>32 KB)
+    try:
+        from mcp_win_stdio.core.artifacts import maybe_spill_to_artifact
+
+        spilled, final_payload = maybe_spill_to_artifact(res)
+        if spilled:
+            return final_payload
+    except Exception:
+        pass
 
     return res
+
+
+@mcp.tool()
+def read_artifact(
+    handle: str,
+    offset: int = 0,
+    limit: int = 50,
+    query: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Page through or inspect large result payloads spilled to an artifact file.
+    Protects LLM context from token blowouts while allowing access to entire datasets.
+
+    Args:
+        handle: The artifact handle (e.g. 'art_20261112_f91a2b').
+        offset: Record offset to start reading from (default: 0).
+        limit: Maximum number of records to retrieve (default: 50).
+        query: Optional case-insensitive substring search across records.
+    """
+    from mcp_win_stdio.core.artifacts import read_artifact_payload
+
+    return read_artifact_payload(handle=handle, offset=offset, limit=limit, query=query)
 
 
 @mcp.tool()

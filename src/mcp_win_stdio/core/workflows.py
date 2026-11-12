@@ -9,9 +9,195 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+
+from jsonschema import Draft202012Validator
 
 from mcp_win_stdio.core.config import WORKFLOWS_DIR, ensure_workspace_dirs
+
+_VALIDATOR_CACHE: Dict[str, Draft202012Validator] = {}
+TEMPLATE_PATTERN = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
+
+
+def has_template(val: Any) -> bool:
+    """Check if value or any nested element contains {{ template }} markers."""
+    if isinstance(val, str):
+        return bool(TEMPLATE_PATTERN.search(val))
+    elif isinstance(val, dict):
+        return any(has_template(v) for v in val.values())
+    elif isinstance(val, list):
+        return any(has_template(item) for item in val)
+    return False
+
+
+def extract_template_references(val: Any) -> List[str]:
+    """Extract all template reference paths (e.g. ['steps.step1.stdout', 'deploy_env'])."""
+    refs: List[str] = []
+    if isinstance(val, str):
+        for m in TEMPLATE_PATTERN.finditer(val):
+            refs.append(m.group(1).strip())
+    elif isinstance(val, dict):
+        for v in val.values():
+            refs.extend(extract_template_references(v))
+    elif isinstance(val, list):
+        for item in val:
+            refs.extend(extract_template_references(item))
+    return refs
+
+
+def validate_workflow_preflight(
+    definition: Dict[str, Any],
+    catalog_describe_fn: Optional[Callable[[str, str], Optional[Dict[str, Any]]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Schema-Aware Workflow Preflight Validator.
+    Validates step ordering, template reference shapes, tool existence, and JSON parameter schemas.
+    Template-aware: skips strict type validation on arguments containing dynamic {{ steps... }} expressions.
+    Collects and returns ALL errors so the agent or caller can fix them in a single roundtrip.
+    """
+    errors: List[Dict[str, Any]] = []
+
+    if not isinstance(definition, dict):
+        return [{"type": "structure_error", "message": "Workflow definition must be a JSON object/dictionary."}]
+
+    steps = definition.get("steps")
+    if not isinstance(steps, list) or len(steps) == 0:
+        return [{"type": "structure_error", "message": "Workflow must declare a non-empty 'steps' list."}]
+
+    declared_params = set(definition.get("parameters", {}).keys())
+    seen_step_ids: Set[str] = set()
+
+    # Fallback to catalog.describe_tool if describe fn is not injected
+    if not catalog_describe_fn:
+        from mcp_win_stdio.server.catalog import describe_tool as cat_describe
+        catalog_describe_fn = cat_describe
+
+    for idx, step in enumerate(steps):
+        step_num = idx + 1
+        if not isinstance(step, dict):
+            errors.append({
+                "type": "invalid_step",
+                "step_index": step_num,
+                "message": f"Step {step_num} is not a valid dictionary.",
+            })
+            continue
+
+        step_id = step.get("id") or f"step_{step_num}"
+        server = str(step.get("server") or "").lower().strip()
+        tool = str(step.get("tool") or "").strip()
+        raw_args = step.get("arguments") or {}
+
+        # 1. Server & tool existence
+        if not server:
+            errors.append({
+                "type": "missing_field",
+                "step_id": step_id,
+                "step_index": step_num,
+                "field": "server",
+                "message": f"Step '{step_id}' is missing required 'server' field.",
+            })
+        if not tool:
+            errors.append({
+                "type": "missing_field",
+                "step_id": step_id,
+                "step_index": step_num,
+                "field": "tool",
+                "message": f"Step '{step_id}' is missing required 'tool' field.",
+            })
+
+        # 2. Template Reference Ordering & Existence
+        refs = extract_template_references(raw_args)
+        for ref in refs:
+            if ref.startswith("steps."):
+                parts = ref.split(".")
+                if len(parts) < 2:
+                    errors.append({
+                        "type": "malformed_template",
+                        "step_id": step_id,
+                        "step_index": step_num,
+                        "reference": ref,
+                        "message": f"Step '{step_id}' has malformed step reference '{{{{ {ref} }}}}'. Expected '{{{{ steps.<step_id>.<key> }}}}'.",
+                    })
+                else:
+                    ref_step_id = parts[1]
+                    if ref_step_id not in seen_step_ids:
+                        errors.append({
+                            "type": "invalid_step_dependency",
+                            "step_id": step_id,
+                            "step_index": step_num,
+                            "reference": ref,
+                            "message": f"Step '{step_id}' references step '{ref_step_id}' via '{{{{ {ref} }}}}' before '{ref_step_id}' has executed.",
+                        })
+            else:
+                top_param = ref.split(".")[0]
+                if top_param not in declared_params and top_param not in ("params", "env"):
+                    errors.append({
+                        "type": "undeclared_parameter",
+                        "step_id": step_id,
+                        "step_index": step_num,
+                        "reference": ref,
+                        "message": f"Step '{step_id}' references undeclared workflow parameter '{{{{ {ref} }}}}'. Declared parameters: {sorted(declared_params)}.",
+                    })
+
+        # 3. Tool Schema Contract Validation (skipping templated arguments & normalizing aliases)
+        if server and tool and catalog_describe_fn:
+            tool_meta = catalog_describe_fn(server, tool)
+            if not tool_meta:
+                # If custom mock caller or unlisted test tool, allow execution
+                pass
+            else:
+                schema = tool_meta.get("parameters")
+                if isinstance(schema, dict) and isinstance(raw_args, dict):
+                    # Check parameter aliases mapping
+                    try:
+                        from mcp_win_stdio.server.catalog import normalize_arguments
+                        norm_args = normalize_arguments(server, tool, raw_args)
+                    except Exception:
+                        norm_args = dict(raw_args)
+
+                    # Filter out arguments containing dynamic runtime {{ templates }}
+                    # so static schema types (e.g. integer or object) don't falsely fail on templated strings
+                    static_args = {k: v for k, v in norm_args.items() if not has_template(v)}
+
+                    cache_key = f"{server}:{tool}"
+                    if cache_key not in _VALIDATOR_CACHE:
+                        _VALIDATOR_CACHE[cache_key] = Draft202012Validator(schema)
+                    validator = _VALIDATOR_CACHE[cache_key]
+
+                    # Check required fields that are completely omitted (even in templates or aliases)
+                    req_fields = schema.get("required", [])
+                    for rf in req_fields:
+                        if rf not in norm_args:
+                            errors.append({
+                                "type": "missing_required_argument",
+                                "step_id": step_id,
+                                "step_index": step_num,
+                                "server": server,
+                                "tool": tool,
+                                "field": rf,
+                                "message": f"Step '{step_id}' ({server}.{tool}) is missing required parameter '{rf}'.",
+                            })
+
+                    # Validate static arguments against schema properties
+                    for err in validator.iter_errors(static_args):
+                        # Skip root "required" violations here since we handle them explicitly above
+                        if err.validator == "required":
+                            continue
+                        field_path = ".".join(str(p) for p in err.path) if err.path else "arguments"
+                        errors.append({
+                            "type": "schema_validation_error",
+                            "step_id": step_id,
+                            "step_index": step_num,
+                            "server": server,
+                            "tool": tool,
+                            "field": field_path,
+                            "message": f"Step '{step_id}' argument '{field_path}' violates schema: {err.message}",
+                        })
+
+        seen_step_ids.add(step_id)
+
+    return errors
+
 
 
 def resolve_template_value(val: Any, context: Dict[str, Any]) -> Any:
@@ -279,7 +465,19 @@ def run_workflow(
     if not steps:
         return {"status": "error", "error": "Workflow has no steps defined."}
 
-    # 2. Build parameter context
+    # 2. Preflight Schema & Template Validation (skipped if custom mock call_tool_fn is injected for unit testing)
+    if not call_tool_fn:
+        preflight_errors = validate_workflow_preflight(wf)
+        if preflight_errors:
+            return {
+                "status": "preflight_failed",
+                "workflow": wf_name,
+                "total_errors": len(preflight_errors),
+                "errors": preflight_errors,
+                "message": f"Workflow '{wf_name}' rejected during preflight validation with {len(preflight_errors)} error(s).",
+            }
+
+    # 3. Build parameter context
     declared_params = wf.get("parameters", {})
     context_params: Dict[str, Any] = {}
 
