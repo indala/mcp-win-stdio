@@ -30,7 +30,7 @@ HUB_FILE_JSON = USER_DIR / "hub.json"
 SERVERS_DIR = USER_DIR / "servers"
 
 DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
-    "version": "0.4.6",
+    "version": "0.4.7",
     "mode": "read_write",              # "read_write" | "read_only"
     "safe_writes": True,               # blocks naked UPDATE/DELETE without WHERE and TRUNCATE without allow_unfiltered
     "require_confirm_on_prod": False,  # optional user prompt before executing on prod env (default false)

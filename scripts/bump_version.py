@@ -43,7 +43,15 @@ def bump_all():
             p.write_text(new_text, encoding="utf-8")
             print(f"  • Updated {p.relative_to(ROOT_DIR)}")
 
-    # 3. Update README.md
+    # 3. Update core/config.py
+    cfg_path = ROOT_DIR / "src" / "mcp_win_stdio" / "core" / "config.py"
+    if cfg_path.exists():
+        text = cfg_path.read_text(encoding="utf-8")
+        new_text = re.sub(r'"version": "[0-9]+\.[0-9]+\.[0-9]+"', f'"version": "{NEW_VERSION}"', text)
+        cfg_path.write_text(new_text, encoding="utf-8")
+        print(f"  • Updated {cfg_path.relative_to(ROOT_DIR)}")
+
+    # 4. Update README.md
     readme_path = ROOT_DIR / "README.md"
     if readme_path.exists():
         text = readme_path.read_text(encoding="utf-8")

@@ -84,7 +84,7 @@ mws
 Output:
 ```text
 ============================================================================
-   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.4.6)
+   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.4.7)
 ============================================================================
 
  Single-Source Hub:      C:\Users\admin\.mcp-win-stdio
