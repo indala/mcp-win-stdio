@@ -241,10 +241,14 @@ class CircuitBreaker:
         self.cooldown_seconds = cooldown_seconds
         self.consecutive_failures: Dict[str, int] = {}
         self.opened_at: Dict[str, float] = {}
+        self.probing: Dict[str, bool] = {}
         self._lock = threading.RLock()
 
     def check_availability(self, server: str) -> Optional[str]:
-        """Check if server is blocked by open circuit breaker. Returns error message if blocked."""
+        """
+        Check if server is blocked by open circuit breaker. Returns error message if blocked.
+        Guarantees that when transitioning to half-open, exactly ONE thread is granted the probe.
+        """
         srv = server.lower().strip()
         with self._lock:
             opened = self.opened_at.get(srv)
@@ -254,7 +258,11 @@ class CircuitBreaker:
                     remaining = int(self.cooldown_seconds - elapsed)
                     return f"Server '{srv}' circuit breaker is OPEN due to repeated process crashes/timeouts. Retry in {remaining}s."
                 else:
-                    # Half-open: allow a single probe request through
+                    # Cooldown elapsed -> half-open transition
+                    if self.probing.get(srv, False):
+                        return f"Server '{srv}' is currently probing recovery. Please wait a moment."
+                    # Lock probe to this caller
+                    self.probing[srv] = True
                     return None
             return None
 
@@ -264,11 +272,13 @@ class CircuitBreaker:
         with self._lock:
             self.consecutive_failures.pop(srv, None)
             self.opened_at.pop(srv, None)
+            self.probing.pop(srv, None)
 
     def record_infrastructure_failure(self, server: str, error_msg: str) -> None:
         """Record a crash, timeout, or pipe failure. Trip breaker if threshold reached."""
         srv = server.lower().strip()
         with self._lock:
+            self.probing.pop(srv, None)
             cnt = self.consecutive_failures.get(srv, 0) + 1
             self.consecutive_failures[srv] = cnt
             if cnt >= self.failure_threshold:

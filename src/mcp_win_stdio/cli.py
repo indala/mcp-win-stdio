@@ -1145,6 +1145,54 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         latest = get_cached_or_latest_version(force=True)
         print(f"[OK] mcp-win-stdio is up to date: v{__version__} (PyPI: v{latest or __version__})")
 
+    # 9. Monorepo Installation & Source Drift Check
+    print("\n--- Package Provenance & Drift Diagnostics ---")
+    import mcp_win_stdio
+
+    pkg_file = Path(mcp_win_stdio.__file__).resolve()
+    cwd_src = Path.cwd() / "src" / "mcp_win_stdio"
+    if cwd_src.exists() and not str(pkg_file).startswith(str(Path.cwd().resolve())):
+        print(f"[WARN] Source Drift Detected! Running from: {pkg_file}")
+        print(f"       Working directory source is: {cwd_src}")
+        print("       👉 Run 'pip install -e .' to link your current working directory directly.")
+    else:
+        print(f"[OK] Source Package: Linked to {pkg_file}")
+
+    # 10. Gateway Health, Circuit Breakers & Artifact Storage
+    print("\n--- Gateway Infrastructure & Storage Health ---")
+    try:
+        from mcp_win_stdio.core.artifacts import ARTIFACTS_DIR
+        from mcp_win_stdio.core.audit import AUDIT_LOG_FILE
+        from mcp_win_stdio.server.process_pool import CIRCUIT_BREAKER
+
+        # Breaker status
+        breaker_status = CIRCUIT_BREAKER.get_status()
+        if breaker_status:
+            for srv, b_info in breaker_status.items():
+                st = b_info.get("state")
+                rem = b_info.get("retry_in_seconds", 0)
+                print(f"[WARN] Server '{srv}' Circuit Breaker: {st.upper()} (cooldown: {rem}s)")
+        else:
+            print("[OK] Circuit Breakers: All healthy (0 open breakers)")
+
+        # Audit log size
+        if AUDIT_LOG_FILE.exists():
+            sz_mb = round(AUDIT_LOG_FILE.stat().st_size / (1024 * 1024), 2)
+            print(f"[OK] Audit Log: {AUDIT_LOG_FILE} ({sz_mb} MB)")
+        else:
+            print(f"[INFO] Audit Log: {AUDIT_LOG_FILE} (0 KB)")
+
+        # Artifacts storage size
+        if ARTIFACTS_DIR.exists():
+            art_files = list(ARTIFACTS_DIR.glob("art_*.json"))
+            total_art_bytes = sum(f.stat().st_size for f in art_files)
+            sz_mb = round(total_art_bytes / (1024 * 1024), 2)
+            print(f"[OK] Artifacts Cache: {len(art_files)} files ({sz_mb} MB / 500 MB limit)")
+        else:
+            print(f"[INFO] Artifacts Cache: {ARTIFACTS_DIR} (empty)")
+    except Exception as e:
+        print(f"[INFO] Gateway storage check: {e}")
+
     print("\nDiagnostic complete.\n")
 
 

@@ -42,16 +42,18 @@ def redact_secrets(val: Any) -> Any:
             masked,
             flags=re.IGNORECASE,
         )
-        # 3. Redact inline command flags: --password=xyz, --password secret, -pSECRET, PASSWORD=xyz
+        # 3. Redact inline command flags: --password=xyz, --password secret, -pSECRET (excluding port/process flags)
         masked = re.sub(
             r"(--(?:password|passwd|token|api-key|secret)[=\s]+)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
             r"\1******",
             masked,
             flags=re.IGNORECASE,
         )
+        # Match -pSecret or -p"Secret" where flag is followed immediately by password or quoted password
+        # Specifically ignore numeric ports (-p 8080:80, -p 8080, ps -p 123) and flags like -pthread
         masked = re.sub(
-            r"(?<![a-zA-Z0-9_-])(-p)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-            r"\1******",
+            r"(?<![a-zA-Z0-9_-])(-p)(?:\"[^\"]+\"|'[^']+'|[a-zA-Z0-9_\$#@!]{6,})(?!\s*:\s*\d+)",
+            lambda m: m.group(0) if m.group(0).startswith(("-pthread", "-pie", "-pg")) else "-p******",
             masked,
         )
         masked = re.sub(

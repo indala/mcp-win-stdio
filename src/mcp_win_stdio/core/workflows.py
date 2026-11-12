@@ -105,7 +105,27 @@ def validate_workflow_preflight(
                 "message": f"Step '{step_id}' is missing required 'tool' field.",
             })
 
-        # 2. Template Reference Ordering & Existence
+        # 2. Depends-on & Template Reference Ordering & Existence
+        depends_on = step.get("depends_on")
+        if depends_on:
+            if not isinstance(depends_on, list):
+                errors.append({
+                    "type": "invalid_depends_on",
+                    "step_id": step_id,
+                    "step_index": step_num,
+                    "message": f"Step '{step_id}' 'depends_on' must be a list of step IDs.",
+                })
+            else:
+                for dep in depends_on:
+                    if dep not in seen_step_ids:
+                        errors.append({
+                            "type": "invalid_dependency",
+                            "step_id": step_id,
+                            "step_index": step_num,
+                            "dependency": dep,
+                            "message": f"Step '{step_id}' depends on '{dep}', which has not appeared earlier in workflow.",
+                        })
+
         refs = extract_template_references(raw_args)
         for ref in refs:
             if ref.startswith("steps."):
