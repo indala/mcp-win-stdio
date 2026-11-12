@@ -36,6 +36,12 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "default_client": "all",
     "log_level": "INFO",
     "installed_servers": {},
+    "tunnel": {
+        "mode": "read_only",           # default remote security mode
+        "port": 8080,                  # local bridge port
+        "token": None,                 # optional static bearer token; if None, random token is generated
+        "host": "127.0.0.1",
+    },
 }
 
 
@@ -182,4 +188,15 @@ def is_require_confirm_on_prod_enabled(workspace_dir: Optional[Path] = None) -> 
     """Check if require_confirm_on_prod is enabled (default False)."""
     cfg = load_hierarchical_config(workspace_dir)
     return bool(cfg.get("require_confirm_on_prod", False))
+
+
+def get_tunnel_config(workspace_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Return effective tunnel configuration merged from hierarchical config."""
+    cfg = load_hierarchical_config(workspace_dir)
+    default_tunnel = dict(DEFAULT_SYSTEM_CONFIG["tunnel"])
+    tunnel_cfg = cfg.get("tunnel")
+    if isinstance(tunnel_cfg, dict):
+        default_tunnel.update(tunnel_cfg)
+    return default_tunnel
+
 

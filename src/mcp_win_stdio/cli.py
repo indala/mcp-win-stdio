@@ -2576,6 +2576,131 @@ def cmd_hub_restart(args: argparse.Namespace) -> None:
     cmd_hub_start(args)
 
 
+def cmd_tunnel(args: argparse.Namespace) -> None:
+    """Launch public Cloudflare Tunnel for MWS StreamableHTTP endpoint with pre-flight config review."""
+    from mcp_win_stdio.core.config import (
+        get_tunnel_config,
+        load_hierarchical_config,
+        save_config,
+    )
+    from mcp_win_stdio.core.tunnel import MwsTunnelManager
+
+    if not MwsTunnelManager.is_cloudflared_installed():
+        print("❌ Error: 'cloudflared' CLI is not installed or not found in system PATH.", file=sys.stderr)
+        print("👉 Please install Cloudflare Tunnel CLI from:", file=sys.stderr)
+        print("   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/", file=sys.stderr)
+        sys.exit(1)
+
+    # 1. Resolve configuration defaults
+    hier_cfg = load_hierarchical_config()
+    tunnel_cfg = get_tunnel_config()
+    workspace_path = hier_cfg.get("_resolved_sources", {}).get("workspace_path")
+    scope_name = "Workspace" if workspace_path else "Global"
+
+    mode = (getattr(args, "mode", None) or tunnel_cfg.get("mode") or "read_only").lower().strip()
+    port = int(getattr(args, "port", None) or tunnel_cfg.get("port") or 8080)
+    token = getattr(args, "token", None) or tunnel_cfg.get("token")
+    auto_yes = bool(getattr(args, "yes", False))
+
+    # 2. Interactive Pre-flight Review (if stdin is interactive and --yes was not provided)
+    if not auto_yes and sys.stdin.isatty():
+        while True:
+            print("\n============================================================")
+            print("         🌐 MWS REMOTE TUNNEL PRE-FLIGHT CONFIGURATION      ")
+            print("============================================================")
+            print(f" • Scope:            {scope_name} ({workspace_path or '~/.mcp-win-stdio/config.json'})")
+            print(f" • Security Mode:    {mode.upper()} ({'Naked write protection + Safe' if mode == 'read_write' else 'All mutations blocked'})")
+            print(f" • Local Bridge:     http://127.0.0.1:{port}")
+            print(f" • Auth Token:       {'Static / User-configured' if token else 'Ephemeral Cryptographic Token (Auto-generated)'}")
+            print("------------------------------------------------------------")
+            print(" [1] 🚀 Start Tunnel with these settings")
+            print(f" [2] 🛡️  Toggle Security Mode (currently: {mode})")
+            print(f" [3] 🔢 Change Local Bridge Port (currently: {port})")
+            print(f" [4] 🔑 Set Custom Bearer Token (currently: {'Set' if token else 'Auto-generate'})")
+            print(" [5] 💾 Save current tunnel settings to config")
+            print(" [Q] ❌ Cancel & Exit")
+            print("------------------------------------------------------------")
+            try:
+                choice = input("Select an option [1-5, Q]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nOperation cancelled.")
+                sys.exit(0)
+
+            if choice in ("1", "", "start", "run"):
+                break
+            elif choice == "2":
+                mode = "read_write" if mode == "read_only" else "read_only"
+                print(f"Security Mode set to: {mode}")
+            elif choice == "3":
+                try:
+                    p_in = input(f"Enter local bridge port [{port}]: ").strip()
+                    if p_in:
+                        port = int(p_in)
+                except ValueError:
+                    print("Invalid port number.")
+            elif choice == "4":
+                t_in = input("Enter custom bearer token (leave empty for auto-generated): ").strip()
+                token = t_in if t_in else None
+            elif choice == "5":
+                save_scope = "workspace" if workspace_path else "global"
+                target_cfg = dict(hier_cfg)
+                target_cfg.pop("_resolved_sources", None)
+                if "tunnel" not in target_cfg or not isinstance(target_cfg["tunnel"], dict):
+                    target_cfg["tunnel"] = {}
+                target_cfg["tunnel"]["mode"] = mode
+                target_cfg["tunnel"]["port"] = port
+                target_cfg["tunnel"]["token"] = token
+                saved_to = save_config(target_cfg, scope=save_scope)
+                print(f"✅ Saved tunnel configuration to {saved_to}")
+            elif choice in ("q", "quit", "exit"):
+                print("Tunnel start aborted.")
+                sys.exit(0)
+
+    # 3. Launch tunnel manager
+    print(f"\n🚀 Launching MWS StreamableHTTP bridge on 127.0.0.1:{port} (mode: {mode})...")
+    mgr = MwsTunnelManager(
+        port=port,
+        mode=mode,
+        token=token,
+        host="127.0.0.1",
+    )
+
+    try:
+        mgr.start_local_bridge()
+    except Exception as bridge_err:
+        print(f"❌ Failed to start local HTTP bridge: {bridge_err}", file=sys.stderr)
+        sys.exit(1)
+
+    print("☁️  Connecting to Cloudflare edge network via quick tunnel...")
+    try:
+        public_url = mgr.start_cloudflare_tunnel(timeout=20.0)
+    except Exception as cf_err:
+        mgr.stop()
+        print(f"❌ Failed to establish Cloudflare tunnel: {cf_err}", file=sys.stderr)
+        sys.exit(1)
+
+    mcp_endpoint = f"{public_url}/mcp"
+    client_cfg = mgr.get_client_config()
+
+    print("\n============================================================")
+    print("           🔗 MWS REMOTE MCP TUNNEL IS LIVE 🔗              ")
+    print("============================================================")
+    print(f" • Public HTTPS URL:  {public_url}")
+    print(f" • MCP Endpoint:      {mcp_endpoint}")
+    print(f" • Bearer Auth Token: {mgr.token}")
+    print(f" • Security Mode:     {mode}")
+    print("------------------------------------------------------------")
+    print("📋 Copy & Paste into ChatGPT / Gemini / Claude Web / Cursor:\n")
+    print(json.dumps(client_cfg, indent=2))
+    print("\n------------------------------------------------------------")
+    print("Press Ctrl+C to disconnect and close the tunnel safely.")
+    print("============================================================\n", flush=True)
+
+    mgr.wait()
+    print("\n🛑 Cloudflare tunnel disconnected and local bridge stopped successfully.")
+
+
+
 def main() -> None:
     """CLI entry point."""
     cleanup_old_executables()
@@ -2836,6 +2961,39 @@ def main() -> None:
         help="Force-terminate existing hub process if unresponsive",
     )
     hub_restart.set_defaults(func=cmd_hub_restart)
+
+    # 13. tunnel: public Cloudflare Tunnel for ChatGPT, Gemini, and Claude Web
+    sub_tunnel = subparsers.add_parser(
+        "tunnel",
+        help="Expose local MWS MCP tools to ChatGPT, Gemini, and Claude Web via secure Cloudflare Tunnel",
+    )
+    sub_tunnel.add_argument(
+        "--mode",
+        "-m",
+        choices=["read_only", "read_write"],
+        default=None,
+        help="Access security mode (default: read_only)",
+    )
+    sub_tunnel.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=None,
+        help="Local bridge port (default: 8080)",
+    )
+    sub_tunnel.add_argument(
+        "--token",
+        "-t",
+        default=None,
+        help="Custom Bearer token (default: auto-generated cryptographic token)",
+    )
+    sub_tunnel.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Bypass interactive pre-flight review and launch tunnel immediately",
+    )
+    sub_tunnel.set_defaults(func=cmd_tunnel)
 
     # Support alternate command syntax: `mws git guide` -> `mws guide git` or `mws db run` -> `mws run db`
     known_srvs = {
