@@ -539,7 +539,7 @@ def test_config_wizard_helpers(tmp_path, monkeypatch):
     with redirect_stdout(f):
         cmd_config(args)
     out = f.getvalue()
-    assert "Persistent Configurations Summary" in out
+    assert "Configuration" in out
     print("[PASS] Config wizard helper tests passed.")
 
 

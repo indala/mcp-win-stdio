@@ -306,9 +306,10 @@ def describe_tool(
 ) -> Dict[str, Any]:
     """
     Get full parameter schema, data types, required fields, and docstring for a specific tool.
+    Do NOT pass server names (e.g. 'db', 'excel', 'ssh') as 'name'; to inspect a server, use call_server(server='db').
 
     Args:
-        name: The tool name (e.g. 'read_query', 'get_workbook_info').
+        name: The tool name to describe (e.g. 'read_query', 'get_workbook_info', 'ssh_exec').
         server: Optional target server name. Auto-resolved from catalog if omitted.
         tool_name: Alias for name.
         tool: Alias for name.
@@ -320,6 +321,38 @@ def describe_tool(
         }
     target_tool = str(raw_tool).strip()
     target_server = (server or "").lower().strip()
+    available_servers = discover_available_servers()
+
+    # Smart Recovery 1: If 'name' is actually a registered server name (e.g. agent called describe_tool(name="db"))
+    clean_target = target_tool.lower()
+    if clean_target in available_servers:
+        cat_data = get_server_catalog(
+            server=clean_target,
+            include_tools=True,
+            include_signatures=True,
+        )
+        srv_info = cat_data.get("servers", {}).get(clean_target, {})
+        tools_list = srv_info.get("tools", [])
+        sample_name = "read_query"
+        if tools_list:
+            first_t = tools_list[0]
+            sample_name = first_t.get("name") if isinstance(first_t, dict) else str(first_t).split("(")[0]
+        return {
+            "notice": f"'{target_tool}' is a sub-server, not a single tool.",
+            "server": clean_target,
+            "description": srv_info.get("description", ""),
+            "tool_count": len(tools_list),
+            "hint": f"To activate this server and view tools in context, call call_server(server='{clean_target}'). To describe a specific tool, pass its name, e.g. describe_tool(name='{sample_name}', server='{clean_target}').",
+            "available_tools": tools_list[:15],
+            "has_more_tools": len(tools_list) > 15,
+        }
+
+    # Smart Recovery 2: Dot notation in name (e.g. 'db.read_query')
+    if "." in target_tool:
+        prefix, actual_tool = target_tool.split(".", 1)
+        if prefix.lower() in available_servers:
+            target_server = prefix.lower()
+            target_tool = actual_tool
 
     if not target_server:
         candidates = find_servers_for_tool(target_tool)
@@ -366,7 +399,7 @@ def call_tool(
     - Sessions are isolated via transport-level session identity to prevent multi-agent crosstalk.
 
     Args:
-        name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info').
+        name: The tool name to execute (e.g. 'read_query', 'preview_sheet', 'get_workbook_info'). Do NOT pass server names like 'db' or 'ssh' as the tool name; to explore a server, use call_server(server='db').
         arguments: Dictionary of arguments matching the tool's parameter schema.
         server: Optional target server name (e.g. 'db', 'excel', 'word', 'tsc', 'ssh', 'git', 'arch').
         tool_name: Alias for name.
@@ -432,6 +465,30 @@ def call_tool(
             if matching:
                 target_tool = target_server
                 target_server = matching[0]
+
+    # Smart Recovery: If target_tool itself is a registered server name (e.g. call_tool(name="db"))
+    # The agent confused a server with a tool!
+    if target_tool.lower() in available_servers:
+        confused_server = target_tool.lower()
+        cat_data = get_server_catalog(
+            server=confused_server,
+            include_tools=True,
+            include_signatures=True,
+        )
+        srv_info = cat_data.get("servers", {}).get(confused_server, {})
+        tools_list = srv_info.get("tools", [])
+        sample_tool = "read_query"
+        if tools_list:
+            first_t = tools_list[0]
+            sample_tool = first_t.get("name") if isinstance(first_t, dict) else str(first_t).split("(")[0]
+        return {
+            "isError": True,
+            "error": f"'{target_tool}' is a sub-server, not a tool.",
+            "server": confused_server,
+            "hint": f"To run a tool on '{confused_server}', specify the tool name. E.g.: call_tool(name='{sample_tool}', server='{confused_server}') or activate it first via call_server(server='{confused_server}').",
+            "available_tools": tools_list[:15],
+            "total_tools": len(tools_list),
+        }
 
     if not target_tool:
         return {

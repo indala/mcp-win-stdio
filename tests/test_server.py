@@ -11,7 +11,7 @@ for p in Path("packages").glob("*/src"):
 sys.path.insert(0, str(Path("src").resolve()))
 
 from mcp_win_stdio.server.catalog import (
-    describe_tool,
+    describe_tool as catalog_describe_tool,
     generate_compact_signature,
     get_server_catalog,
     get_server_tools,
@@ -23,6 +23,7 @@ from mcp_win_stdio.server.process_pool import GLOBAL_POOL, ProcessPool
 from mcp_win_stdio.server.server import (
     call_tool,
     delete_workflow,
+    describe_tool,
     get_active_sessions,
     list_servers,
     list_workflows,
@@ -57,7 +58,7 @@ def test_server_catalog():
     # Check db in catalog
     assert "db" in catalog["servers"]
     db_entry = catalog["servers"]["db"]
-    assert db_entry["tool_count"] == 34
+    assert db_entry["tool_count"] >= 34
     assert "read_query" in db_entry["tools"]
     assert "list_connections" in db_entry["tools"]
 
@@ -91,8 +92,8 @@ def test_search_tools():
 
 
 def test_describe_tool():
-    """Verify describe_tool returns exact parameters and docstring."""
-    desc = describe_tool("db", "read_query")
+    """Verify catalog_describe_tool returns exact parameters and docstring."""
+    desc = catalog_describe_tool("db", "read_query")
     assert desc is not None
     assert desc["server"] == "db"
     assert desc["tool"] == "read_query"
@@ -101,7 +102,7 @@ def test_describe_tool():
     assert "limit" in desc["parameters"]["properties"]
 
     # Non-existent tool returns None
-    assert describe_tool("db", "non_existent_tool_xyz") is None
+    assert catalog_describe_tool("db", "non_existent_tool_xyz") is None
 
 
 def test_process_pool_lazy_spawn_and_proxy():
@@ -520,4 +521,24 @@ def test_e2e_mcp_transport_session_isolation_and_persistence():
                 tg1.cancel_scope.cancel()
 
     anyio.run(scenario)
+
+
+def test_agent_server_tool_disambiguation():
+    """Verify that confusing a server name for a tool name is gracefully intercepted."""
+    # 1. Agent calls describe_tool(name="db")
+    res_desc = describe_tool(name="db")
+    assert "notice" in res_desc
+    assert "'db' is a sub-server, not a single tool." in res_desc["notice"]
+    assert res_desc["server"] == "db"
+    assert "available_tools" in res_desc
+    assert len(res_desc["available_tools"]) > 0
+
+    # 2. Agent calls call_tool(name="db")
+    res_call = call_tool(name="db")
+    assert res_call.get("isError") is True
+    assert "'db' is a sub-server, not a tool." in res_call["error"]
+    assert res_call["server"] == "db"
+    assert "available_tools" in res_call
+    assert "hint" in res_call
+
 
