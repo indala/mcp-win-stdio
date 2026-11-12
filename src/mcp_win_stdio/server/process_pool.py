@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from mcp_win_stdio.core.config import BREAKER_STATE_FILE
+
 from .config import DEFAULT_IDLE_TIMEOUT_SECONDS, MAX_RESPONSE_CHARS
 from .discovery import discover_available_servers
 
@@ -37,6 +39,10 @@ class MCPProcess:
             combined = os.pathsep.join(extra_paths)
             env["PYTHONPATH"] = f"{combined}{os.pathsep}{existing_pp}" if existing_pp else combined
 
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
         self.proc = subprocess.Popen(
             [self.command, *self.args],
             stdin=subprocess.PIPE,
@@ -46,6 +52,7 @@ class MCPProcess:
             text=True,
             bufsize=1,
             encoding="utf-8",
+            creationflags=creationflags,
         )
         self.pid = self.proc.pid
         self._initialized = False
@@ -58,15 +65,21 @@ class MCPProcess:
         """
         Force-terminate the child process and all its grandchildren cleanly on Windows.
         Ensures spawned processes like npx, node, uvx, or python sub-workers don't become zombies.
+        Guarded against killing self, 0, or invalid PIDs.
         """
         if not self.is_alive():
             return
+        if not self.pid or self.pid <= 0 or self.pid == os.getpid():
+            return
+
         if sys.platform == "win32":
             try:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(self.pid)],
-                    capture_output=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     stdin=subprocess.DEVNULL,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
                     timeout=5.0,
                 )
             except Exception:
@@ -80,12 +93,31 @@ class MCPProcess:
             except Exception:
                 pass
 
+    def _bytes_available(self) -> int:
+        """Non-blocking inspection of pending bytes on child stdout pipe (Windows-safe)."""
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                import msvcrt
+                from ctypes import wintypes
+
+                handle = msvcrt.get_osfhandle(self.proc.stdout.fileno())
+                avail = wintypes.DWORD()
+                success = ctypes.windll.kernel32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(avail), None)
+                return avail.value if success else 0
+            except Exception:
+                return 0
+        return 1
+
     def _next_id(self) -> int:
         self._request_id += 1
         return self._request_id
 
     def send_request(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: float = 60.0) -> Any:
         """Send a JSON-RPC request and wait for matching response."""
+        should_kill = False
+        kill_reason = None
+
         with self._lock:
             if not self.is_alive():
                 raise RuntimeError(f"MCP server '{self.name}' (PID {self.pid}) is no longer running.")
@@ -102,48 +134,69 @@ class MCPProcess:
                 self.proc.stdin.write(raw)
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
-                self.kill_process_tree()
-                raise RuntimeError(f"Failed writing to MCP server '{self.name}': {exc}") from exc
+                should_kill = True
+                kill_reason = f"Failed writing to MCP server '{self.name}': {exc}"
 
-            # Read responses until we find the response matching req_id
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                line = self.proc.stdout.readline()
-                if not line:
-                    if not self.is_alive():
-                        stderr_out = ""
-                        try:
-                            stderr_out = self.proc.stderr.read()
-                        except Exception:
-                            pass
-                        raise RuntimeError(
-                            f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out[:500]}"
-                        )
-                    time.sleep(0.01)
-                    continue
+            if not should_kill:
+                # Read responses until we find the response matching req_id
+                start_time = time.time()
+                while time.time() - start_time < timeout:
+                    if self._bytes_available() == 0:
+                        if not self.is_alive():
+                            stderr_out = ""
+                            try:
+                                stderr_out = self.proc.stderr.read()
+                            except Exception:
+                                pass
+                            raise RuntimeError(
+                                f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out[:500]}"
+                            )
+                        time.sleep(0.01)
+                        continue
 
-                line_str = line.strip()
-                if not line_str.startswith("{"):
-                    continue
+                    line = self.proc.stdout.readline()
+                    if not line:
+                        if not self.is_alive():
+                            stderr_out = ""
+                            try:
+                                stderr_out = self.proc.stderr.read()
+                            except Exception:
+                                pass
+                            raise RuntimeError(
+                                f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out[:500]}"
+                            )
+                        time.sleep(0.01)
+                        continue
 
-                try:
-                    msg = json.loads(line_str)
-                except json.JSONDecodeError:
-                    continue
+                    line_str = line.strip()
+                    if not line_str.startswith("{"):
+                        continue
 
-                if msg.get("id") == req_id:
-                    self.last_active_at = time.time()
-                    if "error" in msg:
-                        err = msg["error"]
-                        raise RuntimeError(f"MCP Error from '{self.name}': {err.get('message', err)}")
-                    return msg.get("result")
+                    try:
+                        msg = json.loads(line_str)
+                    except json.JSONDecodeError:
+                        continue
 
-            # On timeout: kill process tree immediately to prevent pipe desynchronization!
+                    if msg.get("id") == req_id:
+                        self.last_active_at = time.time()
+                        if "error" in msg:
+                            err = msg["error"]
+                            raise RuntimeError(f"MCP Error from '{self.name}': {err.get('message', err)}")
+                        return msg.get("result")
+
+                # Reached timeout without matching response
+                should_kill = True
+                kill_reason = (
+                    f"Timed out waiting for response from '{self.name}' on method '{method}' after {timeout}s. "
+                    "Child process tree terminated to prevent pipe desynchronization."
+                )
+
+        # On error or timeout: kill process tree OUTSIDE the lock!
+        if should_kill:
             self.kill_process_tree()
-            raise TimeoutError(
-                f"Timed out waiting for response from '{self.name}' on method '{method}' after {timeout}s. "
-                "Child process tree terminated to prevent pipe desynchronization."
-            )
+            if "Timed out" in (kill_reason or ""):
+                raise TimeoutError(kill_reason)
+            raise RuntimeError(kill_reason)
 
     def send_notification(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Send a JSON-RPC notification (no response expected)."""
@@ -180,7 +233,12 @@ class MCPProcess:
         result = self.send_request("tools/list", {})
         return result.get("tools", []) if isinstance(result, dict) else []
 
-    def call_tool(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+    def call_tool(
+        self,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
         """Execute a tool dynamically on the child server."""
         self.initialize()
         call_params = {
@@ -188,7 +246,8 @@ class MCPProcess:
             "arguments": arguments or {},
         }
         self.tools_called_count += 1
-        result = self.send_request("tools/call", call_params, timeout=120.0)
+        effective_timeout = timeout if timeout is not None else 120.0
+        result = self.send_request("tools/call", call_params, timeout=effective_timeout)
         return self._format_result(result)
 
     def _format_result(self, raw_result: Any) -> Any:
@@ -243,6 +302,32 @@ class CircuitBreaker:
         self.opened_at: Dict[str, float] = {}
         self.probing: Dict[str, bool] = {}
         self._lock = threading.RLock()
+        self._load_persisted_state()
+
+    def _load_persisted_state(self) -> None:
+        """Load breaker state persisted by server process."""
+        if BREAKER_STATE_FILE.exists():
+            try:
+                data = json.loads(BREAKER_STATE_FILE.read_text(encoding="utf-8"))
+                self.consecutive_failures = data.get("failures", {})
+                self.opened_at = data.get("opened_at", {})
+            except Exception:
+                pass
+
+    def _persist_state(self) -> None:
+        """Persist breaker state atomically for CLI (e.g. mws doctor) inspection."""
+        try:
+            BREAKER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "failures": self.consecutive_failures,
+                "opened_at": self.opened_at,
+                "updated_at": time.time(),
+            }
+            tmp = BREAKER_STATE_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(BREAKER_STATE_FILE)
+        except Exception:
+            pass
 
     def check_availability(self, server: str) -> Optional[str]:
         """
@@ -273,6 +358,7 @@ class CircuitBreaker:
             self.consecutive_failures.pop(srv, None)
             self.opened_at.pop(srv, None)
             self.probing.pop(srv, None)
+            self._persist_state()
 
     def record_infrastructure_failure(self, server: str, error_msg: str) -> None:
         """Record a crash, timeout, or pipe failure. Trip breaker if threshold reached."""
@@ -283,6 +369,7 @@ class CircuitBreaker:
             self.consecutive_failures[srv] = cnt
             if cnt >= self.failure_threshold:
                 self.opened_at[srv] = time.time()
+            self._persist_state()
 
     def get_status(self) -> Dict[str, Any]:
         """Inspect circuit breaker state for all servers."""
@@ -323,38 +410,43 @@ class ProcessPool:
         if blocked_msg:
             raise ConnectionError(blocked_msg)
 
-        with self._pool_lock:
-            existing = self._processes.get(norm_name)
-            if existing and existing.is_alive():
-                return existing
+        try:
+            with self._pool_lock:
+                existing = self._processes.get(norm_name)
+                if existing and existing.is_alive():
+                    return existing
 
-            if existing:
+                if existing:
+                    try:
+                        existing.terminate()
+                    except Exception:
+                        pass
+                    self._processes.pop(norm_name, None)
+
+                available = discover_available_servers()
+                srv_spec = available.get(norm_name)
+                if not srv_spec:
+                    raise ValueError(
+                        f"Unknown MCP server '{norm_name}'. Available servers: {', '.join(sorted(available.keys()))}"
+                    )
+
                 try:
-                    existing.terminate()
-                except Exception:
-                    pass
-                self._processes.pop(norm_name, None)
-
-            available = discover_available_servers()
-            srv_spec = available.get(norm_name)
-            if not srv_spec:
-                raise ValueError(
-                    f"Unknown MCP server '{norm_name}'. Available servers: {', '.join(sorted(available.keys()))}"
-                )
-
-            try:
-                proc = MCPProcess(
-                    name=norm_name,
-                    command=srv_spec["command"],
-                    args=srv_spec["args"],
-                )
-                proc.initialize()
-                self._processes[norm_name] = proc
-                self.circuit_breaker.record_success(norm_name)
-                return proc
-            except Exception as e:
-                self.circuit_breaker.record_infrastructure_failure(norm_name, str(e))
-                raise
+                    proc = MCPProcess(
+                        name=norm_name,
+                        command=srv_spec["command"],
+                        args=srv_spec["args"],
+                    )
+                    proc.initialize()
+                    self._processes[norm_name] = proc
+                    self.circuit_breaker.record_success(norm_name)
+                    return proc
+                except Exception as e:
+                    self.circuit_breaker.record_infrastructure_failure(norm_name, str(e))
+                    raise
+        except Exception:
+            with self.circuit_breaker._lock:
+                self.circuit_breaker.probing.pop(norm_name, None)
+            raise
 
     def stop_server(self, server_name: str) -> bool:
         """Stop a specific active child MCP server."""

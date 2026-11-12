@@ -5,8 +5,10 @@ in a single call, eliminating token bloat and multi-turn latency.
 Stored in ~/.mcp-win-stdio/workflows/ (global) or <workspace>/.mws/workflows/ (project).
 """
 
+import concurrent.futures
 import json
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
@@ -87,7 +89,16 @@ def validate_workflow_preflight(
         tool = str(step.get("tool") or "").strip()
         raw_args = step.get("arguments") or {}
 
-        # 1. Server & tool existence
+        # 1. Step ID uniqueness and self-dependency check
+        if step_id in seen_step_ids:
+            errors.append({
+                "type": "duplicate_step_id",
+                "step_id": step_id,
+                "step_index": step_num,
+                "message": f"Step '{step_id}' is declared more than once in workflow.",
+            })
+
+        # 2. Server & tool existence
         if not server:
             errors.append({
                 "type": "missing_field",
@@ -105,27 +116,35 @@ def validate_workflow_preflight(
                 "message": f"Step '{step_id}' is missing required 'tool' field.",
             })
 
-        # 2. Depends-on & Template Reference Ordering & Existence
-        depends_on = step.get("depends_on")
-        if depends_on:
-            if not isinstance(depends_on, list):
-                errors.append({
-                    "type": "invalid_depends_on",
-                    "step_id": step_id,
-                    "step_index": step_num,
-                    "message": f"Step '{step_id}' 'depends_on' must be a list of step IDs.",
-                })
-            else:
-                for dep in depends_on:
-                    if dep not in seen_step_ids:
-                        errors.append({
-                            "type": "invalid_dependency",
-                            "step_id": step_id,
-                            "step_index": step_num,
-                            "dependency": dep,
-                            "message": f"Step '{step_id}' depends on '{dep}', which has not appeared earlier in workflow.",
-                        })
+        # 3. Depends-on & Template Reference Ordering & Auto-Inference
+        depends_on = step.get("depends_on") or []
+        if isinstance(depends_on, list):
+            for dep in depends_on:
+                if dep == step_id:
+                    errors.append({
+                        "type": "self_dependency",
+                        "step_id": step_id,
+                        "step_index": step_num,
+                        "message": f"Step '{step_id}' cannot depend on itself.",
+                    })
+                elif dep not in seen_step_ids:
+                    errors.append({
+                        "type": "invalid_dependency",
+                        "step_id": step_id,
+                        "step_index": step_num,
+                        "dependency": dep,
+                        "message": f"Step '{step_id}' depends on '{dep}', which has not appeared earlier in workflow.",
+                    })
+        elif depends_on:
+            errors.append({
+                "type": "invalid_depends_on",
+                "step_id": step_id,
+                "step_index": step_num,
+                "message": f"Step '{step_id}' 'depends_on' must be a list of step IDs.",
+            })
 
+        # Auto-infer dependencies from template references
+        inferred_deps = set(depends_on if isinstance(depends_on, list) else [])
         refs = extract_template_references(raw_args)
         for ref in refs:
             if ref.startswith("steps."):
@@ -140,7 +159,14 @@ def validate_workflow_preflight(
                     })
                 else:
                     ref_step_id = parts[1]
-                    if ref_step_id not in seen_step_ids:
+                    if ref_step_id == step_id:
+                        errors.append({
+                            "type": "self_dependency",
+                            "step_id": step_id,
+                            "step_index": step_num,
+                            "message": f"Step '{step_id}' references its own output.",
+                        })
+                    elif ref_step_id not in seen_step_ids:
                         errors.append({
                             "type": "invalid_step_dependency",
                             "step_id": step_id,
@@ -148,6 +174,8 @@ def validate_workflow_preflight(
                             "reference": ref,
                             "message": f"Step '{step_id}' references step '{ref_step_id}' via '{{{{ {ref} }}}}' before '{ref_step_id}' has executed.",
                         })
+                    else:
+                        inferred_deps.add(ref_step_id)
             else:
                 top_param = ref.split(".")[0]
                 if top_param not in declared_params and top_param not in ("params", "env"):
@@ -158,6 +186,9 @@ def validate_workflow_preflight(
                         "reference": ref,
                         "message": f"Step '{step_id}' references undeclared workflow parameter '{{{{ {ref} }}}}'. Declared parameters: {sorted(declared_params)}.",
                     })
+
+        # Save inferred dependencies back to step for execution scheduler
+        step["depends_on"] = sorted(inferred_deps)
 
         # 3. Tool Schema Contract Validation (skipping templated arguments & normalizing aliases)
         if server and tool and catalog_describe_fn:
@@ -575,7 +606,24 @@ def run_workflow(
     else:
         caller = call_tool_fn
 
-    # 4. Execute steps sequentially
+    # 4. Check if workflow enables DAG execution (opt-in via any explicit depends_on declaration)
+    has_explicit_dag = any(bool(s.get("depends_on")) for s in steps)
+
+    if not has_explicit_dag:
+        # Serial execution engine
+        return _run_serial_workflow(wf_name, steps, context, caller, start_time)
+    else:
+        # Opt-in DAG Concurrent Engine (bounded thread pool capped at 4, declaration-order deterministic output)
+        return _run_dag_workflow(wf_name, steps, context, caller, start_time)
+
+
+def _run_serial_workflow(
+    wf_name: str,
+    steps: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    caller: Callable[[str, str, Dict[str, Any]], Any],
+    start_time: float,
+) -> Dict[str, Any]:
     execution_trace: List[Dict[str, Any]] = []
 
     for idx, step in enumerate(steps):
@@ -600,7 +648,6 @@ def run_workflow(
         step_duration = round((time.perf_counter() - step_start) * 1000, 2)
 
         # Check for error
-        is_error = False
         if isinstance(result, dict):
             if result.get("isError") or result.get("status") == "error":
                 is_error = True
@@ -707,4 +754,243 @@ def run_workflow(
         "total_steps": len(steps),
         "duration_ms": total_duration,
         "trace": execution_trace,
+    }
+
+
+def _run_dag_workflow(
+    wf_name: str,
+    steps: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    caller: Callable[[str, str, Dict[str, Any]], Any],
+    start_time: float,
+) -> Dict[str, Any]:
+    """
+    DAG Concurrent Workflow Executor.
+    - Capped at 4 worker threads.
+    - Serializes requests per child server with a per-server RLock to prevent stdio pipe interleaving.
+    - Preserves deterministic declaration-order output trace.
+    - Halts scheduling on unrecovered failure while allowing running steps to finish.
+    """
+    step_map = {step.get("id") or f"step_{idx + 1}": (idx, step) for idx, step in enumerate(steps)}
+    total_steps = len(steps)
+
+    completed_ids: Set[str] = set()
+    failed_ids: Set[str] = set()
+    skipped_ids: Set[str] = set()
+    running_futures: Dict[concurrent.futures.Future, str] = {}
+
+    trace_records: Dict[str, Dict[str, Any]] = {}
+    context_lock = threading.RLock()
+    server_locks: Dict[str, threading.RLock] = {}
+
+    def _get_server_lock(srv: str) -> threading.RLock:
+        with context_lock:
+            if srv not in server_locks:
+                server_locks[srv] = threading.RLock()
+            return server_locks[srv]
+
+    halted = False
+    halted_step_id = None
+    halted_error = None
+
+    def execute_step(step_id: str, step_data: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        server = step_data.get("server", "").lower().strip()
+        tool = step_data.get("tool", "").strip()
+        raw_args = step_data.get("arguments") or {}
+        on_failure_action = step_data.get("on_failure")
+        summarize_out = step_data.get("summarize_output", False)
+
+        with context_lock:
+            resolved_args = resolve_template_value(raw_args, context)
+
+        step_start = time.perf_counter()
+        is_error = False
+
+        # Acquire per-server lock to ensure thread safety over stdio pipe
+        srv_lock = _get_server_lock(server)
+        with srv_lock:
+            try:
+                result = caller(server, tool, resolved_args)
+            except Exception as e:
+                result = {"isError": True, "error": str(e)}
+                is_error = True
+
+        step_duration = round((time.perf_counter() - step_start) * 1000, 2)
+        if isinstance(result, dict) and (result.get("isError") or result.get("status") == "error"):
+            is_error = True
+
+        # Recovery hook execution if step failed
+        recovery_record = None
+        if is_error and isinstance(on_failure_action, dict):
+            fail_server = on_failure_action.get("server", server).lower().strip()
+            fail_tool = on_failure_action.get("tool", "").strip()
+            fail_raw_args = on_failure_action.get("arguments") or {}
+            with context_lock:
+                fail_resolved = resolve_template_value(fail_raw_args, context)
+            with _get_server_lock(fail_server):
+                try:
+                    fail_res = caller(fail_server, fail_tool, fail_resolved)
+                    recovery_record = {
+                        "recovery_step": f"{step_id}_recovery",
+                        "server": fail_server,
+                        "tool": fail_tool,
+                        "status": "success",
+                        "output": fail_res,
+                    }
+                except Exception as fe:
+                    recovery_record = {
+                        "recovery_step": f"{step_id}_recovery",
+                        "server": fail_server,
+                        "tool": fail_tool,
+                        "status": "recovery_failed",
+                        "error": str(fe),
+                    }
+
+        final_output = _truncate_output_for_llm(result) if (summarize_out or is_error is False) else result
+        step_record = {
+            "step_id": step_id,
+            "step_index": idx + 1,
+            "server": server,
+            "tool": tool,
+            "duration_ms": step_duration,
+            "status": "error" if is_error else "success",
+            "output": final_output,
+        }
+        if recovery_record:
+            step_record["recovery"] = recovery_record
+
+        # Thread-safe context update
+        with context_lock:
+            if isinstance(result, dict):
+                step_ctx = dict(result)
+                if "output" not in step_ctx:
+                    step_ctx["output"] = result
+                context["steps"][step_id] = step_ctx
+            else:
+                context["steps"][step_id] = {"output": result}
+
+        return {"step_id": step_id, "is_error": is_error, "record": step_record, "raw_result": result}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="mws-dag") as executor:
+        while len(completed_ids) + len(failed_ids) + len(skipped_ids) < total_steps:
+            # Check for steps ready to run
+            ready_to_launch = []
+            if not halted:
+                for step_id, (idx, step_data) in step_map.items():
+                    if step_id in completed_ids or step_id in failed_ids or step_id in skipped_ids:
+                        continue
+                    if any(step_id == running_id for running_id in running_futures.values()):
+                        continue
+
+                    deps = step_data.get("depends_on") or []
+                    # If any dependency failed, mark this step skipped
+                    if any(dep in failed_ids or dep in skipped_ids for dep in deps):
+                        skipped_ids.add(step_id)
+                        trace_records[step_id] = {
+                            "step_id": step_id,
+                            "step_index": idx + 1,
+                            "server": step_data.get("server", "").lower().strip(),
+                            "tool": step_data.get("tool", "").strip(),
+                            "status": "skipped",
+                            "output": None,
+                        }
+                        continue
+
+                    # If all dependencies completed successfully, step is ready
+                    if all(dep in completed_ids for dep in deps):
+                        ready_to_launch.append((step_id, step_data, idx))
+
+            # Launch ready steps up to concurrency limit
+            for step_id, step_data, idx in ready_to_launch:
+                fut = executor.submit(execute_step, step_id, step_data, idx)
+                running_futures[fut] = step_id
+
+            if not running_futures:
+                # No running steps and nothing ready: all remaining become skipped
+                for step_id, (idx, step_data) in step_map.items():
+                    if step_id not in completed_ids and step_id not in failed_ids and step_id not in skipped_ids:
+                        skipped_ids.add(step_id)
+                        trace_records[step_id] = {
+                            "step_id": step_id,
+                            "step_index": idx + 1,
+                            "server": step_data.get("server", "").lower().strip(),
+                            "tool": step_data.get("tool", "").strip(),
+                            "status": "skipped",
+                            "output": None,
+                        }
+                break
+
+            # Wait for at least one running step to complete
+            done, _ = concurrent.futures.wait(
+                running_futures.keys(),
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+
+            for fut in done:
+                step_id = running_futures.pop(fut)
+                res = fut.result()
+                trace_records[step_id] = res["record"]
+                idx, step_data = step_map[step_id]
+
+                if res["is_error"]:
+                    failed_ids.add(step_id)
+                    halt_on_fail = step_data.get("halt_on_failure", True)
+                    continue_on_err = step_data.get("continue_on_error", False)
+                    if halt_on_fail and not continue_on_err:
+                        halted = True
+                        if not halted_step_id:
+                            halted_step_id = step_id
+                            halted_error = res["raw_result"]
+                else:
+                    completed_ids.add(step_id)
+
+    # Build declaration-order deterministic execution trace
+    ordered_trace = []
+    for idx, step in enumerate(steps):
+        s_id = step.get("id") or f"step_{idx + 1}"
+        if s_id in trace_records:
+            ordered_trace.append(trace_records[s_id])
+        else:
+            ordered_trace.append({
+                "step_id": s_id,
+                "step_index": idx + 1,
+                "server": step.get("server", "").lower().strip(),
+                "tool": step.get("tool", "").strip(),
+                "status": "skipped",
+                "output": None,
+            })
+
+    total_duration = round((time.perf_counter() - start_time) * 1000, 2)
+    successful_steps = len(completed_ids)
+    failed_steps = len(failed_ids)
+    skipped_steps = len(skipped_ids)
+    executed_steps = successful_steps + failed_steps
+
+    if halted:
+        return {
+            "workflow": wf_name,
+            "status": "halted_on_error",
+            "failed_step": halted_step_id,
+            "steps_completed": successful_steps,
+            "steps_successful": successful_steps,
+            "steps_failed": failed_steps,
+            "steps_skipped": skipped_steps,
+            "steps_executed": executed_steps,
+            "total_steps": total_steps,
+            "duration_ms": total_duration,
+            "error": halted_error,
+            "trace": ordered_trace,
+        }
+
+    return {
+        "workflow": wf_name,
+        "status": "completed_with_errors" if failed_steps > 0 else "success",
+        "steps_completed": successful_steps,
+        "steps_successful": successful_steps,
+        "steps_failed": failed_steps,
+        "steps_skipped": skipped_steps,
+        "steps_executed": executed_steps,
+        "total_steps": total_steps,
+        "duration_ms": total_duration,
+        "trace": ordered_trace,
     }

@@ -521,3 +521,101 @@ def test_server_run_workflow_invokes_call_tool_correctly(tmp_path):
         res = server_run_workflow(name="redeploy_test")
         assert res.get("status") == "success"
         mock_call_tool.assert_called_once_with(name="ssh_exec", arguments={"command": "uptime", "host": "prod"}, server="ssh")
+
+
+def test_dag_diamond_concurrency_execution():
+    """Verify diamond graph workflow executes independent steps concurrently across servers."""
+    import time
+
+    start_times = {}
+    end_times = {}
+
+    def mock_caller(server, tool, args):
+        step_id = args.get("step_id")
+        start_times[step_id] = time.perf_counter()
+        if step_id in ("step2", "step3"):
+            time.sleep(0.15)
+        end_times[step_id] = time.perf_counter()
+        return {"status": "ok", "step": step_id}
+
+    wf = {
+        "title": "Diamond Graph Workflow",
+        "steps": [
+            {"id": "step1", "server": "git", "tool": "git_status", "arguments": {"step_id": "step1"}},
+            {"id": "step2", "server": "db", "tool": "read_query", "depends_on": ["step1"], "arguments": {"step_id": "step2"}},
+            {"id": "step3", "server": "ssh", "tool": "ssh_exec", "depends_on": ["step1"], "arguments": {"step_id": "step3"}},
+            {"id": "step4", "server": "word", "tool": "create_document", "depends_on": ["step2", "step3"], "arguments": {"step_id": "step4"}},
+        ],
+    }
+
+    t0 = time.perf_counter()
+    res = run_workflow(wf, call_tool_fn=mock_caller)
+    total_elapsed = time.perf_counter() - t0
+
+    assert res["status"] == "success"
+    assert res["steps_successful"] == 4
+
+    # Both step2 and step3 overlap in time (concurrency check)
+    assert start_times["step2"] < end_times["step3"]
+    assert start_times["step3"] < end_times["step2"]
+    # Total runtime should be ~0.15s (concurrent) rather than >= 0.30s (sequential)
+    assert total_elapsed < 0.28
+
+
+def test_dag_branch_failure_skips_only_dependents():
+    """Verify failure on one branch skips only dependent steps while allowing independent branches to finish."""
+    def mock_caller(server, tool, args):
+        step_id = args.get("step_id")
+        if step_id == "step2":
+            return {"isError": True, "error": "Database connection refused"}
+        return {"status": "ok", "step": step_id}
+
+    wf = {
+        "title": "Branch Failure Workflow",
+        "steps": [
+            {"id": "step1", "server": "git", "tool": "git_status", "arguments": {"step_id": "step1"}},
+            {"id": "step2", "server": "db", "tool": "read_query", "depends_on": ["step1"], "continue_on_error": True, "arguments": {"step_id": "step2"}},
+            {"id": "step3", "server": "ssh", "tool": "ssh_exec", "depends_on": ["step1"], "arguments": {"step_id": "step3"}},
+            {"id": "step4", "server": "word", "tool": "create_document", "depends_on": ["step2"], "arguments": {"step_id": "step4"}},
+        ],
+    }
+
+    res = run_workflow(wf, call_tool_fn=mock_caller)
+    assert res["status"] == "completed_with_errors"
+    assert res["steps_successful"] == 2  # step1 and step3
+    assert res["steps_failed"] == 1      # step2
+    assert res["steps_skipped"] == 1     # step4
+
+    # Trace is deterministic in declaration order
+    trace = res["trace"]
+    assert trace[0]["step_id"] == "step1" and trace[0]["status"] == "success"
+    assert trace[1]["step_id"] == "step2" and trace[1]["status"] == "error"
+    assert trace[2]["step_id"] == "step3" and trace[2]["status"] == "success"
+    assert trace[3]["step_id"] == "step4" and trace[3]["status"] == "skipped"
+
+
+def test_validate_workflow_self_and_cycle_rejection():
+    """Verify preflight rejects self-dependencies and duplicate step IDs."""
+    from mcp_win_stdio.core.workflows import validate_workflow_preflight
+
+    # 1. Self dependency
+    wf_self = {
+        "title": "Self Dep",
+        "steps": [
+            {"id": "step1", "server": "git", "tool": "git_status", "depends_on": ["step1"]},
+        ],
+    }
+    errs_self = validate_workflow_preflight(wf_self)
+    assert any(e["type"] == "self_dependency" for e in errs_self)
+
+    # 2. Duplicate step ID
+    wf_dup = {
+        "title": "Duplicate ID",
+        "steps": [
+            {"id": "step1", "server": "git", "tool": "git_status"},
+            {"id": "step1", "server": "git", "tool": "git_diff"},
+        ],
+    }
+    errs_dup = validate_workflow_preflight(wf_dup)
+    assert any(e["type"] == "duplicate_step_id" for e in errs_dup)
+

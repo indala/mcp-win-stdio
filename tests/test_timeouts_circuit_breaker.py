@@ -59,3 +59,88 @@ def test_timeout_kills_process_tree():
         assert not proc.is_alive()
     finally:
         proc.terminate()
+
+
+def test_timeout_kills_grandchild_process(tmp_path):
+    """Verify that timeout tree killing cleanly terminates grandchildren processes."""
+    import os
+
+    pid_file = tmp_path / "grandchild.pid"
+    child_code = f"""
+import subprocess, sys, time
+g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+with open(r'{pid_file}', 'w') as f:
+    f.write(str(g.pid))
+time.sleep(30)
+"""
+    proc = MCPProcess(name="tree_test", command=sys.executable, args=["-c", child_code])
+    try:
+        # Wait for grandchild PID to be written
+        for _ in range(50):
+            if pid_file.exists() and pid_file.stat().st_size > 0:
+                break
+            time.sleep(0.1)
+
+        assert pid_file.exists(), "Grandchild PID file was not created"
+        grandchild_pid = int(pid_file.read_text().strip())
+
+        def pid_exists(pid: int) -> bool:
+            if sys.platform == "win32":
+                import ctypes
+
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, pid)
+                if not handle:
+                    return False
+                exit_code = ctypes.c_ulong()
+                kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+                kernel32.CloseHandle(handle)
+                return exit_code.value == 259  # STILL_ACTIVE
+            try:
+                os.kill(pid, 0)
+                return True
+            except OSError:
+                return False
+
+        assert pid_exists(grandchild_pid), "Grandchild must be alive before timeout kill"
+
+        # Trigger timeout kill
+        with pytest.raises(TimeoutError):
+            proc.send_request("tools/call", {}, timeout=0.2)
+
+        time.sleep(0.6)
+        assert not proc.is_alive(), "Child process must be dead"
+        assert not pid_exists(grandchild_pid), "Grandchild process must be killed by tree kill"
+    finally:
+        proc.terminate()
+
+
+def test_circuit_breaker_single_probe_concurrency():
+    """Verify that during half-open state, only exactly 1 concurrent probe is permitted."""
+    import concurrent.futures
+
+    cb = CircuitBreaker(failure_threshold=2, cooldown_seconds=0.3)
+    cb.record_infrastructure_failure("srv1", "crash1")
+    cb.record_infrastructure_failure("srv1", "crash2")
+    assert cb.check_availability("srv1") is not None
+
+    # Wait out cooldown to enter half-open
+    time.sleep(0.4)
+
+    results = []
+
+    def probe_worker():
+        return cb.check_availability("srv1")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futs = [executor.submit(probe_worker) for _ in range(5)]
+        for f in futs:
+            results.append(f.result())
+
+    # Exactly one thread got None (permission to probe)
+    none_count = sum(1 for r in results if r is None)
+    blocked_count = sum(1 for r in results if r is not None and "probing recovery" in r)
+
+    assert none_count == 1, f"Expected exactly 1 probe permit, got {none_count}"
+    assert blocked_count == 4, f"Expected 4 blocked threads, got {blocked_count}"
+
