@@ -89,7 +89,7 @@ class MwsTunnelManager:
         self.mode = mode.lower().strip()
         self.host = host
         self.workspace_dir = workspace_dir
-        self.token = token or secrets.token_urlsafe(24)
+        self.token = token or secrets.token_urlsafe(32)
 
         self._uvicorn_server: Optional[uvicorn.Server] = None
         self._uvicorn_thread: Optional[threading.Thread] = None
@@ -101,6 +101,55 @@ class MwsTunnelManager:
     def is_cloudflared_installed() -> bool:
         """Check if cloudflared binary is discoverable in PATH."""
         return shutil.which("cloudflared") is not None
+
+    @staticmethod
+    def get_cloudflared_version() -> Optional[str]:
+        """Return the installed cloudflared version string, or None if not found."""
+        if not MwsTunnelManager.is_cloudflared_installed():
+            return None
+        try:
+            res = subprocess.run(
+                ["cloudflared", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            )
+            if res.returncode == 0:
+                first_line = res.stdout.strip().split("\n")[0]
+                return first_line.replace("cloudflared version ", "v").split(" (")[0].strip()
+        except Exception:
+            pass
+        return "Installed"
+
+    @staticmethod
+    def try_install_cloudflared() -> bool:
+        """Attempt to install cloudflared using system package manager (winget on Windows, brew on macOS)."""
+        if sys.platform == "win32":
+            if shutil.which("winget"):
+                try:
+                    res = subprocess.run(
+                        [
+                            "winget",
+                            "install",
+                            "--id",
+                            "Cloudflare.cloudflared",
+                            "-e",
+                            "--accept-source-agreements",
+                            "--accept-package-agreements",
+                        ],
+                        timeout=180.0,
+                    )
+                    return res.returncode == 0
+                except Exception:
+                    return False
+        elif sys.platform == "darwin":
+            if shutil.which("brew"):
+                try:
+                    res = subprocess.run(["brew", "install", "cloudflared"], timeout=180.0)
+                    return res.returncode == 0
+                except Exception:
+                    return False
+        return False
 
     def start_local_bridge(self) -> None:
         """Launch uvicorn StreamableHTTP server with Bearer auth in a worker thread."""

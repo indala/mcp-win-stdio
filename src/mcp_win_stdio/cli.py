@@ -1163,7 +1163,19 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     try:
         from mcp_win_stdio.core.artifacts import ARTIFACTS_DIR
         from mcp_win_stdio.core.audit import AUDIT_LOG_FILE
+        from mcp_win_stdio.core.tunnel import MwsTunnelManager
         from mcp_win_stdio.server.process_pool import CIRCUIT_BREAKER
+
+        # Cloudflare Tunnel CLI check
+        cf_ver = MwsTunnelManager.get_cloudflared_version()
+        if cf_ver:
+            print(f"[OK] Cloudflare Tunnel CLI (cloudflared): Ready ({cf_ver})")
+        else:
+            print("[INFO] Cloudflare Tunnel CLI (cloudflared): Not installed")
+            if sys.platform == "win32":
+                print("       👉 To enable 'mws tunnel' for ChatGPT & Gemini, install via: winget install --id Cloudflare.cloudflared")
+            else:
+                print("       👉 To enable 'mws tunnel' for ChatGPT & Gemini, install cloudflared from: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/")
 
         # Breaker status
         breaker_status = CIRCUIT_BREAKER.get_status()
@@ -2635,9 +2647,36 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
 
     if not MwsTunnelManager.is_cloudflared_installed():
         print("❌ Error: 'cloudflared' CLI is not installed or not found in system PATH.", file=sys.stderr)
-        print("👉 Please install Cloudflare Tunnel CLI from:", file=sys.stderr)
-        print("   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/", file=sys.stderr)
-        sys.exit(1)
+        print("   'mws tunnel' requires Cloudflare Tunnel to expose your local tools to ChatGPT & Gemini.\n", file=sys.stderr)
+
+        can_auto_install = bool(shutil.which("winget") if sys.platform == "win32" else shutil.which("brew"))
+        if can_auto_install and sys.stdin.isatty():
+            mgr_name = "winget" if sys.platform == "win32" else "brew"
+            cmd_suggestion = "winget install --id Cloudflare.cloudflared" if sys.platform == "win32" else "brew install cloudflared"
+            print(f"👉 You can install it with: {cmd_suggestion}\n")
+            try:
+                ans = input(f"Would you like mws to install cloudflared now using {mgr_name}? [Y/n]: ").strip().lower()
+                if ans in ("", "y", "yes"):
+                    print(f"\nInstalling cloudflared via {mgr_name}...")
+                    if MwsTunnelManager.try_install_cloudflared():
+                        print("✅ cloudflared installed successfully!\n")
+                        if not MwsTunnelManager.is_cloudflared_installed():
+                            print("⚠️  Please restart your shell so PATH changes take effect, then run 'mws tunnel' again.")
+                            sys.exit(0)
+                    else:
+                        print(f"❌ Failed to install cloudflared automatically. Please run:\n   {cmd_suggestion}", file=sys.stderr)
+                        sys.exit(1)
+                else:
+                    sys.exit(1)
+            except (KeyboardInterrupt, EOFError):
+                sys.exit(1)
+        else:
+            if sys.platform == "win32":
+                print("👉 Install via winget (recommended):", file=sys.stderr)
+                print("   winget install --id Cloudflare.cloudflared\n", file=sys.stderr)
+            print("👉 Or download directly from:", file=sys.stderr)
+            print("   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/", file=sys.stderr)
+            sys.exit(1)
 
     # 1. Resolve configuration defaults
     hier_cfg = load_hierarchical_config()
