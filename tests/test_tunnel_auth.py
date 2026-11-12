@@ -55,10 +55,11 @@ def test_create_auth_provider_none():
     assert prov.requires_read_only is True
 
 
-def test_create_auth_provider_oauth_placeholder():
-    with pytest.raises(NotImplementedError) as exc_info:
-        create_auth_provider("oauth")
-    assert "Phase 2" in str(exc_info.value)
+def test_create_auth_provider_oauth():
+    prov = create_auth_provider("oauth", permission_mode="read_only")
+    assert isinstance(prov, OAuthProvider)
+    assert prov.auth_mode == "oauth"
+    assert prov.permission_mode == "read_only"
 
 
 def test_create_auth_provider_unknown():

@@ -68,12 +68,21 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
                 "timestamp": time.time(),
             })
 
+        # Intercept OAuth endpoints (discovery, registration, authorization, token, revocation)
+        if hasattr(self.auth_provider, "is_oauth_path") and self.auth_provider.is_oauth_path(path):
+            return await self.auth_provider.handle_oauth_request(request)
+
         auth_response = await self.auth_provider.authenticate(request)
         if auth_response is not None:
             return auth_response
 
-        # Request-scoped permission context isolation: reset using token in finally
-        perm_token = CURRENT_PERMISSION_MODE.set(self.permission_mode)
+        # Request-scoped permission context isolation: calculate effective permission bounded by server ceiling
+        effective_perm = (
+            self.auth_provider.get_request_permission_mode(request, default_mode=self.permission_mode)
+            if hasattr(self.auth_provider, "get_request_permission_mode")
+            else self.permission_mode
+        )
+        perm_token = CURRENT_PERMISSION_MODE.set(effective_perm)
         auth_token = CURRENT_AUTH_MODE.set(self.auth_provider.auth_mode)
         allow_sens = getattr(self.auth_provider, "allow_sensitive_reads", False)
         sens_token = CURRENT_ALLOW_SENSITIVE_READS.set(allow_sens)
@@ -120,6 +129,7 @@ class MwsTunnelManager:
         self.auth_provider = create_auth_provider(
             self.auth_mode,
             token=token,
+            permission_mode=self.mode,
             allow_sensitive_reads=self.allow_sensitive_reads,
         )
 
@@ -284,6 +294,8 @@ class MwsTunnelManager:
             )
 
         self._public_url = discovered_url
+        if hasattr(self.auth_provider, "set_public_url"):
+            self.auth_provider.set_public_url(discovered_url)
         return discovered_url
 
     def get_client_config(self) -> Dict[str, Any]:

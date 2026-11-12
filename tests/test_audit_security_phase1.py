@@ -383,10 +383,10 @@ def test_workflow_direct_default_caller_enforces_permissions():
 # 5. OAuth CLI Handling (SEC-05)
 # ---------------------------------------------------------------------------
 
-def test_oauth_cli_startup_clean_exit(capsys):
+def test_oauth_cli_startup_launches_oauth_tunnel(capsys):
     """
-    Verify selecting --auth oauth exits cleanly with informative message
-    without starting Uvicorn or Cloudflare.
+    Verify selecting --auth oauth properly initializes and launches
+    MwsTunnelManager with auth_mode='oauth'.
     """
     import argparse
 
@@ -398,17 +398,26 @@ def test_oauth_cli_startup_clean_exit(capsys):
         port=8999,
         token=None,
         yes=True,
+        allow_sensitive_reads=False,
     )
 
-    with patch("mcp_win_stdio.core.tunnel.MwsTunnelManager.is_cloudflared_installed", return_value=True):
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_tunnel(args)
+    with patch("mcp_win_stdio.core.tunnel.MwsTunnelManager.is_cloudflared_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.MwsTunnelManager") as mock_mgr_cls:
+        mock_mgr = mock_mgr_cls.return_value
+        mock_mgr.auth_mode = "oauth"
+        mock_mgr.mode = "read_only"
+        mock_mgr.token = None
+        mock_mgr.start_cloudflare_tunnel.return_value = "https://test.trycloudflare.com"
+        mock_mgr.get_client_config.return_value = {"mcpServers": {"mws": {"url": "https://test.trycloudflare.com/mcp"}}}
+        mock_mgr.wait.return_value = None
 
-        assert exc_info.value.code == 1
+        cmd_tunnel(args)
+        assert mock_mgr_cls.called
+        kwargs = mock_mgr_cls.call_args[1]
+        assert kwargs["auth_mode"] == "oauth"
+        assert kwargs["mode"] == "read_only"
         captured = capsys.readouterr()
-        assert "OAuth authentication is not available yet" in captured.err
-        assert "--auth bearer" in captured.err
-        assert "--auth none" in captured.err
+        assert "OAuth 2.0 PKCE" in captured.out
 
 
 # ---------------------------------------------------------------------------

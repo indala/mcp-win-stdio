@@ -2664,7 +2664,7 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     scope_name = "Workspace" if workspace_path else "Global"
 
     mode = (getattr(args, "mode", None) or tunnel_cfg.get("mode") or "read_only").lower().strip()
-    auth_mode = (getattr(args, "auth", None) or tunnel_cfg.get("auth_mode") or "bearer").lower().strip()
+    auth_mode = (getattr(args, "auth", None) or tunnel_cfg.get("auth_mode") or "oauth").lower().strip()
     port = int(getattr(args, "port", None) or tunnel_cfg.get("port") or 8080)
     token = getattr(args, "token", None) or tunnel_cfg.get("token")
     auto_yes = bool(getattr(args, "yes", False))
@@ -2704,6 +2704,8 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
             print(f" • Local Bridge:     http://127.0.0.1:{port}")
             if auth_mode == "none":
                 print(" • Auth Token:       None (Public / Unauthenticated)")
+            elif auth_mode == "oauth":
+                print(" • Auth Method:      OAuth 2.0 PKCE (Dynamic Registration & Terminal PIN Verification)")
             else:
                 print(f" • Auth Token:       {'Static / User-configured' if token else 'Ephemeral Cryptographic Token (Auto-generated)'}")
             print("------------------------------------------------------------")
@@ -2711,7 +2713,7 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
             print(f" [2] 🛡️  Toggle Security Mode (currently: {mode})")
             print(f" [3] 🔢 Change Local Bridge Port (currently: {port})")
             print(f" [4] 🔐 Cycle Auth Mode (currently: {auth_mode})")
-            if auth_mode != "none":
+            if auth_mode == "bearer":
                 print(f" [5] 🔑 Set Custom Bearer Token (currently: {'Set' if token else 'Auto-generate'})")
             print(" [6] 💾 Save current tunnel settings to config")
             print(" [Q] ❌ Cancel & Exit")
@@ -2723,11 +2725,6 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 sys.exit(0)
 
             if choice in ("1", "", "start", "run"):
-                if auth_mode == "oauth":
-                    print("\n❌ OAuth authentication is not available yet.")
-                    print("Currently supported: bearer, none")
-                    print("Please select option [4] to choose 'bearer' or 'none'.\n")
-                    continue
                 break
             elif choice == "2":
                 if auth_mode == "none":
@@ -2743,14 +2740,14 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 except ValueError:
                     print("Invalid port number.")
             elif choice == "4":
-                modes = ["bearer", "none", "oauth"]
+                modes = ["oauth", "bearer", "none"]
                 auth_mode = modes[(modes.index(auth_mode) + 1) % len(modes)]
                 if auth_mode == "none":
                     mode = "read_only"
                     print("Auth Mode set to: NONE (Security mode locked to 'read_only')")
                 else:
                     print(f"Auth Mode set to: {auth_mode.upper()}")
-            elif choice == "5" and auth_mode != "none":
+            elif choice == "5" and auth_mode == "bearer":
                 t_in = input("Enter custom bearer token (leave empty for auto-generated): ").strip()
                 token = t_in if t_in else None
             elif choice in ("5", "6"):
@@ -2769,16 +2766,7 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 print("Tunnel start aborted.")
                 sys.exit(0)
 
-    # 3. Guard against unreleased auth modes before launching bridge or cloudflared
-    if auth_mode == "oauth":
-        print("\n❌ OAuth authentication is not available yet.\n", file=sys.stderr)
-        print("Currently supported:", file=sys.stderr)
-        print("  --auth bearer", file=sys.stderr)
-        print("  --auth none\n", file=sys.stderr)
-        print("OAuth support is planned for a future release.\n", file=sys.stderr)
-        sys.exit(1)
-
-    # 4. Launch tunnel manager
+    # 3. Launch tunnel manager
     print(f"\n🚀 Launching MWS StreamableHTTP bridge on 127.0.0.1:{port} (mode: {mode}, auth: {auth_mode})...")
     mgr = MwsTunnelManager(
         port=port,
@@ -2812,7 +2800,10 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     print(f" • Public HTTPS URL:  {public_url}")
     print(f" • MCP Endpoint:      {mcp_endpoint}")
     print(f" • Auth Mode:         {mgr.auth_mode.upper()}")
-    if mgr.token:
+    if mgr.auth_mode == "oauth":
+        print(" • Authorization:     OAuth 2.0 PKCE (Host-Owner PIN Protection Active)")
+        print(f" • Discovery URL:     {public_url}/.well-known/oauth-authorization-server")
+    elif mgr.token:
         print(f" • Bearer Auth Token: {mgr.token}")
     else:
         print(" • Bearer Auth Token: None (Unauthenticated)")
@@ -3105,9 +3096,9 @@ def main() -> None:
     sub_tunnel.add_argument(
         "--auth",
         "-a",
-        choices=["bearer", "none", "oauth"],
+        choices=["oauth", "bearer", "none"],
         default=None,
-        help="Authentication mechanism (bearer: static/auto token, none: unauthenticated read-only for ChatGPT, oauth: OAuth 2.0 for Gemini/ChatGPT)",
+        help="Authentication mechanism (oauth: OAuth 2.0 PKCE default for Gemini/Claude/ChatGPT, bearer: static/auto token, none: unauthenticated read-only)",
     )
     sub_tunnel.add_argument(
         "--port",
