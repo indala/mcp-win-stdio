@@ -540,9 +540,21 @@ def call_tool(
     )
 
     norm_args = normalize_arguments(target_server, target_tool, resolved_args)
-    proc = GLOBAL_POOL.get_or_spawn(target_server)
     start_time = time.perf_counter()
-    res = proc.call_tool(target_tool, norm_args)
+    try:
+        proc = GLOBAL_POOL.get_or_spawn(target_server)
+        res = proc.call_tool(target_tool, norm_args)
+        GLOBAL_POOL.circuit_breaker.record_success(target_server)
+    except (TimeoutError, ConnectionError, RuntimeError, BrokenPipeError) as infra_err:
+        GLOBAL_POOL.circuit_breaker.record_infrastructure_failure(target_server, str(infra_err))
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        return {
+            "isError": True,
+            "error": f"Child server '{target_server}' failure: {infra_err}",
+            "server": target_server,
+            "tool": target_tool,
+            "duration_ms": round(duration_ms, 2),
+        }
     duration_ms = (time.perf_counter() - start_time) * 1000
 
     # Structured audit logging
@@ -691,6 +703,7 @@ def run_workflow(
     wf_res = core_run_workflow(
         name_or_def=name,
         parameters=parameters,
+        call_tool_fn=lambda s, t, a: call_tool(name=t, arguments=a, server=s),
         dry_run=dry_run,
     )
 

@@ -35,27 +35,34 @@ def redact_secrets(val: Any) -> Any:
             masked,
             flags=re.IGNORECASE,
         )
-        # 2. Redact Bearer tokens
+        # 2. Redact Bearer and Basic authentication headers
         masked = re.sub(
-            r"(Bearer\s+)[A-Za-z0-9_\-\.]{8,}",
+            r"((?:Bearer|Basic)\s+)[A-Za-z0-9_\-\.\+/=]{6,}",
             r"\1******",
             masked,
             flags=re.IGNORECASE,
         )
-        # 3. Redact inline command flags: --password=xyz, -pSECRET, PASSWORD=xyz
+        # 3. Redact inline command flags: --password=xyz, --password secret, -pSECRET, PASSWORD=xyz
         masked = re.sub(
-            r"(--(?:password|passwd|token|api-key|secret)[=\s]+)([^\s,;]+)",
+            r"(--(?:password|passwd|token|api-key|secret)[=\s]+)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
             r"\1******",
             masked,
             flags=re.IGNORECASE,
         )
         masked = re.sub(
-            r"(?<![a-zA-Z0-9_-])(-p)([^\s,;]+)",
+            r"(?<![a-zA-Z0-9_-])(-p)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
             r"\1******",
             masked,
         )
         masked = re.sub(
-            r"((?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|AUTH_TOKEN)=)([^\s,;]+)",
+            r"((?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|AUTH_TOKEN)=)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+            r"\1******",
+            masked,
+            flags=re.IGNORECASE,
+        )
+        # 4. Redact query parameters: ?token=xyz, &password=xyz, &api_key=xyz
+        masked = re.sub(
+            r"([?&](?:token|password|passwd|secret|api[_-]?key)=)(?:\"[^\"]*\"|'[^']*'|[^&\s,;]+)",
             r"\1******",
             masked,
             flags=re.IGNORECASE,

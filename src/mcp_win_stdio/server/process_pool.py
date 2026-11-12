@@ -54,6 +54,32 @@ class MCPProcess:
         """Check if process is still running."""
         return self.proc.poll() is None
 
+    def kill_process_tree(self) -> None:
+        """
+        Force-terminate the child process and all its grandchildren cleanly on Windows.
+        Ensures spawned processes like npx, node, uvx, or python sub-workers don't become zombies.
+        """
+        if not self.is_alive():
+            return
+        if sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(self.pid)],
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=5.0,
+                )
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        else:
+            try:
+                self.proc.kill()
+            except Exception:
+                pass
+
     def _next_id(self) -> int:
         self._request_id += 1
         return self._request_id
@@ -76,6 +102,7 @@ class MCPProcess:
                 self.proc.stdin.write(raw)
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
+                self.kill_process_tree()
                 raise RuntimeError(f"Failed writing to MCP server '{self.name}': {exc}") from exc
 
             # Read responses until we find the response matching req_id
@@ -111,7 +138,12 @@ class MCPProcess:
                         raise RuntimeError(f"MCP Error from '{self.name}': {err.get('message', err)}")
                     return msg.get("result")
 
-            raise TimeoutError(f"Timed out waiting for response from '{self.name}' on method '{method}' after {timeout}s")
+            # On timeout: kill process tree immediately to prevent pipe desynchronization!
+            self.kill_process_tree()
+            raise TimeoutError(
+                f"Timed out waiting for response from '{self.name}' on method '{method}' after {timeout}s. "
+                "Child process tree terminated to prevent pipe desynchronization."
+            )
 
     def send_notification(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Send a JSON-RPC notification (no response expected)."""
@@ -189,18 +221,78 @@ class MCPProcess:
         }
 
     def terminate(self) -> None:
-        """Gracefully shut down the child server process."""
+        """Gracefully shut down the child server process and its process tree."""
         with self._lock:
             if not self.is_alive():
                 return
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=2.0)
-            except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
+            self.kill_process_tree()
+
+
+class CircuitBreaker:
+    """
+    Child server circuit breaker.
+    Trips open after consecutive infrastructure failures (crashes, timeouts, broken pipes).
+    Does NOT count normal tool errors (e.g. invalid SQL syntax or bad args).
+    Cooldown: 30 seconds before allowing a single probe attempt.
+    """
+
+    def __init__(self, failure_threshold: int = 3, cooldown_seconds: float = 30.0):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.consecutive_failures: Dict[str, int] = {}
+        self.opened_at: Dict[str, float] = {}
+        self._lock = threading.RLock()
+
+    def check_availability(self, server: str) -> Optional[str]:
+        """Check if server is blocked by open circuit breaker. Returns error message if blocked."""
+        srv = server.lower().strip()
+        with self._lock:
+            opened = self.opened_at.get(srv)
+            if opened:
+                elapsed = time.time() - opened
+                if elapsed < self.cooldown_seconds:
+                    remaining = int(self.cooldown_seconds - elapsed)
+                    return f"Server '{srv}' circuit breaker is OPEN due to repeated process crashes/timeouts. Retry in {remaining}s."
+                else:
+                    # Half-open: allow a single probe request through
+                    return None
+            return None
+
+    def record_success(self, server: str) -> None:
+        """Reset failure counter and close circuit breaker."""
+        srv = server.lower().strip()
+        with self._lock:
+            self.consecutive_failures.pop(srv, None)
+            self.opened_at.pop(srv, None)
+
+    def record_infrastructure_failure(self, server: str, error_msg: str) -> None:
+        """Record a crash, timeout, or pipe failure. Trip breaker if threshold reached."""
+        srv = server.lower().strip()
+        with self._lock:
+            cnt = self.consecutive_failures.get(srv, 0) + 1
+            self.consecutive_failures[srv] = cnt
+            if cnt >= self.failure_threshold:
+                self.opened_at[srv] = time.time()
+
+    def get_status(self) -> Dict[str, Any]:
+        """Inspect circuit breaker state for all servers."""
+        with self._lock:
+            now = time.time()
+            res = {}
+            for srv, opened in list(self.opened_at.items()):
+                remaining = max(0.0, round(self.cooldown_seconds - (now - opened), 1))
+                if remaining > 0:
+                    res[srv] = {
+                        "state": "open",
+                        "consecutive_failures": self.consecutive_failures.get(srv, self.failure_threshold),
+                        "retry_in_seconds": remaining,
+                    }
+                else:
+                    res[srv] = {"state": "half_open", "consecutive_failures": self.consecutive_failures.get(srv, 0)}
+            return res
+
+
+CIRCUIT_BREAKER = CircuitBreaker()
 
 
 class ProcessPool:
@@ -209,11 +301,18 @@ class ProcessPool:
     def __init__(self):
         self._processes: Dict[str, MCPProcess] = {}
         self._pool_lock = threading.Lock()
+        self.circuit_breaker = CIRCUIT_BREAKER
         atexit.register(self.shutdown_all)
 
     def get_or_spawn(self, server_name: str) -> MCPProcess:
         """Get an existing warm MCP process or spawn a new one on demand."""
         norm_name = server_name.lower().replace("_", "-")
+
+        # Check circuit breaker before attempting to spawn
+        blocked_msg = self.circuit_breaker.check_availability(norm_name)
+        if blocked_msg:
+            raise ConnectionError(blocked_msg)
+
         with self._pool_lock:
             existing = self._processes.get(norm_name)
             if existing and existing.is_alive():
@@ -233,14 +332,19 @@ class ProcessPool:
                     f"Unknown MCP server '{norm_name}'. Available servers: {', '.join(sorted(available.keys()))}"
                 )
 
-            proc = MCPProcess(
-                name=norm_name,
-                command=srv_spec["command"],
-                args=srv_spec["args"],
-            )
-            proc.initialize()
-            self._processes[norm_name] = proc
-            return proc
+            try:
+                proc = MCPProcess(
+                    name=norm_name,
+                    command=srv_spec["command"],
+                    args=srv_spec["args"],
+                )
+                proc.initialize()
+                self._processes[norm_name] = proc
+                self.circuit_breaker.record_success(norm_name)
+                return proc
+            except Exception as e:
+                self.circuit_breaker.record_infrastructure_failure(norm_name, str(e))
+                raise
 
     def stop_server(self, server_name: str) -> bool:
         """Stop a specific active child MCP server."""
