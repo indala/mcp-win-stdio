@@ -27,6 +27,10 @@ from mcp_win_stdio.core.config import (
     get_tunnel_config,
     load_hierarchical_config,
 )
+from mcp_win_stdio.core.permissions import (
+    CURRENT_ALLOW_SENSITIVE_READS,
+    CURRENT_AUTH_MODE,
+)
 from mcp_win_stdio.core.tunnel_auth import (
     AuthProvider,
     BearerAuthProvider,
@@ -70,9 +74,14 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
 
         # Request-scoped permission context isolation: reset using token in finally
         perm_token = CURRENT_PERMISSION_MODE.set(self.permission_mode)
+        auth_token = CURRENT_AUTH_MODE.set(self.auth_provider.auth_mode)
+        allow_sens = getattr(self.auth_provider, "allow_sensitive_reads", False)
+        sens_token = CURRENT_ALLOW_SENSITIVE_READS.set(allow_sens)
         try:
             return await call_next(request)
         finally:
+            CURRENT_ALLOW_SENSITIVE_READS.reset(sens_token)
+            CURRENT_AUTH_MODE.reset(auth_token)
             CURRENT_PERMISSION_MODE.reset(perm_token)
 
 
@@ -98,15 +107,21 @@ class MwsTunnelManager:
         auth_mode: str = "bearer",
         host: str = "127.0.0.1",
         workspace_dir: Optional[Path] = None,
+        allow_sensitive_reads: bool = False,
     ):
         self.port = port
         self.mode = mode.lower().strip()
         self.auth_mode = (auth_mode or "bearer").lower().strip()
         self.host = host
         self.workspace_dir = workspace_dir
+        self.allow_sensitive_reads = bool(allow_sensitive_reads)
 
         # Initialize modular AuthProvider
-        self.auth_provider = create_auth_provider(self.auth_mode, token=token)
+        self.auth_provider = create_auth_provider(
+            self.auth_mode,
+            token=token,
+            allow_sensitive_reads=self.allow_sensitive_reads,
+        )
 
         # Enforce read_only if auth provider requires it (e.g. unauthenticated 'none' mode)
         if self.auth_provider.requires_read_only and self.mode != "read_only":

@@ -20,7 +20,7 @@ def create_auth_provider(auth_mode: str = "bearer", token: Optional[str] = None,
     if mode == "bearer":
         return BearerAuthProvider(token=token)
     elif mode == "none":
-        return NoneAuthProvider()
+        return NoneAuthProvider(allow_sensitive_reads=bool(kwargs.get("allow_sensitive_reads", False)))
     elif mode == "oauth":
         return OAuthProvider(**kwargs)
     else:

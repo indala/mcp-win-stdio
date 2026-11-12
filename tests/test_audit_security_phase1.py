@@ -588,7 +588,341 @@ def test_db_read_query_blocks_mutating_sql():
     for stmt in mutating_statements:
         res = read_query(sql=stmt)
         assert res.get("error") is True
-        assert "Permission Denied: read_query strictly permits" in res.get("message", "")
+        assert "Permission Denied: read_query" in res.get("message", "")
+
+
+def test_db_read_query_comprehensive_sql_hardening():
+    """
+    Verify db.read_query defends against CTE-based DML, file export clauses,
+    session variable mutations, multi-statement injection, locking clauses,
+    and comment-based obfuscation.
+    """
+    from mcp_win_stdio.db.server import _validate_readonly_sql, read_query
+
+    # 1. CTE-based mutations (MySQL 8.0.19+ supports WITH ... UPDATE / DELETE)
+    cte_attacks = [
+        "WITH cte AS (SELECT 1) UPDATE users SET name = 'hacked'",
+        "WITH cte AS (SELECT id FROM users) DELETE FROM users WHERE id IN (SELECT id FROM cte)",
+        "WITH cte AS (SELECT 1 AS val) INSERT INTO audit (val) SELECT val FROM cte",
+        "WITH cte AS (SELECT 1) REPLACE INTO users (id) SELECT 1 FROM cte",
+    ]
+    for attack in cte_attacks:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected CTE attack to fail: {attack}"
+        assert "Permission Denied: read_query strictly forbids mutating" in err
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 2. File export & session variable mutation clauses
+    export_attacks = [
+        "SELECT * FROM users INTO OUTFILE '/var/lib/mysql-files/users.csv'",
+        "SELECT * FROM users INTO DUMPFILE '/tmp/bin_data'",
+        "SELECT id INTO @user_var FROM users LIMIT 1",
+        "SELECT * FROM users INTO OUTFILE 'C:/Windows/Temp/pwn.txt'",
+    ]
+    for attack in export_attacks:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected export attack to fail: {attack}"
+        assert "Permission Denied: read_query strictly forbids mutating, DDL, or file export" in err
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 3. Multi-statement injection attacks
+    multi_stmt_attacks = [
+        "SELECT 1; UPDATE users SET role = 'admin'",
+        "SELECT 1; DROP TABLE users;",
+        "SELECT id FROM users; DELETE FROM audit_log",
+    ]
+    for attack in multi_stmt_attacks:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected multi-stmt attack to fail: {attack}"
+        assert "Multiple statements are strictly forbidden" in err
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 4. Comment-based command obfuscation and MySQL conditional execution comments
+    comment_attacks = [
+        "/* multiline comment */ UPDATE users SET name = 'evil'",
+        "# mysql line comment\nUPDATE users SET name = 'evil'",
+        "-- sql standard comment\nDROP TABLE accounts",
+        "SELECT 1 /*!50000 INTO OUTFILE '/tmp/pwn' */",
+        "SELECT 1 /*! UPDATE users SET x = 1 */",
+        "SELECT 1 /*!50000 SELECT * FROM secret */",
+    ]
+    for attack in comment_attacks:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected comment attack to fail: {attack}"
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 5. Row and table locking clauses
+    locking_queries = [
+        "SELECT * FROM users FOR UPDATE",
+        "SELECT * FROM users FOR SHARE",
+        "SELECT * FROM users LOCK IN SHARE MODE",
+    ]
+    for query in locking_queries:
+        valid, err = _validate_readonly_sql(query)
+        assert valid is False, f"Expected locking query to fail: {query}"
+        assert "locking clauses" in err
+        res = read_query(sql=query)
+        assert res.get("error") is True
+
+    # 6. Dangerous filesystem read/export side-effect functions
+    side_effect_queries = [
+        "SELECT pg_read_file('/etc/passwd')",
+        "SELECT pg_read_binary_file('/etc/shadow')",
+        "SELECT pg_ls_dir('/tmp')",
+        "SELECT pg_stat_file('/etc/hosts')",
+        "SELECT load_file('/etc/passwd')",
+        "SELECT lo_export(1001, '/tmp/exported')",
+        "SELECT lo_import('/tmp/imported')",
+        "SELECT lo_get(1001)",
+        "SELECT lo_put(1001, 0, 'data')",
+        "SELECT dblink('host=x', 'SELECT 1')",
+        "SELECT dblink_exec('host=x', 'UPDATE ...')",
+        "COPY users TO '/tmp/pwn'",
+        # Locking & Admin / DoS functions executable via SELECT
+        "SELECT GET_LOCK('my_lock', 10)",
+        "SELECT RELEASE_LOCK('my_lock')",
+        "SELECT RELEASE_ALL_LOCKS()",
+        "SELECT pg_advisory_lock(123)",
+        "SELECT pg_advisory_xact_lock(123)",
+        "SELECT pg_try_advisory_lock(123)",
+        "SELECT pg_terminate_backend(1234)",
+        "SELECT pg_cancel_backend(1234)",
+        "SELECT pg_reload_conf()",
+        "SELECT pg_rotate_logfile()",
+        "SELECT pg_sleep(10)",
+        "SELECT sleep(10)",
+    ]
+    for attack in side_effect_queries:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected side-effect query to fail: {attack}"
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 7. Backslash quote desync attacks
+    desync_attacks = [
+        "SELECT * FROM users WHERE note = 'test\\'s value'; UPDATE users SET role = 'admin'",
+        "SELECT * FROM users WHERE note = \"test\\\"s value\"; DROP TABLE users",
+    ]
+    for attack in desync_attacks:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected desync attack to fail: {attack}"
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 8. Unclosed quotes, block comments, and dollar-quotes (fail closed)
+    unclosed_syntax_attacks = [
+        ("SELECT 'unclosed string literal", "Unclosed quote"),
+        ("SELECT \"unclosed double quote", "Unclosed quote"),
+        ("SELECT `unclosed backtick", "Unclosed quote"),
+        ("SELECT 1 /* unclosed block comment", "Unclosed block comment"),
+        ("SELECT $$unclosed dollar quote", "Unclosed dollar-quoted"),
+        ("SELECT $tag$unclosed tagged dollar quote", "Unclosed dollar-quoted"),
+    ]
+    for attack, err_substring in unclosed_syntax_attacks:
+        valid, err = _validate_readonly_sql(attack)
+        assert valid is False, f"Expected unclosed syntax to fail: {attack}"
+        assert err_substring in err
+        res = read_query(sql=attack)
+        assert res.get("error") is True
+
+    # 9. Valid queries MUST succeed in validation
+    valid_queries = [
+        "SELECT * FROM users WHERE status = 'active'",
+        "SELECT * FROM users WHERE note = 'UPDATE users SET x = 1'",  # keyword inside string literal
+        "SELECT * FROM users WHERE note = 'SELECT ... INTO OUTFILE /tmp/foo'",  # export inside string
+        "SELECT * FROM users WHERE note = 'test\\'s value'",  # escaped backslash quote in valid query
+        "SELECT * FROM users WHERE note = \"test\\\"s value\"",  # escaped double quote
+        "SELECT $$hello world$$ AS greeting",  # postgres dollar quoting
+        "SELECT $tag$hello world$tag$ AS greeting",  # postgres tagged dollar quoting
+        "WITH cte AS (SELECT 1 AS val) SELECT * FROM cte",  # legitimate read-only CTE
+        "EXPLAIN SELECT * FROM users",
+        "SHOW TABLES",
+        "DESCRIBE users",
+        "DESC users",
+        "SELECT `into` FROM users",  # keyword inside backtick identifier
+        "SELECT * FROM users;",  # single trailing semicolon
+    ]
+    for q in valid_queries:
+        valid, err = _validate_readonly_sql(q)
+        assert valid is True, f"Expected query to be valid: '{q}', error: {err}"
+
+
+def test_is_tool_mutating_ambiguous_and_fail_closed():
+    """
+    Verify is_tool_mutating() semantics:
+    - Resolves server identity when server is provided
+    - Resolves across all servers when server is omitted
+    - Fails closed (returns True) if a tool is mutating on ANY server where it exists
+    - Fails closed (returns True) for unknown or unclassified tools
+    - Returns False only if tool is safe on ALL servers where it exists
+    """
+    from mcp_win_stdio.core.permissions import TOOL_TO_SERVERS_MAP
+
+    # 1. Pure read tool safe on its host server: explorer.read_file
+    assert is_tool_mutating("read_file") is False
+    assert is_tool_mutating("read_file", server="explorer") is False
+
+    # 2. Mutating tool on all servers where it exists: export_to_pdf (excel, word)
+    assert is_tool_mutating("export_to_pdf") is True
+    assert is_tool_mutating("export_to_pdf", server="excel") is True
+    assert is_tool_mutating("export_to_pdf", server="word") is True
+
+    # 3. Unknown or unclassified tool: must fail closed (return True)
+    assert is_tool_mutating("completely_unknown_tool_xyz") is True
+
+    # 4. Mock ambiguous tool: safe on server_a, mutating on server_b
+    # When server is omitted, it MUST return True (fails closed)
+    mock_tools_map = dict(TOOL_TO_SERVERS_MAP)
+    mock_tools_map["ambiguous_audit_tool"] = {"server_a", "server_b"}
+    mock_safe_set = set(SAFE_READ_TOOLS)
+    mock_safe_set.add(("server_a", "ambiguous_audit_tool"))
+    # Notice: ("server_b", "ambiguous_audit_tool") is NOT in mock_safe_set (it is mutating on server_b)
+
+    with patch("mcp_win_stdio.core.permissions.TOOL_TO_SERVERS_MAP", mock_tools_map), \
+         patch("mcp_win_stdio.core.permissions.SAFE_READ_TOOLS", mock_safe_set):
+        # Server omitted -> must return True (mutating / ambiguous)
+        assert is_tool_mutating("ambiguous_audit_tool") is True
+
+        # Server-qualified: server_a is safe -> returns False
+        assert is_tool_mutating("ambiguous_audit_tool", server="server_a") is False
+
+        # Server-qualified: server_b is mutating -> returns True
+        assert is_tool_mutating("ambiguous_audit_tool", server="server_b") is True
+
+
+def test_unauthenticated_tunnel_confidentiality_restrictions():
+    """
+    Verify unauthenticated public tunnels (auth_mode='none') strictly protect
+    confidentiality by blocking sensitive reads (explorer file reads, db queries, ssh inspection)
+    by default, while permitting general introspection and documentation tools.
+    Also verifies --allow-sensitive-reads override.
+    """
+    from mcp_win_stdio.core.permissions import (
+        CURRENT_ALLOW_SENSITIVE_READS,
+        CURRENT_AUTH_MODE,
+        check_tool_permission,
+    )
+
+    auth_tok = CURRENT_AUTH_MODE.set("none")
+    sens_tok = CURRENT_ALLOW_SENSITIVE_READS.set(False)
+
+    try:
+        # Sensitive tools blocked in unauthenticated mode by default
+        # Covers raw file reading, regex grep, database queries, spreadsheet row previews, word reading, and ssh
+        sensitive_tools = [
+            ("explorer", "read_file"),
+            ("explorer", "read_head_tail"),
+            ("explorer", "grep_search"),
+            ("db", "read_query"),
+            ("db", "get_table_sample"),
+            ("db", "diff_data"),
+            ("excel", "preview_sheet"),
+            ("excel", "read_range"),
+            ("excel", "query_rows"),
+            ("excel", "query_excel_sql"),
+            ("excel_db", "query_unified_sources"),
+            ("excel_db", "compare_master_datasets"),
+            ("word", "read_word_document"),
+            ("word", "search_word_document"),
+            ("git", "git_grep"),
+            ("git", "git_diff"),
+            ("git", "git_blame"),
+            ("git", "git_log"),
+            ("git", "gh_pr_diff"),
+            ("rag", "query_knowledge_base"),
+            ("rag", "find_related_chunks"),
+            ("rag", "get_chunk_context"),
+            ("ssh", "ssh_tail_logs"),
+            ("ssh", "ssh_system_overview"),
+            ("ssh", "ssh_list_processes"),
+            ("ssh", "sftp_read_file"),
+        ]
+
+        for srv, tool in sensitive_tools:
+            ok, err = check_tool_permission(srv, tool, mode="read_only")
+            assert ok is False, f"Expected ({srv}, {tool}) to be blocked in unauthenticated mode!"
+            assert "Access Denied: Tool" in err
+            assert "restricted on unauthenticated public tunnels" in err
+
+        # Safe non-sensitive tools allowed in unauthenticated mode (discovery, structural, metadata, outlines)
+        safe_public_tools = [
+            ("explorer", "list_dir"),
+            ("explorer", "get_directory_tree"),
+            ("explorer", "find_files"),
+            ("explorer", "get_code_outline"),
+            ("explorer", "workspace_summary"),
+            ("gateway", "list_servers"),
+            ("gateway", "search_tools"),
+            ("gateway", "manage_context"),
+            ("rag", "list_rag_collections"),
+            ("rag", "rag_status"),
+            ("rag", "get_knowledge_tree"),
+            ("arch", "blueprint_audit"),
+            ("tsc", "get_tsc_errors"),
+            ("excel", "get_workbook_info"),
+            ("excel", "list_tables"),
+            ("db", "describe_table"),
+            ("db", "schema_overview"),
+            ("word", "get_document_outline"),
+            ("word", "get_document_layout"),
+            ("git", "git_status"),
+        ]
+
+        for srv, tool in safe_public_tools:
+            ok, err = check_tool_permission(srv, tool, mode="read_only")
+            assert ok is True, f"Expected safe public tool ({srv}, {tool}) to be allowed, error: {err}"
+
+        # When allow_sensitive_reads is explicitly enabled: sensitive tools are permitted
+        ok_sens, err_sens = check_tool_permission(
+            "explorer", "read_file", mode="read_only", allow_sensitive_reads=True
+        )
+        assert ok_sens is True
+        assert err_sens is None
+
+        ok_db, err_db = check_tool_permission(
+            "db", "read_query", mode="read_only", allow_sensitive_reads=True
+        )
+        assert ok_db is True
+        assert err_db is None
+
+    finally:
+        CURRENT_ALLOW_SENSITIVE_READS.reset(sens_tok)
+        CURRENT_AUTH_MODE.reset(auth_tok)
+
+    # In authenticated bearer mode: sensitive read tools are permitted normally
+    ok_bearer, _ = check_tool_permission("explorer", "read_file", mode="read_only", auth_mode="bearer")
+    assert ok_bearer is True
+    ok_db_bearer, _ = check_tool_permission("db", "read_query", mode="read_only", auth_mode="bearer")
+    assert ok_db_bearer is True
+
+
+def test_runtime_mode_override_isolation():
+    """
+    Verify _RUNTIME_MODE_OVERRIDE remains isolated:
+    1. CURRENT_PERMISSION_MODE (request-scoped ContextVar) strictly supersedes _RUNTIME_MODE_OVERRIDE.
+    2. Tests cleanly reset _RUNTIME_MODE_OVERRIDE.
+    """
+    try:
+        set_runtime_mode_override("read_only")
+        assert get_effective_mode() == "read_only"
+
+        # ContextVar request takes priority over global fallback
+        tok = CURRENT_PERMISSION_MODE.set("read_write")
+        try:
+            assert get_effective_mode() == "read_write"
+        finally:
+            CURRENT_PERMISSION_MODE.reset(tok)
+
+        # After request, falls back to override
+        assert get_effective_mode() == "read_only"
+    finally:
+        set_runtime_mode_override(None)
+
+    assert get_effective_mode() in ("read_write", "read_only")
 
 
 def test_use_tools_blocked_in_read_only():
@@ -607,3 +941,96 @@ def test_use_tools_blocked_in_read_only():
         ok, err = check_tool_permission(srv, tool, mode="read_only")
         assert ok is False
         assert "Permission Denied" in err
+
+
+def test_mysql_readonly_transaction_ordering_and_client_flags():
+    """
+    Verify MySQL driver-level guarantees and transaction setup:
+    1. PyMySQL client factory guarantees CLIENT.MULTI_STATEMENTS is never enabled.
+    2. read_query calls conn.rollback() before setting transaction characteristics,
+       preventing MySQL OperationalError 1568.
+    """
+    from mcp_win_stdio.db.server import _get_mysql_client, read_query
+
+    # 1. Test client_flag in _get_mysql_client
+    with patch("mcp_win_stdio.db.server.pymysql.connect") as mock_connect:
+        mock_info = {
+            "name": "test_my",
+            "engine": "mysql",
+            "host": "localhost",
+            "port": 3306,
+            "user": "root",
+            "password": "",
+            "database": "testdb",
+        }
+        _get_mysql_client(mock_info)
+        assert mock_connect.called
+        kwargs = mock_connect.call_args[1]
+        client_flag = kwargs.get("client_flag", 0)
+        # Verify MULTI_STATEMENTS (bit 1 << 16 = 65536) is NOT set
+        assert (client_flag & 65536) == 0
+
+    # 2. Test MySQL transaction setup ordering in read_query
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+    mock_cur.description = [("col1",)]
+    mock_cur.fetchmany.return_value = [{"col1": "val1"}]
+
+    exec_order = []
+    mock_conn.rollback.side_effect = lambda: exec_order.append("rollback")
+    mock_conn.autocommit.side_effect = lambda val: exec_order.append(f"autocommit_{val}")
+    mock_cur.execute.side_effect = lambda sql, *args: exec_order.append(f"execute:{sql.strip()}")
+
+    with patch("mcp_win_stdio.db.server._get_connection", return_value={"name": "test_my", "engine": "mysql", "database": "testdb"}), \
+         patch("mcp_win_stdio.db.server._get_mysql_client", return_value=mock_conn):
+        res = read_query(sql="SELECT 1")
+        assert res.get("returned_rows") == 1
+
+        # Verify rollback occurs BEFORE START TRANSACTION READ ONLY
+        assert "rollback" in exec_order
+        assert "execute:START TRANSACTION READ ONLY" in exec_order
+        first_rollback = exec_order.index("rollback")
+        start_tx = exec_order.index("execute:START TRANSACTION READ ONLY")
+        assert first_rollback < start_tx, "conn.rollback() must precede START TRANSACTION READ ONLY to avoid error 1568!"
+
+    # 3. Test fallback to SET TRANSACTION READ ONLY when START TRANSACTION READ ONLY is unsupported
+    mock_conn2 = MagicMock()
+    mock_cur2 = MagicMock()
+    mock_conn2.cursor.return_value.__enter__.return_value = mock_cur2
+    mock_cur2.description = [("col1",)]
+    mock_cur2.fetchmany.return_value = [{"col1": "val1"}]
+
+    def execute_with_fallback(sql, *args):
+        if "START TRANSACTION READ ONLY" in sql:
+            raise Exception("Syntax error: READ ONLY not supported")
+        exec_order2.append(f"execute:{sql.strip()}")
+
+    exec_order2 = []
+    mock_cur2.execute.side_effect = execute_with_fallback
+
+    with patch("mcp_win_stdio.db.server._get_connection", return_value={"name": "test_my", "engine": "mysql", "database": "testdb"}), \
+         patch("mcp_win_stdio.db.server._get_mysql_client", return_value=mock_conn2):
+        res2 = read_query(sql="SELECT 1")
+        assert res2.get("returned_rows") == 1
+        assert "execute:SET TRANSACTION READ ONLY" in exec_order2
+        assert "execute:START TRANSACTION" in exec_order2
+
+    # 4. Fail-closed: when both START TRANSACTION READ ONLY and SET TRANSACTION READ ONLY fail
+    mock_conn3 = MagicMock()
+    mock_cur3 = MagicMock()
+    mock_conn3.cursor.return_value.__enter__.return_value = mock_cur3
+
+    def execute_all_fail(sql, *args):
+        if "TRANSACTION" in sql:
+            raise Exception("Transaction initialization completely rejected")
+        return None
+
+    mock_cur3.execute.side_effect = execute_all_fail
+
+    with patch("mcp_win_stdio.db.server._get_connection", return_value={"name": "test_my", "engine": "mysql", "database": "testdb"}), \
+         patch("mcp_win_stdio.db.server._get_mysql_client", return_value=mock_conn3):
+        res3 = read_query(sql="SELECT 1")
+        assert res3.get("error") is True
+        assert "Failed to establish read-only transaction" in res3.get("message", "")
+

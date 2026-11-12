@@ -13,10 +13,13 @@ class NoneAuthProvider(AuthProvider):
     """
     Allows unauthenticated access to the MCP HTTP endpoint.
     Strictly requires read_only permissions at the gateway boundary.
+    Restricts sensitive tools (explorer file reads, database queries, SSH inspection)
+    unless allow_sensitive_reads is explicitly enabled.
     """
 
-    def __init__(self):
+    def __init__(self, allow_sensitive_reads: bool = False):
         super().__init__(auth_mode="none")
+        self.allow_sensitive_reads = bool(allow_sensitive_reads)
 
     @property
     def requires_read_only(self) -> bool:

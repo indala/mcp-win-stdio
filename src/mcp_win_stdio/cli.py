@@ -2668,10 +2668,26 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     port = int(getattr(args, "port", None) or tunnel_cfg.get("port") or 8080)
     token = getattr(args, "token", None) or tunnel_cfg.get("token")
     auto_yes = bool(getattr(args, "yes", False))
+    allow_sensitive_reads = bool(getattr(args, "allow_sensitive_reads", False))
 
     if auth_mode == "none":
         mode = "read_only"
-        print("⚠️  WARNING: Unauthenticated tunnel selected! Anyone with the public URL can invoke local read-only tools.\n")
+        print("\n" + "=" * 64)
+        print("  ⚠️  SECURITY ADVISORY: UNAUTHENTICATED PUBLIC TUNNEL (--auth none)")
+        print("=" * 64)
+        print("  Anyone with the public Cloudflare Tunnel URL can execute read-only")
+        print("  MCP tools on this system without credentials or authentication.")
+        print("  Cloudflare Quick Tunnels DO NOT provide identity verification.\n")
+        if not allow_sensitive_reads:
+            print("  🛡️  CONFIDENTIALITY PROTECTION ACTIVE:")
+            print("     Sensitive tools (explorer file reading, db queries, ssh inspection)")
+            print("     are strictly RESTRICTED on unauthenticated tunnels.")
+            print("     To allow sensitive tools, pass: --allow-sensitive-reads")
+        else:
+            print("  🚨 HIGH RISK WARNING: SENSITIVE READS EXPLICITLY PERMITTED!")
+            print("     Local workspace files, database query results, and server status")
+            print("     can be read by anyone who discovers this public URL.")
+        print("=" * 64 + "\n")
 
     # 2. Interactive Pre-flight Review (if stdin is interactive and --yes was not provided)
     if not auto_yes and sys.stdin.isatty():
@@ -2770,6 +2786,7 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
         token=token,
         auth_mode=auth_mode,
         host="127.0.0.1",
+        allow_sensitive_reads=allow_sensitive_reads,
     )
 
     try:
@@ -3110,6 +3127,12 @@ def main() -> None:
         "-y",
         action="store_true",
         help="Bypass interactive pre-flight review and launch tunnel immediately",
+    )
+    sub_tunnel.add_argument(
+        "--allow-sensitive-reads",
+        action="store_true",
+        default=False,
+        help="In unauthenticated mode (--auth none), allow sensitive reads (explorer file reads, db queries, ssh). Default: False",
     )
     sub_tunnel.set_defaults(func=cmd_tunnel)
 

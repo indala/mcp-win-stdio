@@ -806,6 +806,10 @@ def _get_pg_client(info: Dict[str, Any], dbname: Optional[str] = None):
 def _get_mysql_client(info: Dict[str, Any], dbname: Optional[str] = None):
     if not pymysql or DictCursor is None:
         raise RuntimeError("MySQL driver (pymysql) is not available.")
+    # Explicitly guarantee CLIENT.MULTI_STATEMENTS is never enabled to enforce driver-level prevention
+    client_flag = 0
+    if hasattr(pymysql, "constants") and hasattr(pymysql.constants, "CLIENT"):
+        client_flag = getattr(pymysql.constants.CLIENT, "MULTI_RESULTS", 0)
     return pymysql.connect(
         host=info["host"],
         port=info["port"],
@@ -814,6 +818,7 @@ def _get_mysql_client(info: Dict[str, Any], dbname: Optional[str] = None):
         database=dbname or info["database"],
         cursorclass=DictCursor,  # type: ignore[arg-type]
         autocommit=True,
+        client_flag=client_flag,
     )
 
 
@@ -2150,6 +2155,153 @@ def search_schema(
         return _format_db_error(e, engine)
 
 
+def _validate_readonly_sql(sql: str) -> Tuple[bool, Optional[str]]:
+    """
+    Strictly validate that a SQL string is a non-mutating, read-only query.
+    Protects against:
+    - Multi-statement execution (semicolons separating queries)
+    - CTE-based mutations (e.g. WITH ... UPDATE / DELETE / INSERT)
+    - File export clauses (INTO OUTFILE, INTO DUMPFILE)
+    - User/session variable mutations (INTO @var)
+    - Row/table locking clauses (FOR UPDATE, LOCK IN SHARE MODE, FOR SHARE)
+    - Comment-based command obfuscation (/* ... */, -- ..., # ...)
+    - MySQL conditional execution comments (/*! ... */)
+    - PostgreSQL and MySQL filesystem read/export side-effect functions (pg_read_file, load_file, lo_export)
+    """
+    if not sql or not sql.strip():
+        return False, "Query cannot be empty."
+
+    # 0. Reject MySQL conditional execution comments (/*! ... */)
+    # MySQL executes code inside /*! ... */, which bypasses naive comment-stripping validators.
+    if re.search(r"/\*!", sql):
+        return False, "Permission Denied: MySQL conditional execution comments (/*! ... */) are strictly forbidden in read_query."
+
+    # 1. State machine to mask string literals ('...', "...", `...`, $$...$$) and strip comments
+    chars = []
+    i = 0
+    n = len(sql)
+    in_quote = None
+
+    while i < n:
+        c = sql[i]
+        if in_quote:
+            # Backslash escape inside string literals (single or double quote)
+            if in_quote in ("'", '"') and c == "\\" and i + 1 < n:
+                chars.append("  ")
+                i += 2
+                continue
+            if c == in_quote:
+                # Doubled quote escape (e.g. '' or "")
+                if i + 1 < n and sql[i + 1] == in_quote:
+                    chars.append("  ")
+                    i += 2
+                    continue
+                in_quote = None
+                chars.append(" ")
+                i += 1
+                continue
+            chars.append(" ")
+            i += 1
+        elif c in ("'", '"', "`"):
+            in_quote = c
+            chars.append(" ")
+            i += 1
+        elif c == "$":
+            # Check for PostgreSQL dollar quotes ($$ or $tag$)
+            m = re.match(r"^\$([a-zA-Z0-9_]*)\$", sql[i:])
+            if m:
+                tag = m.group(0)
+                j = sql.find(tag, i + len(tag))
+                if j == -1:
+                    return False, f"Syntax Error: Unclosed dollar-quoted string ({tag}) in query."
+                total_len = (j + len(tag)) - i
+                chars.append(" " * total_len)
+                i = j + len(tag)
+                continue
+            chars.append(c)
+            i += 1
+        elif c == "/" and i + 1 < n and sql[i + 1] == "*":
+            j = sql.find("*/", i + 2)
+            if j == -1:
+                return False, "Syntax Error: Unclosed block comment (/* ... */) in query."
+            chars.append(" " * (j + 2 - i))
+            i = j + 2
+        elif c == "-" and i + 1 < n and sql[i + 1] == "-":
+            j = sql.find("\n", i + 2)
+            if j == -1:
+                chars.append(" " * (n - i))
+                break
+            chars.append(" " * (j - i))
+            i = j
+        elif c == "#":
+            j = sql.find("\n", i + 1)
+            if j == -1:
+                chars.append(" " * (n - i))
+                break
+            chars.append(" " * (j - i))
+            i = j
+        else:
+            chars.append(c)
+            i += 1
+
+    if in_quote is not None:
+        return False, f"Syntax Error: Unclosed quote ({in_quote}) or identifier in query."
+
+    clean = "".join(chars).strip()
+    if not clean:
+        return False, "Query contains only comments or whitespace."
+
+    # 2. Check for multiple statements (semicolon followed by non-whitespace)
+    statements = [s.strip() for s in clean.split(";") if s.strip()]
+    if len(statements) > 1:
+        return False, "Multiple statements are strictly forbidden in read_query. Found multiple statement delimiters."
+
+    single_stmt = statements[0]
+    tokens = [t.upper() for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", single_stmt)]
+    if not tokens:
+        return False, "No valid SQL statement found."
+
+    first_word = tokens[0]
+    allowed_first_words = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC"}
+    if first_word not in allowed_first_words:
+        return False, (
+            f"Permission Denied: read_query permits only SELECT, WITH, EXPLAIN, SHOW, and DESCRIBE queries. "
+            f"Found: '{first_word}'. Use execute_query for data mutations."
+        )
+
+    # 3. Forbid locking clauses: FOR UPDATE, LOCK IN SHARE MODE, FOR SHARE
+    upper_stmt = single_stmt.upper()
+    if re.search(r"\bFOR\s+(?:UPDATE|SHARE)\b", upper_stmt) or re.search(r"\bLOCK\s+IN\s+SHARE\s+MODE\b", upper_stmt):
+        return False, "Permission Denied: Row or table locking clauses (FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE) are forbidden in read_query."
+
+    # 4. Forbid mutating, DDL, DCL, file export/import keywords, and dangerous side-effect functions
+    disallowed_keywords = {
+        # Mutating DML / DDL / DCL
+        "UPDATE", "DELETE", "INSERT", "REPLACE", "DROP", "CREATE", "ALTER",
+        "TRUNCATE", "GRANT", "REVOKE", "SET", "CALL", "EXEC", "EXECUTE",
+        "RENAME",
+        # File exports, imports, and writes
+        "OUTFILE", "DUMPFILE", "INTO", "COPY",
+        # Dangerous side-effect / filesystem read/write functions
+        "LOAD_FILE", "PG_READ_FILE", "PG_READ_BINARY_FILE", "PG_LS_DIR",
+        "PG_STAT_FILE", "LO_EXPORT", "LO_IMPORT", "LO_GET", "LO_PUT",
+        "DBLINK", "DBLINK_EXEC",
+        # Locking & Admin / DoS functions executable via SELECT
+        "GET_LOCK", "RELEASE_LOCK", "RELEASE_ALL_LOCKS",
+        "PG_ADVISORY_LOCK", "PG_ADVISORY_XACT_LOCK", "PG_TRY_ADVISORY_LOCK",
+        "PG_TERMINATE_BACKEND", "PG_CANCEL_BACKEND", "PG_RELOAD_CONF", "PG_ROTATE_LOGFILE",
+        "PG_SLEEP", "SLEEP",
+    }
+    found_disallowed = set(tokens).intersection(disallowed_keywords)
+    if found_disallowed:
+        return False, (
+            f"Permission Denied: read_query strictly forbids mutating, DDL, or file export keywords: "
+            f"{sorted(found_disallowed)}. Use execute_query for data mutations."
+        )
+
+    return True, None
+
+
 @mcp.tool()
 def read_query(
     sql: str,
@@ -2171,12 +2323,11 @@ def read_query(
         connection: Optional target database connection or server alias.
         server: Optional server or connection alias.
     """
-    clean_sql = re.sub(r"--.*?$|/\*.*?\*/", "", sql or "", flags=re.MULTILINE | re.DOTALL).strip()
-    first_word = clean_sql.split()[0].upper() if clean_sql else ""
-    if first_word not in ("SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC"):
+    valid, val_err = _validate_readonly_sql(sql)
+    if not valid:
         return {
             "error": True,
-            "message": f"Permission Denied: read_query strictly permits SELECT, WITH, EXPLAIN, SHOW, and DESCRIBE queries. Found: '{first_word}'. Use execute_query for data mutations.",
+            "message": val_err,
         }
 
     info: Optional[Dict[str, Any]] = None
@@ -2239,8 +2390,32 @@ def read_query(
             return _format_db_error(e, "mysql", sql)
 
         try:
+            # Roll back any pending implicit transaction first to prevent MySQL OperationalError 1568
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.autocommit(False)
             import pymysql.cursors
             with conn.cursor(pymysql.cursors.Cursor) as cur:
+                # Establish database-enforced read-only transaction in MySQL 5.6.5+
+                try:
+                    cur.execute("START TRANSACTION READ ONLY")
+                except Exception as e_start:
+                    # Fallback for older MySQL / MariaDB variants using next-transaction scope (not SESSION)
+                    try:
+                        cur.execute("SET TRANSACTION READ ONLY")
+                        cur.execute("START TRANSACTION")
+                    except Exception as e_fallback:
+                        return _format_db_error(
+                            RuntimeError(
+                                f"Failed to establish read-only transaction: {e_start}; "
+                                f"fallback 'SET TRANSACTION READ ONLY' also failed: {e_fallback}"
+                            ),
+                            "mysql",
+                            sql,
+                        )
+
                 if params:
                     cur.execute(sql, tuple(params))
                 else:
@@ -2270,6 +2445,10 @@ def read_query(
         except Exception as e:
             return _format_db_error(e, "mysql", sql)
         finally:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             conn.close()
 
 
