@@ -10,11 +10,12 @@ def print_server_guide() -> None:
    mws server (Universal On-Demand Gateway & Dynamic Tool Router)
 ================================================================================
 mws is not just a CLI - it is itself the unified MCP Server!
-Exposes 6 lightweight meta-tools (~400 tokens) to the agent instead of loading
+Exposes lightweight gateway tools instead of loading
 150-200+ tools upfront into the LLM context. Child MCP processes (db, excel,
-git, ssh, tsc, etc.) are lazily spawned on-demand and kept warm.
+git, ssh, tsc, etc.) are lazily spawned on-demand and kept warm. In addition
+to tools, MWS can proxy child-server resources, resource templates, and prompts.
 
-Available Tools (6 Meta-Tools):
+Core Gateway Tools:
 --------------------------------------------------------------------------------
 1. list_servers
    - Dynamically lists all installed and available MCP servers without hardcoding.
@@ -42,6 +43,17 @@ Available Tools (6 Meta-Tools):
 6. stop_server
    - Gracefully shuts down a running child process to release RAM or file locks.
    - Args: server (str)
+
+MCP Resources and Prompts:
+--------------------------------------------------------------------------------
+- list_server_resources(server, cursor)
+- list_server_resource_templates(server, cursor)
+- read_server_resource(server, uri)
+- list_server_prompts(server, cursor)
+- get_server_prompt(server, name, arguments)
+
+List operations return the child server's page and nextCursor when available.
+Large results are stored as artifacts to protect the agent context window.
 
 --------------------------------------------------------------------------------
 Quick Agent Configuration (Claude Desktop, Cursor, Antigravity, Cline):

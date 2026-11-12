@@ -80,10 +80,9 @@ Draft ideas for future MWS improvements. These are candidates to evaluate, not c
    - This would allow independent calls to the same warm server process to overlap instead of waiting behind one another.
    - Bound concurrency and preserve correct handling of notifications, timeouts, process exits, and late responses.
 
-15. **MCP resources and prompts gateway**
-   - Discover and proxy child-server resources and prompt templates in addition to tools.
-   - Add unified search and routing for resources/prompts while preserving server identity and URI boundaries.
-   - This expands the gateway to the broader MCP interface, not just callable actions.
+15. **MCP resources and prompts gateway** — implemented
+   - MWS now lists and reads child-server resources, resource templates, and prompts through dedicated gateway tools.
+   - Resource/prompt results retain server identity, support cursor pagination, and use artifact spilling for large responses.
 
 16. **Workflow suggestions from repeated usage**
    - Detect repeated successful sequences of tool calls and propose a reusable workflow with likely parameters.
@@ -102,6 +101,6 @@ Draft ideas for future MWS improvements. These are candidates to evaluate, not c
 3. Add **multiplexed child-server requests**, then measure whether parallel workflow calls gain latency on real workloads.
 4. Add **durable jobs and tracing** so long or parallel runs remain understandable and recoverable.
 5. Add **artifact-backed results** to reduce context use for large outputs.
-6. Evaluate the **planner, policy engine, MCP resources/prompts, and event triggers** after the execution and safety foundations are in place.
+6. Evaluate the **planner, policy engine, and event triggers** after the execution and safety foundations are in place.
 
 For each candidate, measure end-to-end task time, number of tool round-trips, output size, failure/recovery rate, and any increase in setup complexity.

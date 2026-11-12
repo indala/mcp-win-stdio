@@ -21,6 +21,14 @@ from .discovery import discover_available_servers
 class MCPProcess:
     """Manages a single running MCP child server process over stdio."""
 
+    _CAPABILITY_METHODS = {
+        "resources/list",
+        "resources/read",
+        "resources/templates/list",
+        "prompts/list",
+        "prompts/get",
+    }
+
     def __init__(self, name: str, command: str, args: List[str]):
         self.name = name
         self.command = command
@@ -232,6 +240,18 @@ class MCPProcess:
         self.initialize()
         result = self.send_request("tools/list", {})
         return result.get("tools", []) if isinstance(result, dict) else []
+
+    def request_capability(
+        self,
+        method: str,
+        params: Optional[Dict[str, Any]] = None,
+        timeout: float = 60.0,
+    ) -> Any:
+        """Proxy a supported non-tool MCP capability request to the child server."""
+        if method not in self._CAPABILITY_METHODS:
+            raise ValueError(f"Unsupported MCP capability method '{method}'.")
+        self.initialize()
+        return self.send_request(method, params or {}, timeout=timeout)
 
     def call_tool(
         self,

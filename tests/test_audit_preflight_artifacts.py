@@ -154,6 +154,15 @@ def test_artifact_spilling_and_pagination():
     assert malicious.get("isError") is True
     assert "Invalid artifact handle" in malicious["error"]
 
+    # 7. MCP capability collections retain useful previews and pagination
+    resource_data = {"resources": [{"uri": f"file://{i}", "description": "x" * 100} for i in range(20)]}
+    resource_spilled, resource_stub = maybe_spill_to_artifact(resource_data, threshold_bytes=1024)
+    assert resource_spilled is True
+    assert len(resource_stub["_artifact"]["preview"]["resources"]) <= 5
+    resource_page = read_artifact_payload(resource_stub["_artifact"]["handle"], offset=5, limit=3)
+    assert resource_page["total_items"] == 20
+    assert resource_page["items"][0]["uri"] == "file://5"
+
 
 def test_command_line_secret_redaction():
     """Verify inline command secrets like --password=123, -pSECRET, and PASSWORD=xyz are masked."""

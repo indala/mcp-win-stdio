@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path("src").resolve()))
 
 from mcp_win_stdio.server.catalog import (
     describe_tool as catalog_describe_tool,
+)
+from mcp_win_stdio.server.catalog import (
     generate_compact_signature,
     get_server_catalog,
     get_server_tools,
@@ -19,14 +21,19 @@ from mcp_win_stdio.server.catalog import (
     search_tools,
 )
 from mcp_win_stdio.server.discovery import discover_available_servers
-from mcp_win_stdio.server.process_pool import GLOBAL_POOL, ProcessPool
+from mcp_win_stdio.server.process_pool import GLOBAL_POOL, MCPProcess, ProcessPool
 from mcp_win_stdio.server.server import (
     call_tool,
     delete_workflow,
     describe_tool,
     get_active_sessions,
+    get_server_prompt,
+    list_server_prompts,
+    list_server_resource_templates,
+    list_server_resources,
     list_servers,
     list_workflows,
+    read_server_resource,
     run_workflow,
     save_workflow,
     stop_server,
@@ -174,6 +181,106 @@ def test_server_meta_tools_api():
     # get_active_sessions
     sessions = get_active_sessions()
     assert isinstance(sessions, list)
+
+
+def test_mcp_resources_and_prompts_are_proxied(monkeypatch):
+    """Verify resources, templates, and prompts route to the selected child server."""
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from mcp_win_stdio.server import server as gateway
+
+    calls = []
+
+    class FakeProcess:
+        def request_capability(self, method, params):
+            calls.append((method, params))
+            if method == "resources/read":
+                return {"contents": [{"uri": params["uri"], "text": "hello"}]}
+            responses = {
+                "resources/list": {"resources": [{"uri": "file://readme"}]},
+                "resources/templates/list": {"resourceTemplates": []},
+                "prompts/list": {"prompts": [{"name": "summarize"}]},
+                "prompts/get": {"messages": [{"role": "user", "content": {"type": "text", "text": "hello"}}]},
+            }
+            return responses[method]
+
+    process = FakeProcess()
+    pool = SimpleNamespace(
+        get_or_spawn=Mock(return_value=process),
+        circuit_breaker=SimpleNamespace(
+            record_success=Mock(),
+            record_infrastructure_failure=Mock(),
+        ),
+    )
+    monkeypatch.setattr(gateway, "GLOBAL_POOL", pool)
+    monkeypatch.setattr(gateway, "discover_available_servers", lambda: {"docs": {}})
+
+    assert list_server_resources("docs", cursor="next")["resources"][0]["uri"] == "file://readme"
+    assert list_server_resource_templates("docs")["resourceTemplates"] == []
+    assert read_server_resource("docs", "file://readme")["contents"][0]["text"] == "hello"
+    assert list_server_prompts("docs")["prompts"][0]["name"] == "summarize"
+    assert get_server_prompt("docs", "summarize", {"topic": "hello"})["messages"]
+    assert calls == [
+        ("resources/list", {"cursor": "next"}),
+        ("resources/templates/list", {}),
+        ("resources/read", {"uri": "file://readme"}),
+        ("prompts/list", {}),
+        ("prompts/get", {"name": "summarize", "arguments": {"topic": "hello"}}),
+    ]
+
+
+def test_mcp_capability_unknown_server_is_rejected(monkeypatch):
+    """Unknown server names must not start a child process."""
+    from unittest.mock import Mock
+
+    from mcp_win_stdio.server import server as gateway
+
+    pool = Mock()
+    monkeypatch.setattr(gateway, "GLOBAL_POOL", pool)
+    monkeypatch.setattr(gateway, "discover_available_servers", lambda: {})
+
+    result = list_server_resources("missing")
+
+    assert result["isError"] is True
+    assert "Unknown server" in result["error"]
+    pool.get_or_spawn.assert_not_called()
+
+
+def test_mcp_capability_request_is_initialized_and_allowlisted():
+    """Only supported MCP capability methods may be forwarded to child servers."""
+    from unittest.mock import Mock
+
+    import pytest
+
+    process = object.__new__(MCPProcess)
+    process.initialize = Mock()
+    process.send_request = Mock(return_value={"resources": []})
+
+    result = process.request_capability("resources/list", {"cursor": "next"})
+
+    assert result == {"resources": []}
+    process.initialize.assert_called_once_with()
+    process.send_request.assert_called_once_with("resources/list", {"cursor": "next"}, timeout=60.0)
+    with pytest.raises(ValueError, match="Unsupported MCP capability method"):
+        process.request_capability("tools/call", {})
+
+
+def test_mcp_capability_gateway_tools_are_registered():
+    """Verify all resource and prompt gateway entry points are exposed by MWS."""
+    import asyncio
+
+    from mcp_win_stdio.server.server import mcp
+
+    tool_names = {tool.name for tool in asyncio.run(mcp.list_tools())}
+
+    assert {
+        "list_server_resources",
+        "list_server_resource_templates",
+        "read_server_resource",
+        "list_server_prompts",
+        "get_server_prompt",
+    }.issubset(tool_names)
 
 
 def test_compact_signature_generation():

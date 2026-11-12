@@ -10,7 +10,8 @@ Windows-optimized **Model Context Protocol (MCP)** suite and non-invasive CLI hu
 
 ## 🌟 Highlights (230+ Tools Across 10 Modular Servers)
 
-* **Unified On-Demand Gateway & Workflow Engine (`mws server`)**: Configure just `mws server` (or `python -m mcp_win_stdio.server`) in Claude Desktop, Cursor, Gemini, or Antigravity. Instead of dumping 200+ tools (35,000+ tokens) into the context window, it exposes 10 lightweight meta-tools (~500 tokens) that lazily spawn child servers and execute agent-synthesized multi-step workflows in 0 LLM turns!
+* **Unified On-Demand Gateway & Workflow Engine (`mws server`)**: Configure just `mws server` (or `python -m mcp_win_stdio.server`) in Claude Desktop, Cursor, Gemini, or Antigravity. Dynamic discovery, routing, workflows, and lazy child-server startup avoid loading all 200+ tools into the agent context upfront.
+* **MCP Resources & Prompts Gateway**: Discover and read child-server resources, resource templates, and rendered prompts through `mws`, with cursor-based pagination and large-result artifact handling.
 * **Agent-Synthesized Workflows (`.mws/workflows/`)**: AI agents and developers can chain multiple MCP tools into named composite pipelines with argument templating and error halting.
 * **100% Dynamic & Zero-Env Architecture**: All configurations (databases, TypeScript projects, SSH hosts, Git repositories) are managed interactively and stored in `~/.mcp-win-stdio/`. No environment variables required in client configs!
 * **Universal Multi-Agent Guide (`mws guide`)**: Generates tailored copy-paste configuration snippets and exact configuration file paths for 10 major AI agents without mutating user files.
@@ -35,7 +36,7 @@ Each server is published as an independent, lightweight PyPI package. Installing
 
 | Server | Standalone Package | Tools | Primary Capabilities |
 | :--- | :--- | :---: | :--- |
-| **mws Server** | `pip install mcp-win-stdio` | 10 | Unified On-Demand Gateway, Composite Workflow Engine, & Dynamic Process Orchestrator |
+| **mws Server** | `pip install mcp-win-stdio` | 18 | Unified On-Demand Gateway, Composite Workflow Engine, & Dynamic Process Orchestrator |
 | **Excel** | `pip install mcp-win-stdio-excel` | 44 | Native Excel Tables, row/col mutations, formulas, Pandas queries, RapidFuzz reconciliation, Office COM automation |
 | **Git & GitHub** | `pip install mcp-win-stdio-git` | 46 | Local Git init/remotes/restore/bookmarks/branches, commits, diffs + GitHub PR checks, releases, issues, Actions |
 | **SSH** | `pip install mcp-win-stdio-ssh` | 34 | Multi-host pooling, ~/.ssh/config discovery, PTY shells, background jobs, systemd/docker, package management, SFTP, tunnels |

@@ -148,6 +148,113 @@ def use_server(server: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
     return call_server(server=server, ctx=ctx)
 
 
+def _proxy_server_capability(server: str, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    clean_server = server.lower().strip()
+    if clean_server not in discover_available_servers():
+        return {
+            "isError": True,
+            "error": f"Unknown server '{server}'. Use list_servers to see available servers.",
+        }
+
+    try:
+        proc = GLOBAL_POOL.get_or_spawn(clean_server)
+        result = proc.request_capability(method, params)
+        GLOBAL_POOL.circuit_breaker.record_success(clean_server)
+    except (TimeoutError, ConnectionError, RuntimeError, BrokenPipeError) as exc:
+        error = str(exc)
+        if isinstance(exc, RuntimeError) and error.startswith(f"MCP Error from '{clean_server}'"):
+            GLOBAL_POOL.circuit_breaker.record_success(clean_server)
+        else:
+            GLOBAL_POOL.circuit_breaker.record_infrastructure_failure(clean_server, error)
+        return {
+            "isError": True,
+            "server": clean_server,
+            "capability": method,
+            "error": error,
+        }
+
+    payload = {**result, "server": clean_server} if isinstance(result, dict) else {
+        "server": clean_server, "result": result,
+    }
+    from mcp_win_stdio.core.artifacts import maybe_spill_to_artifact
+
+    _, payload = maybe_spill_to_artifact(payload)
+    return payload
+
+
+@mcp.tool()
+def list_server_resources(server: str, cursor: Optional[str] = None) -> Dict[str, Any]:
+    """
+    List resources exposed by a child MCP server.
+    Returns the server's page and any nextCursor value for follow-up requests.
+
+    Args:
+        server: Target server name (e.g. 'rag', 'db').
+        cursor: Optional pagination cursor returned by a previous request.
+    """
+    params = {"cursor": cursor} if cursor else {}
+    return _proxy_server_capability(server, "resources/list", params)
+
+
+@mcp.tool()
+def list_server_resource_templates(server: str, cursor: Optional[str] = None) -> Dict[str, Any]:
+    """
+    List resource templates exposed by a child MCP server.
+
+    Args:
+        server: Target server name.
+        cursor: Optional pagination cursor returned by a previous request.
+    """
+    params = {"cursor": cursor} if cursor else {}
+    return _proxy_server_capability(server, "resources/templates/list", params)
+
+
+@mcp.tool()
+def read_server_resource(server: str, uri: str) -> Dict[str, Any]:
+    """
+    Read a resource URI from a child MCP server.
+
+    Args:
+        server: Target server name.
+        uri: Resource URI returned by list_server_resources.
+    """
+    return _proxy_server_capability(server, "resources/read", {"uri": uri})
+
+
+@mcp.tool()
+def list_server_prompts(server: str, cursor: Optional[str] = None) -> Dict[str, Any]:
+    """
+    List prompt templates exposed by a child MCP server.
+
+    Args:
+        server: Target server name.
+        cursor: Optional pagination cursor returned by a previous request.
+    """
+    params = {"cursor": cursor} if cursor else {}
+    return _proxy_server_capability(server, "prompts/list", params)
+
+
+@mcp.tool()
+def get_server_prompt(
+    server: str,
+    name: str,
+    arguments: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Get a rendered prompt from a child MCP server.
+
+    Args:
+        server: Target server name.
+        name: Prompt name returned by list_server_prompts.
+        arguments: Optional prompt arguments as string key/value pairs.
+    """
+    return _proxy_server_capability(
+        server,
+        "prompts/get",
+        {"name": name, "arguments": arguments or {}},
+    )
+
+
 @mcp.tool()
 def manage_context(
     action: str = "get",

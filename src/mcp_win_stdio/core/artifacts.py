@@ -31,6 +31,17 @@ MAX_PREVIEW_BYTES = 4 * 1024       # 4 KB bounded preview
 MAX_PREVIEW_ROWS = 5               # Top 5 records
 TTL_HOURS = 24.0                   # Auto-prune files older than 24h
 MAX_DIR_BYTES = 500 * 1024 * 1024  # 500 MB max directory cap
+_LIST_CONTAINER_KEYS = (
+    "rows",
+    "data",
+    "items",
+    "results",
+    "records",
+    "resources",
+    "resourceTemplates",
+    "prompts",
+    "contents",
+)
 
 
 def _ensure_artifacts_dir() -> Path:
@@ -160,7 +171,7 @@ def maybe_spill_to_artifact(
 
     if isinstance(data, dict):
         # Look for primary list container (e.g. 'rows', 'data', 'tools', 'items')
-        for key in ("rows", "data", "items", "results", "records"):
+        for key in _LIST_CONTAINER_KEYS:
             if isinstance(data.get(key), list):
                 total_items = len(data[key])
                 sample = data[key][:MAX_PREVIEW_ROWS]
@@ -252,7 +263,7 @@ def read_artifact_payload(
     if isinstance(data, list):
         rows_container = data
     elif isinstance(data, dict):
-        for k in ("rows", "data", "items", "results", "records"):
+        for k in _LIST_CONTAINER_KEYS:
             if isinstance(data.get(k), list):
                 rows_container = data[k]
                 break
