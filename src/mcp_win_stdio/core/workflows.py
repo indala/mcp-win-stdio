@@ -594,11 +594,22 @@ def run_workflow(
             "plan": plan,
         }
 
-    # 3. Setup tool caller
+    # 3. Setup tool caller with defense-in-depth permission enforcement
     if not call_tool_fn:
+        from mcp_win_stdio.core.config import get_effective_mode
+        from mcp_win_stdio.core.permissions import check_tool_permission
         from mcp_win_stdio.server.process_pool import GLOBAL_POOL
 
         def _default_caller(server: str, tool: str, args: Dict[str, Any]) -> Any:
+            eff_mode = get_effective_mode()
+            permitted, perm_err = check_tool_permission(server, tool, mode=eff_mode)
+            if not permitted:
+                return {
+                    "isError": True,
+                    "error": perm_err,
+                    "server": server,
+                    "tool": tool,
+                }
             proc = GLOBAL_POOL.get_or_spawn(server)
             return proc.call_tool(tool, args)
 

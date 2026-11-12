@@ -95,6 +95,8 @@ def _resolve_session_id(ctx: Any = None) -> str:
 @mcp.tool()
 def call_server(
     server: str,
+    tool: Optional[str] = None,
+    arguments: Optional[Union[Dict[str, Any], str]] = None,
     stack: bool = True,
     include_signatures: bool = True,
     ctx: Optional[Context] = None,
@@ -102,10 +104,12 @@ def call_server(
     """
     Select and stack target MCP server in session context, immediately returning
     its tools, compact parameter signatures, active targets, and ready status.
-    Eliminates wasteful extra roundtrips.
+    If 'tool' is provided, validates child tool permissions and dynamically executes it.
 
     Args:
         server: Target MCP server name (e.g. 'db', 'excel', 'git', 'ssh', 'rag', 'word', 'tsc', 'arch', 'explorer').
+        tool: Optional tool name to execute directly on the target server.
+        arguments: Optional tool arguments if 'tool' is provided.
         stack: Whether to set/stack this server as active in session context (default True).
         include_signatures: Include compact parameter signatures for each tool (default True).
     """
@@ -115,7 +119,37 @@ def call_server(
         return {
             "isError": True,
             "error": f"Unknown server '{server}'. Available servers: {list(available.keys())}",
+            "server": clean,
         }
+
+    # If child tool invocation is requested via call_server, enforce child permissions
+    if tool:
+        clean_tool = tool.strip()
+        from mcp_win_stdio.core.config import get_effective_mode
+        from mcp_win_stdio.core.permissions import check_tool_permission
+
+        eff_mode = get_effective_mode()
+        permitted, perm_err = check_tool_permission(clean, clean_tool, mode=eff_mode)
+        if not permitted:
+            return {
+                "isError": True,
+                "error": perm_err,
+                "server": clean,
+                "tool": clean_tool,
+            }
+
+        catalog_data = get_server_catalog(server=clean, include_tools=True)
+        raw_tools = catalog_data.get("servers", {}).get(clean, {}).get("tools", [])
+        srv_tools = [t if isinstance(t, str) else t.get("name") for t in raw_tools]
+        if srv_tools and clean_tool not in srv_tools:
+            return {
+                "isError": True,
+                "error": f"Tool '{clean_tool}' not found on server '{clean}'.",
+                "server": clean,
+                "tool": clean_tool,
+            }
+
+        return call_tool(name=clean_tool, arguments=arguments, server=clean, ctx=ctx)
 
     sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
@@ -765,6 +799,19 @@ def stop_server(server: str) -> Dict[str, Any]:
     Args:
         server: Server name to terminate (e.g. 'excel', 'db').
     """
+    from mcp_win_stdio.core.config import get_effective_mode
+    from mcp_win_stdio.core.permissions import check_tool_permission
+
+    eff_mode = get_effective_mode()
+    permitted, perm_err = check_tool_permission("gateway", "stop_server", mode=eff_mode)
+    if not permitted:
+        return {
+            "isError": True,
+            "error": perm_err,
+            "server": "gateway",
+            "tool": "stop_server",
+        }
+
     clean_server = server.lower().strip()
     stopped = GLOBAL_POOL.stop_server(clean_server)
     return {
@@ -804,11 +851,16 @@ def save_workflow(
         scope: Where to store: 'project' (default, in .mws/workflows/) or 'global' (in ~/.mcp-win-stdio/workflows/).
     """
     from mcp_win_stdio.core.config import get_effective_mode
+    from mcp_win_stdio.core.permissions import check_tool_permission
 
-    if get_effective_mode() == "read_only":
+    eff_mode = get_effective_mode()
+    permitted, perm_err = check_tool_permission("gateway", "save_workflow", mode=eff_mode)
+    if not permitted:
         return {
             "isError": True,
-            "error": "Permission Denied: Saving workflows is a modifying operation and is blocked in 'read_only' mode.",
+            "error": perm_err,
+            "server": "gateway",
+            "tool": "save_workflow",
         }
     return core_save_workflow(name=name, definition=definition, scope=scope)
 
@@ -818,6 +870,7 @@ def run_workflow(
     name: str,
     parameters: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Execute a saved multi-step composite workflow in a single atomic invocation.
@@ -829,10 +882,15 @@ def run_workflow(
         parameters: Optional dictionary of parameter values to pass into the workflow.
         dry_run: If True, resolves variables and returns the projected execution plan without invoking tools.
     """
+    def _call_fn(s: str, t: str, a: Dict[str, Any]) -> Any:
+        if ctx is not None:
+            return call_tool(name=t, arguments=a, server=s, ctx=ctx)
+        return call_tool(name=t, arguments=a, server=s)
+
     wf_res = core_run_workflow(
         name_or_def=name,
         parameters=parameters,
-        call_tool_fn=lambda s, t, a: call_tool(name=t, arguments=a, server=s),
+        call_tool_fn=_call_fn,
         dry_run=dry_run,
     )
 
@@ -858,6 +916,18 @@ def delete_workflow(name: str, scope: Optional[str] = None) -> Dict[str, Any]:
         name: Name of the workflow to delete.
         scope: Optional scope filter ('project' or 'global').
     """
+    from mcp_win_stdio.core.config import get_effective_mode
+    from mcp_win_stdio.core.permissions import check_tool_permission
+
+    eff_mode = get_effective_mode()
+    permitted, perm_err = check_tool_permission("gateway", "delete_workflow", mode=eff_mode)
+    if not permitted:
+        return {
+            "isError": True,
+            "error": perm_err,
+            "server": "gateway",
+            "tool": "delete_workflow",
+        }
     return core_delete_workflow(name=name, scope=scope)
 
 

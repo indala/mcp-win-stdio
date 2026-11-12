@@ -2171,6 +2171,14 @@ def read_query(
         connection: Optional target database connection or server alias.
         server: Optional server or connection alias.
     """
+    clean_sql = re.sub(r"--.*?$|/\*.*?\*/", "", sql or "", flags=re.MULTILINE | re.DOTALL).strip()
+    first_word = clean_sql.split()[0].upper() if clean_sql else ""
+    if first_word not in ("SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "DESC"):
+        return {
+            "error": True,
+            "message": f"Permission Denied: read_query strictly permits SELECT, WITH, EXPLAIN, SHOW, and DESCRIBE queries. Found: '{first_word}'. Use execute_query for data mutations.",
+        }
+
     info: Optional[Dict[str, Any]] = None
     try:
         info = _get_connection(_resolve_conn(connection, server))

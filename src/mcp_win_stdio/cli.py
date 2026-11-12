@@ -2707,6 +2707,11 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 sys.exit(0)
 
             if choice in ("1", "", "start", "run"):
+                if auth_mode == "oauth":
+                    print("\n❌ OAuth authentication is not available yet.")
+                    print("Currently supported: bearer, none")
+                    print("Please select option [4] to choose 'bearer' or 'none'.\n")
+                    continue
                 break
             elif choice == "2":
                 if auth_mode == "none":
@@ -2748,7 +2753,16 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 print("Tunnel start aborted.")
                 sys.exit(0)
 
-    # 3. Launch tunnel manager
+    # 3. Guard against unreleased auth modes before launching bridge or cloudflared
+    if auth_mode == "oauth":
+        print("\n❌ OAuth authentication is not available yet.\n", file=sys.stderr)
+        print("Currently supported:", file=sys.stderr)
+        print("  --auth bearer", file=sys.stderr)
+        print("  --auth none\n", file=sys.stderr)
+        print("OAuth support is planned for a future release.\n", file=sys.stderr)
+        sys.exit(1)
+
+    # 4. Launch tunnel manager
     print(f"\n🚀 Launching MWS StreamableHTTP bridge on 127.0.0.1:{port} (mode: {mode}, auth: {auth_mode})...")
     mgr = MwsTunnelManager(
         port=port,

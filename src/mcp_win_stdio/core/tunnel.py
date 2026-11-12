@@ -23,9 +23,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from mcp_win_stdio.core.config import (
+    CURRENT_PERMISSION_MODE,
     get_tunnel_config,
     load_hierarchical_config,
-    set_runtime_mode_override,
 )
 from mcp_win_stdio.core.tunnel_auth import (
     AuthProvider,
@@ -41,13 +41,18 @@ logger = logging.getLogger("mcp_win_stdio.tunnel")
 
 class TunnelAuthMiddleware(BaseHTTPMiddleware):
     """
-    Generic authentication middleware delegating verification to an AuthProvider.
+    Generic authentication and permission isolation middleware delegating verification to an AuthProvider.
     Bypasses authentication strictly for health and status endpoints.
+    Establishes request-scoped permission context (CURRENT_PERMISSION_MODE) for the lifetime of the request.
     """
 
-    def __init__(self, app: Any, auth_provider: AuthProvider):
+    def __init__(self, app: Any, auth_provider: AuthProvider, permission_mode: str = "read_only"):
         super().__init__(app)
         self.auth_provider = auth_provider
+        if auth_provider.requires_read_only:
+            self.permission_mode = "read_only"
+        else:
+            self.permission_mode = (permission_mode or "read_only").lower().strip()
 
     async def dispatch(self, request: Any, call_next: Callable[..., Any]) -> Any:
         path = request.url.path
@@ -63,7 +68,12 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
         if auth_response is not None:
             return auth_response
 
-        return await call_next(request)
+        # Request-scoped permission context isolation: reset using token in finally
+        perm_token = CURRENT_PERMISSION_MODE.set(self.permission_mode)
+        try:
+            return await call_next(request)
+        finally:
+            CURRENT_PERMISSION_MODE.reset(perm_token)
 
 
 class BearerAuthMiddleware(TunnelAuthMiddleware):
@@ -71,8 +81,8 @@ class BearerAuthMiddleware(TunnelAuthMiddleware):
     Backward-compatibility alias for BearerAuthMiddleware.
     """
 
-    def __init__(self, app: Any, token: str):
-        super().__init__(app, auth_provider=BearerAuthProvider(token=token))
+    def __init__(self, app: Any, token: str, permission_mode: str = "read_only"):
+        super().__init__(app, auth_provider=BearerAuthProvider(token=token), permission_mode=permission_mode)
 
 
 class MwsTunnelManager:
@@ -170,13 +180,14 @@ class MwsTunnelManager:
         """Launch uvicorn StreamableHTTP server with configured auth provider in a worker thread."""
         from mcp.server.transport_security import TransportSecuritySettings
 
-        # Set runtime mode override (e.g. read_only) for gateway tool call permission enforcement
-        set_runtime_mode_override(self.mode)
-
         # Disable DNS rebinding protections so Cloudflare proxy Host headers pass through
         sec = TransportSecuritySettings(enable_dns_rebinding_protection=False)
         base_app = mcp.streamable_http_app(transport_security=sec)
-        base_app.add_middleware(TunnelAuthMiddleware, auth_provider=self.auth_provider)
+        base_app.add_middleware(
+            TunnelAuthMiddleware,
+            auth_provider=self.auth_provider,
+            permission_mode=self.mode,
+        )
 
         config = uvicorn.Config(
             app=base_app,
@@ -267,9 +278,6 @@ class MwsTunnelManager:
     def stop(self) -> None:
         """Gracefully shut down Cloudflare tunnel, local uvicorn bridge, and auth provider."""
         self._stop_event.set()
-
-        # Clear runtime mode override
-        set_runtime_mode_override(None)
 
         # Shutdown auth provider
         try:

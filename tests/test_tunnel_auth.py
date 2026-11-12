@@ -225,9 +225,9 @@ def test_tunnel_manager_modes():
     assert mgr_a.auth_provider is not mgr_b.auth_provider
 
 
-def test_tunnel_manager_runtime_mode_override_lifecycle():
+def test_tunnel_manager_request_scoped_middleware_configuration():
     set_runtime_mode_override(None)
-    assert get_effective_mode() in ("read_only", "read_write")
+    initial_mode = get_effective_mode()
 
     mgr = MwsTunnelManager(port=8997, mode="read_only", auth_mode="none")
     with patch("mcp_win_stdio.server.server.mcp.streamable_http_app") as mock_app_factory, \
@@ -237,15 +237,18 @@ def test_tunnel_manager_runtime_mode_override_lifecycle():
 
         mgr.start_local_bridge()
         try:
-            assert get_effective_mode() == "read_only"
+            # Process-global mode remains unaffected by tunnel startup
+            assert get_effective_mode() == initial_mode
+            # Middleware was registered with request-scoped permission_mode="read_only"
+            mock_app.add_middleware.assert_called_once_with(
+                TunnelAuthMiddleware,
+                auth_provider=mgr.auth_provider,
+                permission_mode="read_only",
+            )
         finally:
             mgr.stop()
 
-    # After stop(), override is restored to None
-    assert get_effective_mode() != "read_only" or get_effective_mode() == "read_only"
-    # Specifically ensure override is cleared
-    from mcp_win_stdio.core.config import _RUNTIME_MODE_OVERRIDE
-    assert _RUNTIME_MODE_OVERRIDE is None
+    assert get_effective_mode() == initial_mode
 
 
 # ---------------------------------------------------------------------------

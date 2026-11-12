@@ -4,6 +4,7 @@ Core configuration, hierarchical configuration, and single-source path managemen
 
 import json
 import os
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -174,17 +175,30 @@ def load_hierarchical_config(workspace_dir: Optional[Path] = None) -> Dict[str, 
     return merged
 
 
+# Request-scoped permission mode isolation (Starlette / AnyIO task-isolated)
+CURRENT_PERMISSION_MODE: ContextVar[Optional[str]] = ContextVar("current_permission_mode", default=None)
+
+# Process-wide runtime override fallback (retained for explicit testing or single-process overrides)
 _RUNTIME_MODE_OVERRIDE: Optional[str] = None
 
 
 def set_runtime_mode_override(mode: Optional[str]) -> None:
-    """Set process-wide runtime override for access mode (e.g. forced 'read_only' during public tunnel)."""
+    """Set process-wide fallback runtime override for access mode."""
     global _RUNTIME_MODE_OVERRIDE
     _RUNTIME_MODE_OVERRIDE = mode.lower().strip() if mode else None
 
 
 def get_effective_mode(workspace_dir: Optional[Path] = None) -> str:
-    """Return effective access mode ('read_write' or 'read_only') from hierarchical config or runtime override."""
+    """
+    Return effective access mode ('read_write' or 'read_only').
+    Checks:
+    1. CURRENT_PERMISSION_MODE (request-scoped ContextVar set by transport middleware).
+    2. _RUNTIME_MODE_OVERRIDE (explicit process-level fallback).
+    3. Hierarchical config from config.json.
+    """
+    ctx_mode = CURRENT_PERMISSION_MODE.get()
+    if ctx_mode:
+        return ctx_mode.lower().strip()
     if _RUNTIME_MODE_OVERRIDE:
         return _RUNTIME_MODE_OVERRIDE
     cfg = load_hierarchical_config(workspace_dir)
