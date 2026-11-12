@@ -688,12 +688,23 @@ def run_workflow(
         parameters: Optional dictionary of parameter values to pass into the workflow.
         dry_run: If True, resolves variables and returns the projected execution plan without invoking tools.
     """
-    return core_run_workflow(
+    wf_res = core_run_workflow(
         name_or_def=name,
         parameters=parameters,
-        call_tool_fn=lambda s, t, a: call_tool(name=t, arguments=a, server=s),
         dry_run=dry_run,
     )
+
+    # Check for artifact spilling only at the final LLM-facing response boundary
+    try:
+        from mcp_win_stdio.core.artifacts import maybe_spill_to_artifact
+
+        spilled, final_payload = maybe_spill_to_artifact(wf_res)
+        if spilled:
+            return final_payload
+    except Exception:
+        pass
+
+    return wf_res
 
 
 @mcp.tool()

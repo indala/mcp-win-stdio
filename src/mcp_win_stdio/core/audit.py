@@ -28,16 +28,34 @@ def redact_secrets(val: Any) -> Any:
     """Recursively mask sensitive values, passwords, and tokens in arguments and logs."""
     if isinstance(val, str):
         masked = val
-        # Redact connection URI passwords: user:pass@ -> user:******@
+        # 1. Redact connection URI passwords: user:pass@ -> user:******@
         masked = re.sub(
             r"((?:postgres(?:ql)?|mysql|mongodb|redis)://[^:]+:)([^@]+)(@)",
             r"\1******\3",
             masked,
             flags=re.IGNORECASE,
         )
-        # Redact Bearer tokens
+        # 2. Redact Bearer tokens
         masked = re.sub(
             r"(Bearer\s+)[A-Za-z0-9_\-\.]{8,}",
+            r"\1******",
+            masked,
+            flags=re.IGNORECASE,
+        )
+        # 3. Redact inline command flags: --password=xyz, -pSECRET, PASSWORD=xyz
+        masked = re.sub(
+            r"(--(?:password|passwd|token|api-key|secret)[=\s]+)([^\s,;]+)",
+            r"\1******",
+            masked,
+            flags=re.IGNORECASE,
+        )
+        masked = re.sub(
+            r"(?<![a-zA-Z0-9_-])(-p)([^\s,;]+)",
+            r"\1******",
+            masked,
+        )
+        masked = re.sub(
+            r"((?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|AUTH_TOKEN)=)([^\s,;]+)",
             r"\1******",
             masked,
             flags=re.IGNORECASE,
@@ -111,6 +129,14 @@ def log_audit_event(
 
     with _AUDIT_LOCK:
         try:
+            # Check rotation if file exceeds 10 MB
+            if AUDIT_LOG_FILE.exists() and AUDIT_LOG_FILE.stat().st_size > 10 * 1024 * 1024:
+                rotated = LOGS_DIR / f"audit_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"
+                try:
+                    AUDIT_LOG_FILE.rename(rotated)
+                except Exception:
+                    pass
+
             # Open-append-close per call for cross-process safety on Windows
             with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(line)

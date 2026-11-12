@@ -225,8 +225,15 @@ def read_artifact_payload(
     if not target_file.is_relative_to(artifacts_dir) or not target_file.exists():
         return {
             "isError": True,
-            "error": f"Artifact handle '{clean_handle}' not found or expired.",
+            "error": f"Artifact handle '{clean_handle}' expired, not found, or invalid. Please rerun the originating query to regenerate.",
         }
+
+    # Update access time so recently read artifacts are not prematurely pruned
+    try:
+        now = time.time()
+        os.utime(target_file, (now, now))
+    except Exception:
+        pass
 
     try:
         with open(target_file, "r", encoding="utf-8") as f:
@@ -236,6 +243,9 @@ def read_artifact_payload(
             "isError": True,
             "error": f"Failed reading artifact file: {e}",
         }
+
+    # Bound limit to 100 to prevent infinite recursive spilling
+    safe_limit = max(1, min(limit, 100))
 
     # Slice and paginate if list or dict with list
     rows_container = None
@@ -261,7 +271,7 @@ def read_artifact_payload(
 
         matched_total = len(filtered)
         start = max(0, offset)
-        end = start + max(1, limit)
+        end = start + safe_limit
         paged_slice = filtered[start:end]
 
         return {
@@ -269,7 +279,7 @@ def read_artifact_payload(
             "total_items": total,
             "matched_items": matched_total,
             "offset": start,
-            "limit": limit,
+            "limit": safe_limit,
             "returned_items": len(paged_slice),
             "has_more": end < matched_total,
             "items": paged_slice,

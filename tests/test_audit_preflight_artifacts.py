@@ -152,3 +152,65 @@ def test_artifact_spilling_and_pagination():
     # 6. Path traversal rejection
     malicious = read_artifact_payload(handle="../../secret")
     assert malicious.get("isError") is True
+    assert "Invalid artifact handle" in malicious["error"]
+
+
+def test_command_line_secret_redaction():
+    """Verify inline command secrets like --password=123, -pSECRET, and PASSWORD=xyz are masked."""
+    cmd1 = "mysql -u root -pMySecretPass123 -h localhost mydb"
+    cmd2 = "pg_dump --password=supersecret -U postgres -d testdb"
+    cmd3 = "export API_KEY=sk-abcdef123456789 && ./deploy.sh"
+
+    masked1 = redact_secrets(cmd1)
+    masked2 = redact_secrets(cmd2)
+    masked3 = redact_secrets(cmd3)
+
+    assert "MySecretPass123" not in masked1
+    assert "-p******" in masked1
+
+    assert "supersecret" not in masked2
+    assert "--password=******" in masked2
+
+    assert "sk-abcdef123456789" not in masked3
+    assert "API_KEY=******" in masked3
+
+
+def test_workflow_large_step_output_passed_in_memory_without_spill():
+    """Verify workflow steps exchange raw in-memory data even when exceeding 32 KB."""
+    from mcp_win_stdio.core.workflows import run_workflow
+
+    large_list = [{"id": i, "content": f"blob_{i}" * 50} for i in range(500)]
+    consumed_list = []
+
+    def mock_caller(server, tool, args):
+        if tool == "large_producer":
+            return {"status": "success", "rows": large_list}
+        elif tool == "consumer":
+            consumed_list.extend(args.get("data", []))
+            return {"status": "success", "consumed_count": len(args.get("data", []))}
+        return {}
+
+    wf = {
+        "name": "large_chain",
+        "steps": [
+            {
+                "id": "step1",
+                "server": "db",
+                "tool": "large_producer",
+                "arguments": {},
+            },
+            {
+                "id": "step2",
+                "server": "db",
+                "tool": "consumer",
+                "arguments": {"data": "{{ steps.step1.rows }}"},
+            },
+        ],
+    }
+
+    res = run_workflow(wf, call_tool_fn=mock_caller)
+    assert res["status"] == "success"
+    # Verify Step 2 received the real list of 500 items, not an artifact handle stub!
+    assert len(consumed_list) == 500
+    assert consumed_list[499]["id"] == 499
+
