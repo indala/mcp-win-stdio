@@ -30,6 +30,8 @@ from mcp_win_stdio.core.config import (
 from mcp_win_stdio.core.permissions import (
     CURRENT_ALLOW_SENSITIVE_READS,
     CURRENT_AUTH_MODE,
+    CURRENT_SCOPE_FILTER,
+    ToolScopeFilter,
 )
 from mcp_win_stdio.core.tunnel_auth import (
     AuthProvider,
@@ -50,9 +52,17 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
     Establishes request-scoped permission context (CURRENT_PERMISSION_MODE) for the lifetime of the request.
     """
 
-    def __init__(self, app: Any, auth_provider: AuthProvider, permission_mode: str = "read_only"):
+    def __init__(
+        self,
+        app: Any,
+        auth_provider: AuthProvider,
+        permission_mode: str = "read_only",
+        scope_filter: Optional[ToolScopeFilter] = None,
+    ):
         super().__init__(app)
         self.auth_provider = auth_provider
+        # Ensure middleware always has an initialized ToolScopeFilter (defaulting to clean pass-through if omitted)
+        self.scope_filter = scope_filter if scope_filter is not None else ToolScopeFilter()
         if auth_provider.requires_read_only:
             self.permission_mode = "read_only"
         else:
@@ -86,9 +96,31 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
         auth_token = CURRENT_AUTH_MODE.set(self.auth_provider.auth_mode)
         allow_sens = getattr(self.auth_provider, "allow_sensitive_reads", False)
         sens_token = CURRENT_ALLOW_SENSITIVE_READS.set(allow_sens)
+
+        # Clone request-scoped filter instance and bound its lifecycle strictly to this request
+        request_scope = self.scope_filter.clone()
+        scope_token = CURRENT_SCOPE_FILTER.set(request_scope)
         try:
-            return await call_next(request)
+            response = await call_next(request)
+            # Attach cleanup to response.background so SSE streaming bodies complete BEFORE revocation
+            from starlette.background import BackgroundTask
+            from starlette.responses import Response
+
+            if isinstance(response, Response):
+                orig_bg = getattr(response, "background", None)
+
+                def _on_request_cleanup():
+                    request_scope.revoke()
+                    if orig_bg:
+                        orig_bg()
+
+                response.background = BackgroundTask(_on_request_cleanup)
+            else:
+                # If non-Response object (e.g. mock test handler), revoke immediately
+                request_scope.revoke()
+            return response
         finally:
+            CURRENT_SCOPE_FILTER.reset(scope_token)
             CURRENT_ALLOW_SENSITIVE_READS.reset(sens_token)
             CURRENT_AUTH_MODE.reset(auth_token)
             CURRENT_PERMISSION_MODE.reset(perm_token)
@@ -117,6 +149,7 @@ class MwsTunnelManager:
         host: str = "127.0.0.1",
         workspace_dir: Optional[Path] = None,
         allow_sensitive_reads: bool = False,
+        scope_filter: Optional[ToolScopeFilter] = None,
     ):
         self.port = port
         self.mode = mode.lower().strip()
@@ -124,6 +157,8 @@ class MwsTunnelManager:
         self.host = host
         self.workspace_dir = workspace_dir
         self.allow_sensitive_reads = bool(allow_sensitive_reads)
+        # Ensure tunnel bridge always holds an explicit ToolScopeFilter instance (never uninitialized None)
+        self.scope_filter = scope_filter if scope_filter is not None else ToolScopeFilter()
 
         # Initialize modular AuthProvider
         self.auth_provider = create_auth_provider(
@@ -212,6 +247,7 @@ class MwsTunnelManager:
             TunnelAuthMiddleware,
             auth_provider=self.auth_provider,
             permission_mode=self.mode,
+            scope_filter=self.scope_filter,
         )
 
         config = uvicorn.Config(

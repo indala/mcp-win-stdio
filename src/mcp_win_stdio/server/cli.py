@@ -12,7 +12,25 @@ from mcp_win_stdio.server.server import mcp
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    """Run mws as an MCP Server over stdio."""
+    """Run mws as an MCP Server over stdio with optional tool scoping."""
+    from mcp_win_stdio.core.permissions import CURRENT_SCOPE_FILTER, ToolScopeFilter
+
+    scope_filter = None
+    try:
+        scope_filter = ToolScopeFilter.from_cli_strings(
+            allow_servers_str=getattr(args, "allow_servers", None),
+            disallow_servers_str=getattr(args, "disallow_servers", None),
+            allow_tools_str=getattr(args, "allow_tools", None),
+            disallow_tools_str=getattr(args, "disallow_tools", None),
+            validate=True,
+        )
+    except ValueError as scope_err:
+        print(f"❌ Scope Configuration Error: {scope_err}", file=sys.stderr)
+        sys.exit(1)
+
+    if scope_filter:
+        CURRENT_SCOPE_FILTER.set(scope_filter)
+
     mcp.run()
 
 
@@ -87,6 +105,10 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
 
     run_parser = subparsers.add_parser("run", help="Run MCP server over stdio")
+    run_parser.add_argument("--allow-servers", default=None, help="Comma-separated whitelist of allowed server domains (e.g. 'excel,rag')")
+    run_parser.add_argument("--disallow-servers", default=None, help="Comma-separated blacklist of disallowed server domains (e.g. 'ssh,db')")
+    run_parser.add_argument("--allow-tools", default=None, help="Comma-separated whitelist of allowed tool names")
+    run_parser.add_argument("--disallow-tools", default=None, help="Comma-separated blacklist of disallowed tool names")
     run_parser.set_defaults(func=cmd_run)
 
     list_parser = subparsers.add_parser("list", help="List all discovered servers and tool counts")

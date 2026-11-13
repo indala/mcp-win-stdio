@@ -361,10 +361,20 @@ def get_server_catalog(
     active_sessions = {s["server"]: s for s in GLOBAL_POOL.get_active_sessions()}
     catalog: Dict[str, Any] = {}
 
+    from mcp_win_stdio.core.permissions import CURRENT_SCOPE_FILTER
+
+    scope_filter = CURRENT_SCOPE_FILTER.get()
+
     for name, srv_meta in sorted(available.items()):
+        if scope_filter and not scope_filter.is_server_allowed(name):
+            continue
         is_active = name in active_sessions
         is_installed = srv_meta.get("is_installed", True)
         tools = get_server_tools(name, force_refresh=refresh)
+
+        # Filter tools if specific tool scope is active
+        if scope_filter:
+            tools = [t for t in tools if scope_filter.is_tool_allowed(name, t.get("name", ""))]
 
         status = "active" if is_active else ("inactive" if is_installed else "not_installed")
 
@@ -413,6 +423,12 @@ def search_tools(
     available = discover_available_servers()
     targets = [server.lower()] if server and server.lower() in available else list(available.keys())
 
+    from mcp_win_stdio.core.permissions import CURRENT_SCOPE_FILTER
+
+    scope_filter = CURRENT_SCOPE_FILTER.get()
+    if scope_filter:
+        targets = [srv for srv in targets if scope_filter.is_server_allowed(srv)]
+
     is_wildcard = not query or not query.strip() or query.strip() == "*"
     query_tokens = [] if is_wildcard else [tok.lower() for tok in re.findall(r"\w+", query) if len(tok) > 1]
     results: List[Dict[str, Any]] = []
@@ -421,6 +437,8 @@ def search_tools(
         tools = get_server_tools(srv)
         for t in tools:
             name = t.get("name", "")
+            if scope_filter and not scope_filter.is_tool_allowed(srv, name):
+                continue
             desc = t.get("description", "")
             params = t.get("parameters", {})
             param_names = list(params.get("properties", {}).keys()) if isinstance(params, dict) else []

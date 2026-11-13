@@ -122,6 +122,17 @@ def call_server(
             "server": clean,
         }
 
+    # Check granular scope filter for call_server target
+    from mcp_win_stdio.core.permissions import CURRENT_SCOPE_FILTER
+
+    scope_filter = CURRENT_SCOPE_FILTER.get()
+    if scope_filter and not scope_filter.is_server_allowed(clean):
+        return {
+            "isError": True,
+            "error": f"Scope Denied: Server '{clean}' is not permitted by active scope.",
+            "server": clean,
+        }
+
     # If child tool invocation is requested via call_server, enforce child permissions
     if tool:
         clean_tool = tool.strip()
@@ -682,7 +693,21 @@ def call_tool(
 
     norm_args = normalize_arguments(target_server, target_tool, resolved_args)
 
-    # Permission enforcement guard
+    # 1. Granular Scope Enforcement Guard (Server Domain & Tool Whitelist/Blacklist)
+    from mcp_win_stdio.core.permissions import CURRENT_SCOPE_FILTER
+
+    scope_filter = CURRENT_SCOPE_FILTER.get()
+    if scope_filter:
+        scope_ok, scope_err = scope_filter.check_scope(target_server, target_tool)
+        if not scope_ok:
+            return {
+                "isError": True,
+                "error": scope_err,
+                "server": target_server,
+                "tool": target_tool,
+            }
+
+    # 2. Permission Ceiling Mode Guard (read_only vs read_write, unauthenticated checks)
     from mcp_win_stdio.core.config import get_effective_mode
     from mcp_win_stdio.core.permissions import check_tool_permission
 

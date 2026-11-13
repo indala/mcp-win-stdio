@@ -240,11 +240,12 @@ def test_tunnel_manager_request_scoped_middleware_configuration():
         try:
             # Process-global mode remains unaffected by tunnel startup
             assert get_effective_mode() == initial_mode
-            # Middleware was registered with request-scoped permission_mode="read_only"
+            # Middleware was registered with request-scoped permission_mode="read_only" and explicit scope filter
             mock_app.add_middleware.assert_called_once_with(
                 TunnelAuthMiddleware,
                 auth_provider=mgr.auth_provider,
                 permission_mode="read_only",
+                scope_filter=mgr.scope_filter,
             )
         finally:
             mgr.stop()

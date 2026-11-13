@@ -205,10 +205,15 @@ def generate_snippet(
     client_id: Optional[str] = None,
     use_python_exe: bool = False,
     env_vars: Optional[Dict[str, str]] = None,
+    allow_servers: Optional[str] = None,
+    disallow_servers: Optional[str] = None,
+    allow_tools: Optional[str] = None,
+    disallow_tools: Optional[str] = None,
 ) -> str:
     """
     Generate ready-to-copy configuration snippet for a server and optional client.
     Handles 'server' (gateway) or standalone servers ('tsc', 'excel', etc.).
+    Supports embedding granular tool scope flags into the gateway args array.
     """
     s_norm = server_name.lower().strip()
     is_gateway = s_norm in ("server", "gateway", "mws")
@@ -232,6 +237,17 @@ def generate_snippet(
             args = ["server"]
         else:
             args = ["run", s_norm]
+
+    # Append scoping arguments if configured for gateway server
+    if is_gateway:
+        if allow_servers:
+            args.extend(["--allow-servers", allow_servers])
+        if disallow_servers:
+            args.extend(["--disallow-servers", disallow_servers])
+        if allow_tools:
+            args.extend(["--allow-tools", allow_tools])
+        if disallow_tools:
+            args.extend(["--disallow-tools", disallow_tools])
 
     # Server-specific env defaults if needed
     env: Dict[str, str] = {}

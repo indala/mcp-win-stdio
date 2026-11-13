@@ -3,14 +3,18 @@ Permission enforcement module for mws gateway and remote tunnels.
 Enforces strict fail-closed read_only vs read_write boundaries across all MCP servers and tools.
 """
 
+import difflib
 from contextvars import ContextVar
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 # Request-scoped ContextVar for active auth_mode (e.g. 'bearer', 'none', 'oauth')
 CURRENT_AUTH_MODE: ContextVar[str] = ContextVar("current_auth_mode", default="bearer")
 
 # Request-scoped ContextVar for allowing sensitive reads in unauthenticated mode
 CURRENT_ALLOW_SENSITIVE_READS: ContextVar[bool] = ContextVar("current_allow_sensitive_reads", default=False)
+
+# Request-scoped ContextVar for active ToolScopeFilter (granular server/tool whitelisting)
+CURRENT_SCOPE_FILTER: ContextVar[Optional["ToolScopeFilter"]] = ContextVar("current_scope_filter", default=None)
 
 # Strict server-qualified allowlist of audited safe read-only tools (129 tools).
 # Any tool NOT explicitly in this set is treated as mutating and BLOCKED in read_only mode (fail-closed).
@@ -458,3 +462,256 @@ def check_tool_permission(
             )
 
     return True, None
+
+
+class ToolScopeFilter:
+    """
+    Granular tool and server domain scoping engine.
+    Controls tool visibility and execution via allow/disallow lists for servers and specific tools.
+
+    Evaluation precedence (fail-closed, disallow overrides allow):
+    1. Server Domain Scope:
+       - If server is in disallow_servers -> BLOCKED
+       - If allow_servers is specified and server not in allow_servers -> BLOCKED
+    2. Tool Name Scope:
+       - If tool is in disallow_tools -> BLOCKED
+       - If allow_tools is specified and tool not in allow_tools -> BLOCKED
+    3. Meta-gateway tools ('gateway' namespace) are ALWAYS permitted for discovery and routing,
+       ensuring on-demand catalog searches and execution dispatch function properly for allowed tools.
+    """
+
+    KNOWN_SERVERS: Set[str] = {
+        "arch",
+        "db",
+        "excel",
+        "excel_db",
+        "explorer",
+        "git",
+        "rag",
+        "ssh",
+        "tsc",
+        "word",
+    }
+
+    def __init__(
+        self,
+        allow_servers: Optional[Set[str]] = None,
+        disallow_servers: Optional[Set[str]] = None,
+        allow_tools: Optional[Set[str]] = None,
+        disallow_tools: Optional[Set[str]] = None,
+    ) -> None:
+        self.allow_servers: Optional[Set[str]] = (
+            {normalize_server_name(s) for s in allow_servers} if allow_servers is not None else None
+        )
+        self.disallow_servers: Set[str] = (
+            {normalize_server_name(s) for s in disallow_servers} if disallow_servers is not None else set()
+        )
+        self.allow_tools: Optional[Set[str]] = (
+            {t.lower().strip() for t in allow_tools} if allow_tools is not None else None
+        )
+        self.disallow_tools: Set[str] = (
+            {t.lower().strip() for t in disallow_tools} if disallow_tools is not None else set()
+        )
+        self._is_active: bool = True
+
+    def revoke(self) -> None:
+        """Explicitly revoke/expire this scope filter upon request termination."""
+        self._is_active = False
+
+    def clone(self) -> "ToolScopeFilter":
+        """Create a new active instance sharing the same scoping rules."""
+        cloned = ToolScopeFilter(
+            allow_servers=self.allow_servers,
+            disallow_servers=self.disallow_servers,
+            allow_tools=self.allow_tools,
+            disallow_tools=self.disallow_tools,
+        )
+        return cloned
+
+    def is_unrestricted(self) -> bool:
+        """Returns True if this filter enforces no restrictions (all servers & tools allowed)."""
+        return (
+            self._is_active
+            and self.allow_servers is None
+            and not self.disallow_servers
+            and self.allow_tools is None
+            and not self.disallow_tools
+        )
+
+    def is_server_allowed(self, server: str) -> bool:
+        """Check if server domain is permitted under current scope."""
+        if not self._is_active:
+            return False
+        srv = normalize_server_name(server)
+        if srv == "gateway":
+            return True
+        if srv in self.disallow_servers:
+            return False
+        if self.allow_servers is not None and srv not in self.allow_servers:
+            return False
+        return True
+
+    def is_tool_allowed(self, server: str, tool_name: str) -> bool:
+        """Check if specific tool on target server is permitted under current scope."""
+        if not self._is_active:
+            return False
+        srv = normalize_server_name(server)
+        tool = (tool_name or "").lower().strip()
+        qualified_tool = f"{srv}.{tool}"
+
+        # Meta-gateway tools are always permitted so discovery and routing work
+        if srv == "gateway":
+            return True
+
+        # 1. Check server domain scope
+        if not self.is_server_allowed(srv):
+            return False
+
+        # 2. Check explicit tool blacklist (disallow overrides allow)
+        # Matches either bare tool name ('export_to_pdf') or server-qualified ('excel.export_to_pdf')
+        if tool in self.disallow_tools or qualified_tool in self.disallow_tools:
+            return False
+
+        # 3. Check explicit tool whitelist
+        # If whitelist is configured, permits if either bare tool name or qualified name is present
+        if self.allow_tools is not None and tool not in self.allow_tools and qualified_tool not in self.allow_tools:
+            return False
+
+        return True
+
+    def check_scope(self, server: str, tool_name: str) -> Tuple[bool, Optional[str]]:
+        """
+        Validate whether (server, tool_name) is permitted by scope.
+        Returns (is_permitted, denial_reason).
+        """
+        if not self._is_active:
+            return (
+                False,
+                f"Scope Expired: The request authorization scope for tool '{tool_name}' on server '{server}' has terminated.",
+            )
+
+        srv = normalize_server_name(server)
+        tool = (tool_name or "").lower().strip()
+        qualified_tool = f"{srv}.{tool}"
+
+        if srv == "gateway":
+            return True, None
+
+        if srv in self.disallow_servers:
+            return (
+                False,
+                f"Scope Denied: Server '{server}' is explicitly blacklisted by active scope (--disallow-servers).",
+            )
+
+        if self.allow_servers is not None and srv not in self.allow_servers:
+            return (
+                False,
+                f"Scope Denied: Server '{server}' is not in active allowed servers scope (--allow-servers {', '.join(sorted(self.allow_servers))}).",
+            )
+
+        if tool in self.disallow_tools or qualified_tool in self.disallow_tools:
+            return (
+                False,
+                f"Scope Denied: Tool '{tool}' on server '{server}' is explicitly blacklisted by active scope (--disallow-tools).",
+            )
+
+        if self.allow_tools is not None and tool not in self.allow_tools and qualified_tool not in self.allow_tools:
+            return (
+                False,
+                f"Scope Denied: Tool '{tool}' on server '{server}' is not in active allowed tools scope (--allow-tools).",
+            )
+
+        return True, None
+
+    @classmethod
+    def from_cli_strings(
+        cls,
+        allow_servers_str: Optional[str] = None,
+        disallow_servers_str: Optional[str] = None,
+        allow_tools_str: Optional[str] = None,
+        disallow_tools_str: Optional[str] = None,
+        validate: bool = True,
+    ) -> "ToolScopeFilter":
+        """
+        Parse comma-separated CLI argument strings into a validated ToolScopeFilter instance.
+        Fails fast if unknown servers or tool names are specified, providing typo suggestions.
+        """
+
+        def _split_clean(val: Optional[str]) -> Optional[Set[str]]:
+            if val is None or not str(val).strip():
+                return None
+            items = {item.strip() for item in str(val).split(",") if item.strip()}
+            return items if items else None
+
+        allow_srv = _split_clean(allow_servers_str)
+        disallow_srv = _split_clean(disallow_servers_str)
+        allow_t = _split_clean(allow_tools_str)
+        disallow_t = _split_clean(disallow_tools_str)
+
+        if validate:
+            cls.validate_scope_inputs(
+                allow_servers=allow_srv,
+                disallow_servers=disallow_srv,
+                allow_tools=allow_t,
+                disallow_tools=disallow_t,
+            )
+
+        return cls(
+            allow_servers=allow_srv,
+            disallow_servers=disallow_srv,
+            allow_tools=allow_t,
+            disallow_tools=disallow_t,
+        )
+
+    @classmethod
+    def validate_scope_inputs(
+        cls,
+        allow_servers: Optional[Set[str]] = None,
+        disallow_servers: Optional[Set[str]] = None,
+        allow_tools: Optional[Set[str]] = None,
+        disallow_tools: Optional[Set[str]] = None,
+    ) -> None:
+        """
+        Validate server and tool names against registered catalog.
+        Raises ValueError with difflib typo suggestions on invalid names.
+        """
+        valid_srvs = {s.replace("_", "-") for s in cls.KNOWN_SERVERS} | cls.KNOWN_SERVERS
+
+        for srv_set, flag_name in ((allow_servers, "--allow-servers"), (disallow_servers, "--disallow-servers")):
+            if not srv_set:
+                continue
+            for s in srv_set:
+                norm_s = normalize_server_name(s)
+                if norm_s not in cls.KNOWN_SERVERS:
+                    matches = difflib.get_close_matches(s, list(valid_srvs), n=2, cutoff=0.6)
+                    hint = f" Did you mean '{matches[0]}'?" if matches else ""
+                    raise ValueError(f"Invalid server '{s}' specified in {flag_name}.{hint} Available servers: {', '.join(sorted(valid_srvs))}")
+
+        # Validate tools (accepts both bare tool names and server-qualified 'server.tool')
+        valid_tool_names = {t for _, t in ALL_KNOWN_TOOLS}
+        valid_qualified_tools = {f"{srv}.{t}" for srv, t in ALL_KNOWN_TOOLS} | {
+            f"{srv.replace('_', '-')}.{t}" for srv, t in ALL_KNOWN_TOOLS
+        }
+        all_acceptable_tools = valid_tool_names | valid_qualified_tools
+
+        # Ambiguous multi-server collision map
+        ambiguous_tools = {tool: srvs for tool, srvs in TOOL_TO_SERVERS_MAP.items() if len(srvs) > 1}
+
+        for tool_set, flag_name in ((allow_tools, "--allow-tools"), (disallow_tools, "--disallow-tools")):
+            if not tool_set:
+                continue
+            for t in tool_set:
+                norm_t = t.lower().strip()
+                if norm_t not in all_acceptable_tools:
+                    matches = difflib.get_close_matches(norm_t, list(all_acceptable_tools), n=2, cutoff=0.6)
+                    hint = f" Did you mean '{matches[0]}'?" if matches else ""
+                    raise ValueError(f"Invalid tool '{t}' specified in {flag_name}.{hint}")
+                # Reject bare names that collide across multiple servers
+                if norm_t in ambiguous_tools and "." not in norm_t:
+                    candidate_servers = sorted(ambiguous_tools[norm_t])
+                    suggestions = [f"{srv}.{norm_t}" for srv in candidate_servers]
+                    raise ValueError(
+                        f"Ambiguous tool name '{t}' specified in {flag_name}. Tool '{t}' exists on multiple servers: "
+                        f"{', '.join(candidate_servers)}. You must specify the server explicitly using dot notation "
+                        f"(e.g. {suggestions[0]} or {suggestions[1]})."
+                    )

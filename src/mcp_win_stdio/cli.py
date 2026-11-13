@@ -837,9 +837,9 @@ def cmd_server(args: argparse.Namespace) -> None:
 
         cmd_stop(args)
     else:
-        from mcp_win_stdio.server.server import mcp
+        from mcp_win_stdio.server.cli import cmd_run
 
-        mcp.run()
+        cmd_run(args)
 
 
 def cmd_config(args: argparse.Namespace) -> None:
@@ -2670,6 +2670,21 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     auto_yes = bool(getattr(args, "yes", False))
     allow_sensitive_reads = bool(getattr(args, "allow_sensitive_reads", False))
 
+    # Parse and validate granular tool scoping (fail-fast with typo suggestions)
+    from mcp_win_stdio.core.permissions import ToolScopeFilter
+
+    try:
+        scope_filter = ToolScopeFilter.from_cli_strings(
+            allow_servers_str=getattr(args, "allow_servers", None) or tunnel_cfg.get("allow_servers"),
+            disallow_servers_str=getattr(args, "disallow_servers", None) or tunnel_cfg.get("disallow_servers"),
+            allow_tools_str=getattr(args, "allow_tools", None) or tunnel_cfg.get("allow_tools"),
+            disallow_tools_str=getattr(args, "disallow_tools", None) or tunnel_cfg.get("disallow_tools"),
+            validate=True,
+        )
+    except ValueError as scope_err:
+        print(f"❌ Scope Configuration Error: {scope_err}", file=sys.stderr)
+        sys.exit(1)
+
     if auth_mode == "none":
         mode = "read_only"
         print("\n" + "=" * 64)
@@ -2708,6 +2723,11 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 print(" • Auth Method:      OAuth 2.0 PKCE (Dynamic Registration & Terminal PIN Verification)")
             else:
                 print(f" • Auth Token:       {'Static / User-configured' if token else 'Ephemeral Cryptographic Token (Auto-generated)'}")
+            if scope_filter:
+                srv_filter_desc = f"Allowed: {', '.join(sorted(scope_filter.allow_servers))}" if scope_filter.allow_servers else "All servers"
+                if scope_filter.disallow_servers:
+                    srv_filter_desc += f" (Excluding: {', '.join(sorted(scope_filter.disallow_servers))})"
+                print(f" • Tool Scope:       {srv_filter_desc}")
             print("------------------------------------------------------------")
             print(" [1] 🚀 Start Tunnel with these settings")
             print(f" [2] 🛡️  Toggle Security Mode (currently: {mode})")
@@ -2775,6 +2795,7 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
         auth_mode=auth_mode,
         host="127.0.0.1",
         allow_sensitive_reads=allow_sensitive_reads,
+        scope_filter=scope_filter,
     )
 
     try:
@@ -2846,6 +2867,10 @@ def main() -> None:
     sub_server.add_argument("target_server", nargs="?", default=None, help="Target server name for stop")
     sub_server.add_argument("-v", "--verbose", action="store_true", help="Verbose output for list")
     sub_server.add_argument("-r", "--refresh", action="store_true", help="Force probe refresh for list")
+    sub_server.add_argument("--allow-servers", default=None, help="Comma-separated whitelist of allowed server domains (e.g. 'excel,rag')")
+    sub_server.add_argument("--disallow-servers", default=None, help="Comma-separated blacklist of disallowed server domains (e.g. 'ssh,db')")
+    sub_server.add_argument("--allow-tools", default=None, help="Comma-separated whitelist of allowed tool names")
+    sub_server.add_argument("--disallow-tools", default=None, help="Comma-separated blacklist of disallowed tool names")
     sub_server.set_defaults(func=cmd_server)
 
     # 2. guide: universal setup instructions, copy-paste config snippets, and tool specs for all agents
@@ -3124,6 +3149,26 @@ def main() -> None:
         action="store_true",
         default=False,
         help="In unauthenticated mode (--auth none), allow sensitive reads (explorer file reads, db queries, ssh). Default: False",
+    )
+    sub_tunnel.add_argument(
+        "--allow-servers",
+        default=None,
+        help="Comma-separated whitelist of allowed server domains (e.g. 'excel,rag,git')",
+    )
+    sub_tunnel.add_argument(
+        "--disallow-servers",
+        default=None,
+        help="Comma-separated blacklist of disallowed server domains (e.g. 'ssh,db')",
+    )
+    sub_tunnel.add_argument(
+        "--allow-tools",
+        default=None,
+        help="Comma-separated whitelist of allowed tool names (e.g. 'read_query,preview_sheet')",
+    )
+    sub_tunnel.add_argument(
+        "--disallow-tools",
+        default=None,
+        help="Comma-separated blacklist of disallowed tool names (e.g. 'excel_to_db_upsert,git_reset')",
     )
     sub_tunnel.set_defaults(func=cmd_tunnel)
 
