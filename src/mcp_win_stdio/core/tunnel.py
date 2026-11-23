@@ -45,19 +45,6 @@ from mcp_win_stdio.server.server import mcp
 logger = logging.getLogger("mcp_win_stdio.tunnel")
 
 
-def get_local_lan_ip() -> str:
-    """Detect primary local LAN / Ethernet IPv4 address."""
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("10.255.255.255", 1))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
 class TunnelAuthMiddleware(BaseHTTPMiddleware):
     """
     Generic authentication and permission isolation middleware delegating verification to an AuthProvider.
@@ -369,12 +356,6 @@ class MwsTunnelManager:
         if hasattr(self.auth_provider, "set_public_url"):
             self.auth_provider.set_public_url(discovered_url)
         return discovered_url
-
-    def set_direct_url(self, direct_url: str) -> None:
-        """Set direct HTTP URL for direct Ethernet/LAN/IP execution without Cloudflare tunnel."""
-        self._public_url = (direct_url or "").rstrip("/")
-        if hasattr(self.auth_provider, "set_public_url"):
-            self.auth_provider.set_public_url(self._public_url)
 
     def get_client_config(self) -> Dict[str, Any]:
         """Generate ready-to-paste client JSON configurations for ChatGPT, Gemini, Claude, Cursor."""

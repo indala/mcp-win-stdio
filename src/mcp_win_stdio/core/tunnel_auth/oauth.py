@@ -50,13 +50,6 @@ def is_valid_redirect_uri(uri: str) -> bool:
             hostname = (parsed.hostname or "").lower()
             if hostname in ("127.0.0.1", "localhost", "::1", "[::1]"):
                 return True
-            try:
-                import ipaddress
-                ip = ipaddress.ip_address(hostname)
-                if ip.is_loopback or ip.is_private:
-                    return True
-            except ValueError:
-                pass
         return False
     except Exception:
         return False

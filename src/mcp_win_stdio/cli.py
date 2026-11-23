@@ -2622,39 +2622,20 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
         load_hierarchical_config,
         save_config,
     )
-    from mcp_win_stdio.core.tunnel import MwsTunnelManager, get_local_lan_ip
+    from mcp_win_stdio.core.tunnel import MwsTunnelManager
 
-    # 1. Resolve configuration defaults
-    hier_cfg = load_hierarchical_config()
-    tunnel_cfg = get_tunnel_config()
-    workspace_path = hier_cfg.get("_resolved_sources", {}).get("workspace_path")
-    scope_name = "Workspace" if workspace_path else "Global"
-
-    no_tunnel = bool(getattr(args, "no_tunnel", False) or getattr(args, "direct", False) or tunnel_cfg.get("no_tunnel", False))
-    host = getattr(args, "host", None) or ("0.0.0.0" if no_tunnel else (tunnel_cfg.get("host") or "127.0.0.1"))
-    mode = (getattr(args, "mode", None) or tunnel_cfg.get("mode") or "read_only").lower().strip()
-    auth_mode = (getattr(args, "auth", None) or tunnel_cfg.get("auth_mode") or "oauth").lower().strip()
-    port = int(getattr(args, "port", None) or tunnel_cfg.get("port") or 8080)
-    token = getattr(args, "token", None) or tunnel_cfg.get("token")
-    auto_yes = bool(getattr(args, "yes", False))
-    allow_sensitive_reads = bool(getattr(args, "allow_sensitive_reads", False))
-
-    if not no_tunnel and not MwsTunnelManager.is_cloudflared_installed():
+    if not MwsTunnelManager.is_cloudflared_installed():
         print("❌ Error: 'cloudflared' CLI is not installed or not found in system PATH.", file=sys.stderr)
-        print("   Cloudflare Tunnel is required for public trycloudflare.com domains.\n", file=sys.stderr)
+        print("   'mws tunnel' requires Cloudflare Tunnel to expose your local tools to ChatGPT & Gemini.\n", file=sys.stderr)
 
         can_auto_install = bool(shutil.which("winget") if sys.platform == "win32" else shutil.which("brew"))
         if can_auto_install and sys.stdin.isatty():
             mgr_name = "winget" if sys.platform == "win32" else "brew"
             cmd_suggestion = "winget install --id Cloudflare.cloudflared" if sys.platform == "win32" else "brew install cloudflared"
-            print(f"👉 You can install it with: {cmd_suggestion}")
-            print("👉 Or run direct HTTP on your Ethernet/LAN IP without Cloudflare: mws tunnel --direct\n")
+            print(f"👉 You can install it with: {cmd_suggestion}\n")
             try:
-                ans = input(f"Would you like mws to install cloudflared now using {mgr_name}? [Y/n/d (direct)]: ").strip().lower()
-                if ans in ("d", "direct"):
-                    no_tunnel = True
-                    host = "0.0.0.0"
-                elif ans in ("", "y", "yes"):
+                ans = input(f"Would you like mws to install cloudflared now using {mgr_name}? [Y/n]: ").strip().lower()
+                if ans in ("", "y", "yes"):
                     print(f"\nInstalling cloudflared via {mgr_name}...")
                     if MwsTunnelManager.try_install_cloudflared():
                         print("✅ cloudflared installed successfully!\n")
@@ -2672,9 +2653,22 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
             if sys.platform == "win32":
                 print("👉 Install via winget (recommended):", file=sys.stderr)
                 print("   winget install --id Cloudflare.cloudflared\n", file=sys.stderr)
-            print("👉 Or run in Direct IP mode without cloudflared:", file=sys.stderr)
-            print("   mws tunnel --direct\n", file=sys.stderr)
+            print("👉 Or download directly from:", file=sys.stderr)
+            print("   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/", file=sys.stderr)
             sys.exit(1)
+
+    # 1. Resolve configuration defaults
+    hier_cfg = load_hierarchical_config()
+    tunnel_cfg = get_tunnel_config()
+    workspace_path = hier_cfg.get("_resolved_sources", {}).get("workspace_path")
+    scope_name = "Workspace" if workspace_path else "Global"
+
+    mode = (getattr(args, "mode", None) or tunnel_cfg.get("mode") or "read_only").lower().strip()
+    auth_mode = (getattr(args, "auth", None) or tunnel_cfg.get("auth_mode") or "oauth").lower().strip()
+    port = int(getattr(args, "port", None) or tunnel_cfg.get("port") or 8080)
+    token = getattr(args, "token", None) or tunnel_cfg.get("token")
+    auto_yes = bool(getattr(args, "yes", False))
+    allow_sensitive_reads = bool(getattr(args, "allow_sensitive_reads", False))
 
     # Parse and validate granular tool scoping (fail-fast with typo suggestions)
     from mcp_win_stdio.core.permissions import ToolScopeFilter
@@ -2713,20 +2707,16 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     # 2. Interactive Pre-flight Review (if stdin is interactive and --yes was not provided)
     if not auto_yes and sys.stdin.isatty():
         while True:
-            local_lan_ip = get_local_lan_ip()
-            display_endpoint = f"http://{local_lan_ip}:{port}/mcp" if no_tunnel else f"http://127.0.0.1:{port}/mcp"
-
             print("\n============================================================")
             print("         🌐 MWS REMOTE TUNNEL PRE-FLIGHT CONFIGURATION      ")
             print("============================================================")
             print(f" • Scope:            {scope_name} ({workspace_path or '~/.mcp-win-stdio/config.json'})")
-            print(f" • Network Mode:     {'DIRECT IP ONLY (LAN/Ethernet — No Cloudflare)' if no_tunnel else 'CLOUDFLARE QUICK TUNNEL (Public Domain)'}")
             print(f" • Auth Mode:        {auth_mode.upper()} ({'Unauthenticated (ChatGPT compatible)' if auth_mode == 'none' else 'Bearer Token' if auth_mode == 'bearer' else 'OAuth 2.0 (Gemini/ChatGPT)'})")
             if auth_mode == "none":
                 print(" • Security Mode:    READ_ONLY (Forced by unauthenticated mode)")
             else:
                 print(f" • Security Mode:    {mode.upper()} ({'Naked write protection + Safe' if mode == 'read_write' else 'All mutations blocked'})")
-            print(f" • HTTP Endpoint:    {display_endpoint}")
+            print(f" • Local Bridge:     http://127.0.0.1:{port}")
             if auth_mode == "none":
                 print(" • Auth Token:       None (Public / Unauthenticated)")
             elif auth_mode == "oauth":
@@ -2739,18 +2729,17 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                     srv_filter_desc += f" (Excluding: {', '.join(sorted(scope_filter.disallow_servers))})"
                 print(f" • Tool Scope:       {srv_filter_desc}")
             print("------------------------------------------------------------")
-            print(f" [1] 🚀 Start {'Bridge' if no_tunnel else 'Tunnel'} with these settings")
+            print(" [1] 🚀 Start Tunnel with these settings")
             print(f" [2] 🛡️  Toggle Security Mode (currently: {mode})")
             print(f" [3] 🔢 Change Local Bridge Port (currently: {port})")
             print(f" [4] 🔐 Cycle Auth Mode (currently: {auth_mode})")
-            print(f" [5] 🌐 Toggle Network Mode (currently: {'Direct IP (Ethernet/LAN)' if no_tunnel else 'Cloudflare Tunnel'})")
             if auth_mode == "bearer":
-                print(f" [6] 🔑 Set Custom Bearer Token (currently: {'Set' if token else 'Auto-generate'})")
-            print(" [7] 💾 Save current tunnel settings to config")
+                print(f" [5] 🔑 Set Custom Bearer Token (currently: {'Set' if token else 'Auto-generate'})")
+            print(" [6] 💾 Save current tunnel settings to config")
             print(" [Q] ❌ Cancel & Exit")
             print("------------------------------------------------------------")
             try:
-                choice = input("Select an option [1-7, Q]: ").strip().lower()
+                choice = input("Select an option [1-6, Q]: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("\nOperation cancelled.")
                 sys.exit(0)
@@ -2778,14 +2767,10 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                     print("Auth Mode set to: NONE (Security mode locked to 'read_only')")
                 else:
                     print(f"Auth Mode set to: {auth_mode.upper()}")
-            elif choice in ("5", "d", "direct", "tunnel"):
-                no_tunnel = not no_tunnel
-                host = "0.0.0.0" if no_tunnel else "127.0.0.1"
-                print(f"Network Mode set to: {'DIRECT IP ONLY (LAN/Ethernet)' if no_tunnel else 'CLOUDFLARE QUICK TUNNEL'}")
-            elif choice == "6" and auth_mode == "bearer":
+            elif choice == "5" and auth_mode == "bearer":
                 t_in = input("Enter custom bearer token (leave empty for auto-generated): ").strip()
                 token = t_in if t_in else None
-            elif choice in ("6", "7") and (choice == "7" or auth_mode != "bearer"):
+            elif choice == "6":
                 # Bug fix: load only the target scope's existing config (not the merged
                 # hierarchical config) so we don't clobber global settings with workspace
                 # overrides or vice versa. Only the tunnel section is updated.
@@ -2800,8 +2785,6 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 target_cfg["tunnel"]["mode"] = mode
                 target_cfg["tunnel"]["auth_mode"] = auth_mode
                 target_cfg["tunnel"]["port"] = port
-                target_cfg["tunnel"]["no_tunnel"] = no_tunnel
-                target_cfg["tunnel"]["host"] = host
                 if token:
                     target_cfg["tunnel"]["token"] = token
                 elif "token" in target_cfg["tunnel"]:
@@ -2814,17 +2797,13 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 sys.exit(0)
 
     # 3. Launch tunnel manager
-    host_to_bind = host if (host and (host != "127.0.0.1" or not no_tunnel)) else ("0.0.0.0" if no_tunnel else "127.0.0.1")
-    local_lan_ip = get_local_lan_ip()
-    display_ip = local_lan_ip if host_to_bind in ("0.0.0.0", "", "127.0.0.1") and no_tunnel else host_to_bind
-
-    print(f"\n🚀 Launching MWS StreamableHTTP bridge on {host_to_bind}:{port} (mode: {mode}, auth: {auth_mode})...")
+    print(f"\n🚀 Launching MWS StreamableHTTP bridge on 127.0.0.1:{port} (mode: {mode}, auth: {auth_mode})...")
     mgr = MwsTunnelManager(
         port=port,
         mode=mode,
         token=token,
         auth_mode=auth_mode,
-        host=host_to_bind,
+        host="127.0.0.1",
         allow_sensitive_reads=allow_sensitive_reads,
         scope_filter=scope_filter,
     )
@@ -2835,47 +2814,22 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
         print(f"❌ Failed to start local HTTP bridge: {bridge_err}", file=sys.stderr)
         sys.exit(1)
 
-    if not no_tunnel:
-        print("☁️  Connecting to Cloudflare edge network via quick tunnel...")
-        try:
-            public_url = mgr.start_cloudflare_tunnel(timeout=20.0)
-        except Exception as cf_err:
-            print(f"\n⚠️  Cloudflare tunnel could not establish connection:\n{cf_err}", file=sys.stderr)
-            if sys.stdin.isatty():
-                try:
-                    fallback_ans = input(f"\n👉 Would you like to continue in Direct IP mode on http://{display_ip}:{port}/mcp? [Y/n]: ").strip().lower()
-                    if fallback_ans in ("", "y", "yes"):
-                        no_tunnel = True
-                        public_url = f"http://{display_ip}:{port}"
-                        mgr.set_direct_url(public_url)
-                    else:
-                        mgr.stop()
-                        sys.exit(1)
-                except (KeyboardInterrupt, EOFError):
-                    mgr.stop()
-                    sys.exit(1)
-            else:
-                mgr.stop()
-                sys.exit(1)
-    else:
-        public_url = f"http://{display_ip}:{port}"
-        mgr.set_direct_url(public_url)
+    print("☁️  Connecting to Cloudflare edge network via quick tunnel...")
+    try:
+        public_url = mgr.start_cloudflare_tunnel(timeout=20.0)
+    except Exception as cf_err:
+        mgr.stop()
+        print(f"❌ Failed to establish Cloudflare tunnel: {cf_err}", file=sys.stderr)
+        sys.exit(1)
 
     mcp_endpoint = f"{public_url}/mcp"
     client_cfg = mgr.get_client_config()
 
-    banner_title = "🌐 MWS DIRECT HTTP MCP BRIDGE IS LIVE (ETHERNET/LAN) 🌐" if no_tunnel else "🔗 MWS REMOTE MCP TUNNEL IS LIVE 🔗"
     print("\n============================================================")
-    print(f"         {banner_title}              ")
+    print("           🔗 MWS REMOTE MCP TUNNEL IS LIVE 🔗              ")
     print("============================================================")
-    if no_tunnel:
-        print(f" • Direct LAN IP URL: {mcp_endpoint}")
-        print(f" • Localhost URL:     http://127.0.0.1:{port}/mcp")
-        print(" • Network Mode:      DIRECT IP ONLY (Ethernet/LAN — Zero Cloudflare)")
-    else:
-        print(f" • Public HTTPS URL:  {public_url}")
-        print(f" • MCP Endpoint:      {mcp_endpoint}")
-        print(" • Network Mode:      Cloudflare Quick Tunnel")
+    print(f" • Public HTTPS URL:  {public_url}")
+    print(f" • MCP Endpoint:      {mcp_endpoint}")
     print(f" • Auth Mode:         {mgr.auth_mode.upper()}")
     if mgr.auth_mode == "oauth":
         print(" • Authorization:     OAuth 2.0 PKCE (Host-Owner PIN Protection Active)")
@@ -2889,11 +2843,11 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     print("📋 Copy & Paste into ChatGPT / Gemini / Claude Web / Cursor:\n")
     print(json.dumps(client_cfg, indent=2))
     print("\n------------------------------------------------------------")
-    print("Press Ctrl+C to disconnect and close the bridge safely.")
+    print("Press Ctrl+C to disconnect and close the tunnel safely.")
     print("============================================================\n", flush=True)
 
     mgr.wait()
-    print("\n🛑 Bridge stopped successfully.")
+    print("\n🛑 Cloudflare tunnel disconnected and local bridge stopped successfully.")
 
 
 
@@ -3199,20 +3153,6 @@ def main() -> None:
         "-y",
         action="store_true",
         help="Bypass interactive pre-flight review and launch tunnel immediately",
-    )
-    sub_tunnel.add_argument(
-        "--no-tunnel",
-        "--direct",
-        dest="no_tunnel",
-        action="store_true",
-        default=False,
-        help="Run direct HTTP MCP server on local/Ethernet IP without Cloudflare Tunnel",
-    )
-    sub_tunnel.add_argument(
-        "--host",
-        "-H",
-        default=None,
-        help="Interface address to bind (e.g. '0.0.0.0', '127.0.0.1', or Ethernet IP)",
     )
     sub_tunnel.add_argument(
         "--allow-sensitive-reads",
