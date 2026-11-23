@@ -36,46 +36,46 @@ dependencies = [
 
 [project.optional-dependencies]
 excel = [
-    "mcp-win-stdio-excel>=0.4.7",
+    "mcp-win-stdio-excel>=0.5.0",
 ]
 word = [
-    "mcp-win-stdio-word>=0.4.7",
+    "mcp-win-stdio-word>=0.5.0",
 ]
 explorer = [
-    "mcp-win-stdio-explorer>=0.4.7",
+    "mcp-win-stdio-explorer>=0.5.0",
 ]
 tsc = [
-    "mcp-win-stdio-tsc>=0.4.7",
+    "mcp-win-stdio-tsc>=0.5.0",
 ]
 db = [
-    "mcp-win-stdio-db>=0.4.7",
+    "mcp-win-stdio-db>=0.5.0",
 ]
 git = [
-    "mcp-win-stdio-git>=0.4.7",
+    "mcp-win-stdio-git>=0.5.0",
 ]
 ssh = [
-    "mcp-win-stdio-ssh>=0.4.7",
+    "mcp-win-stdio-ssh>=0.5.0",
 ]
 rag = [
-    "mcp-win-stdio-rag>=0.4.7",
+    "mcp-win-stdio-rag>=0.5.0",
 ]
 excel-db = [
-    "mcp-win-stdio-excel-db>=0.4.7",
+    "mcp-win-stdio-excel-db>=0.5.0",
 ]
 arch = [
-    "mcp-win-stdio-arch>=0.4.7",
+    "mcp-win-stdio-arch>=0.5.0",
 ]
 all = [
-    "mcp-win-stdio-excel>=0.4.7",
-    "mcp-win-stdio-word>=0.4.7",
-    "mcp-win-stdio-explorer>=0.4.7",
-    "mcp-win-stdio-tsc>=0.4.7",
-    "mcp-win-stdio-db>=0.4.7",
-    "mcp-win-stdio-git>=0.4.7",
-    "mcp-win-stdio-ssh>=0.4.7",
-    "mcp-win-stdio-rag>=0.4.7",
-    "mcp-win-stdio-excel-db>=0.4.7",
-    "mcp-win-stdio-arch>=0.4.7",
+    "mcp-win-stdio-excel>=0.5.0",
+    "mcp-win-stdio-word>=0.5.0",
+    "mcp-win-stdio-explorer>=0.5.0",
+    "mcp-win-stdio-tsc>=0.5.0",
+    "mcp-win-stdio-db>=0.5.0",
+    "mcp-win-stdio-git>=0.5.0",
+    "mcp-win-stdio-ssh>=0.5.0",
+    "mcp-win-stdio-rag>=0.5.0",
+    "mcp-win-stdio-excel-db>=0.5.0",
+    "mcp-win-stdio-arch>=0.5.0",
 ]
 dev = [
     "pytest>=8.0.0",

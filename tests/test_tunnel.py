@@ -64,3 +64,24 @@ def test_cmd_tunnel_preflight_help_and_non_interactive():
             assert client_cfg["mcpServers"]["mws"]["url"] == "https://mock-live-zen.trycloudflare.com/mcp"
         finally:
             mgr.stop()
+
+
+def test_tunnel_url_discovery_ignores_api_trycloudflare():
+    """Verify cloudflared discovery ignores api.trycloudflare.com log lines and extracts arbitrary tunnel names."""
+    with patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.stderr.readline.side_effect = [
+            "INF Requesting quick tunnel from https://api.trycloudflare.com/tunnel\n",
+            "INF Connected to https://api.trycloudflare.com\n",
+            "|  https://any-arbitrary-tunnel-name-8888.trycloudflare.com  |\n",
+        ]
+        mock_popen.return_value = mock_proc
+
+        mgr = MwsTunnelManager(port=8993, mode="read_only", token="test_token_456")
+        try:
+            url = mgr.start_cloudflare_tunnel(timeout=5.0)
+            assert url == "https://any-arbitrary-tunnel-name-8888.trycloudflare.com"
+        finally:
+            mgr.stop()
+

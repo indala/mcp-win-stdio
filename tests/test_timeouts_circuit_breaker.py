@@ -10,8 +10,8 @@ import pytest
 
 from mcp_win_stdio.server.process_pool import (
     CIRCUIT_BREAKER,
-    CircuitBreaker,
     GLOBAL_POOL,
+    CircuitBreaker,
     MCPProcess,
 )
 
