@@ -69,21 +69,56 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
             self.permission_mode = (permission_mode or "read_only").lower().strip()
 
     async def dispatch(self, request: Any, call_next: Callable[..., Any]) -> Any:
+        from starlette.responses import Response
+
+        # Handle CORS preflight requests for web-based AI clients (e.g. Gemini Custom Connected Apps)
+        if request.method == "OPTIONS":
+            req_headers = request.headers.get(
+                "access-control-request-headers",
+                "Authorization, Content-Type, Mcp-Session-Id, Last-Event-Id, Accept",
+            )
+            return Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS, PUT",
+                    "Access-Control-Allow-Headers": req_headers,
+                    "Access-Control-Expose-Headers": "Mcp-Session-Id, WWW-Authenticate, Content-Type",
+                    "Access-Control-Max-Age": "86400",
+                },
+            )
+
         path = request.url.path
+
+        # Seamlessly map root path '/' to '/mcp' so clients connecting to either URL succeed
+        if path == "/":
+            request.scope["path"] = "/mcp"
+            path = "/mcp"
+
         if path in ("/health", "/status"):
             return JSONResponse({
                 "status": "ok",
                 "service": "mws-tunnel",
                 "auth_mode": self.auth_provider.auth_mode,
                 "timestamp": time.time(),
+            }, headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Expose-Headers": "Mcp-Session-Id, WWW-Authenticate, Content-Type",
             })
 
         # Intercept OAuth endpoints (discovery, registration, authorization, token, revocation)
         if hasattr(self.auth_provider, "is_oauth_path") and self.auth_provider.is_oauth_path(path):
-            return await self.auth_provider.handle_oauth_request(request)
+            resp = await self.auth_provider.handle_oauth_request(request)
+            if hasattr(resp, "headers"):
+                resp.headers["Access-Control-Allow-Origin"] = "*"
+                resp.headers["Access-Control-Expose-Headers"] = "Mcp-Session-Id, WWW-Authenticate, Content-Type"
+            return resp
 
         auth_response = await self.auth_provider.authenticate(request)
         if auth_response is not None:
+            if hasattr(auth_response, "headers"):
+                auth_response.headers["Access-Control-Allow-Origin"] = "*"
+                auth_response.headers["Access-Control-Expose-Headers"] = "Mcp-Session-Id, WWW-Authenticate, Content-Type"
             return auth_response
 
         # Request-scoped permission context isolation: calculate effective permission bounded by server ceiling
@@ -107,6 +142,8 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
             from starlette.responses import Response
 
             if isinstance(response, Response):
+                response.headers["Access-Control-Allow-Origin"] = "*"
+                response.headers["Access-Control-Expose-Headers"] = "Mcp-Session-Id, WWW-Authenticate, Content-Type"
                 orig_bg = getattr(response, "background", None)
 
                 def _on_request_cleanup():

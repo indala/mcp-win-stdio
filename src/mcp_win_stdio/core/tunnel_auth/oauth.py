@@ -810,7 +810,9 @@ class OAuthProvider(AuthProvider):
 
         if not auth_header.startswith("Bearer "):
             headers = {
-                "WWW-Authenticate": f'Bearer realm="mcp-win-stdio", resource_metadata="{resource_metadata_url}"'
+                "WWW-Authenticate": f'Bearer realm="mcp-win-stdio", resource_metadata="{resource_metadata_url}"',
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Expose-Headers": "WWW-Authenticate, Mcp-Session-Id, Content-Type",
             }
             return JSONResponse(
                 {
@@ -826,7 +828,9 @@ class OAuthProvider(AuthProvider):
 
         if not is_valid or not payload:
             headers = {
-                "WWW-Authenticate": f'Bearer error="invalid_token", error_description="{err_desc or "Invalid token"}", resource_metadata="{resource_metadata_url}"'
+                "WWW-Authenticate": f'Bearer error="invalid_token", error_description="{err_desc or "Invalid token"}", resource_metadata="{resource_metadata_url}"',
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Expose-Headers": "WWW-Authenticate, Mcp-Session-Id, Content-Type",
             }
             return JSONResponse(
                 {
