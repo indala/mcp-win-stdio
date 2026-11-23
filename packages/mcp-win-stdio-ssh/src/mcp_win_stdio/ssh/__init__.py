@@ -2,4 +2,4 @@
 Advanced Multi-SSH Connection & Remote Management MCP Server for mcp-win-stdio.
 """
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
