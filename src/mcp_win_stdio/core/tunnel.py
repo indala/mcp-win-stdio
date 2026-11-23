@@ -315,10 +315,20 @@ class MwsTunnelManager:
             line = self._cf_proc.stderr.readline() if self._cf_proc.stderr else ""
             if line:
                 output_lines.append(line.strip())
-                m = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                # Match only the random-subdomain tunnel URL (e.g. xyz-abc-123.trycloudflare.com).
+                # Exclude internal Cloudflare hostnames like api.trycloudflare.com which appear
+                # in cloudflared log output before the actual tunnel URL is announced.
+                m = re.search(r"https://([a-zA-Z0-9]+-[a-zA-Z0-9]+-[a-zA-Z0-9]+)\.trycloudflare\.com", line)
                 if m:
                     discovered_url = m.group(0)
                     break
+                # Fallback: also capture URL from cloudflared's explicit announcement lines
+                # ("Your quick Tunnel has been created! Visit it at ...")
+                if "trycloudflare.com" in line and any(kw in line.lower() for kw in ("tunnel", "visit", "created", "reachable")):
+                    m2 = re.search(r"https://[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]\.trycloudflare\.com", line)
+                    if m2 and "api.trycloudflare.com" not in m2.group(0):
+                        discovered_url = m2.group(0)
+                        break
             else:
                 time.sleep(0.1)
 

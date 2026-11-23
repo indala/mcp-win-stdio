@@ -2770,16 +2770,26 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
             elif choice == "5" and auth_mode == "bearer":
                 t_in = input("Enter custom bearer token (leave empty for auto-generated): ").strip()
                 token = t_in if t_in else None
-            elif choice in ("5", "6"):
+            elif choice == "6":
+                # Bug fix: load only the target scope's existing config (not the merged
+                # hierarchical config) so we don't clobber global settings with workspace
+                # overrides or vice versa. Only the tunnel section is updated.
                 save_scope = "workspace" if workspace_path else "global"
-                target_cfg = dict(hier_cfg)
-                target_cfg.pop("_resolved_sources", None)
+                from mcp_win_stdio.core.config import load_config, load_workspace_config
+                if save_scope == "workspace":
+                    target_cfg = load_workspace_config()
+                else:
+                    target_cfg = load_config()
                 if "tunnel" not in target_cfg or not isinstance(target_cfg["tunnel"], dict):
                     target_cfg["tunnel"] = {}
                 target_cfg["tunnel"]["mode"] = mode
                 target_cfg["tunnel"]["auth_mode"] = auth_mode
                 target_cfg["tunnel"]["port"] = port
-                target_cfg["tunnel"]["token"] = token
+                if token:
+                    target_cfg["tunnel"]["token"] = token
+                elif "token" in target_cfg["tunnel"]:
+                    # Remove stale token when auto-generate is selected
+                    target_cfg["tunnel"].pop("token", None)
                 saved_to = save_config(target_cfg, scope=save_scope)
                 print(f"✅ Saved tunnel configuration to {saved_to}")
             elif choice in ("q", "quit", "exit"):
