@@ -63,6 +63,7 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
         self.auth_provider = auth_provider
         # Ensure middleware always has an initialized ToolScopeFilter (defaulting to clean pass-through if omitted)
         self.scope_filter = scope_filter if scope_filter is not None else ToolScopeFilter()
+        self._start_time = time.time()
         if auth_provider.requires_read_only:
             self.permission_mode = "read_only"
         else:
@@ -96,14 +97,20 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
             path = "/mcp"
 
         if path in ("/health", "/status"):
+            uptime = time.time() - getattr(self, "_start_time", time.time())
             return JSONResponse({
                 "status": "ok",
                 "service": "mws-tunnel",
                 "auth_mode": self.auth_provider.auth_mode,
+                "permission_mode": self.permission_mode,
+                "uptime_seconds": round(uptime, 2),
                 "timestamp": time.time(),
             }, headers={
                 "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
                 "Access-Control-Expose-Headers": "Mcp-Session-Id, WWW-Authenticate, Content-Type",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
             })
 
         # Intercept OAuth endpoints (discovery, registration, authorization, token, revocation)
@@ -144,6 +151,8 @@ class TunnelAuthMiddleware(BaseHTTPMiddleware):
             if isinstance(response, Response):
                 response.headers["Access-Control-Allow-Origin"] = "*"
                 response.headers["Access-Control-Expose-Headers"] = "Mcp-Session-Id, WWW-Authenticate, Content-Type"
+                # Prevent reverse proxy buffering on StreamableHTTP / SSE
+                response.headers["X-Accel-Buffering"] = "no"
                 orig_bg = getattr(response, "background", None)
 
                 def _on_request_cleanup():
@@ -436,9 +445,27 @@ class MwsTunnelManager:
             self._uvicorn_thread = None
 
     def wait(self) -> None:
-        """Block until interrupted or stopped."""
+        """Block until interrupted or stopped, actively monitoring tunnel health and auto-reconnecting if dropped."""
         try:
             while not self._stop_event.is_set():
+                if self._cf_proc is not None and self._cf_proc.poll() is not None:
+                    code = self._cf_proc.poll()
+                    if not self._stop_event.is_set():
+                        logger.warning(
+                            "Cloudflare tunnel process terminated unexpectedly (exit code %s). "
+                            "Local StreamableHTTP bridge remains active on %s:%s.",
+                            code, self.host, self.port,
+                        )
+                        # Attempt automatic tunnel recovery
+                        try:
+                            logger.info("Attempting automatic Cloudflare tunnel reconnection...")
+                            new_url = self.start_cloudflare_tunnel(timeout=10.0)
+                            logger.info("Tunnel reconnected successfully at: %s", new_url)
+                            print(f"\n🔄 Cloudflare tunnel automatically reconnected: {new_url}")
+                        except Exception as rec_err:
+                            logger.error("Tunnel auto-reconnection failed: %s", rec_err)
+                            print(f"\n⚠️  Cloudflare tunnel dropped (code {code}). Reconnection attempt failed: {rec_err}")
+                            break
                 time.sleep(0.5)
         except (KeyboardInterrupt, SystemExit):
             pass

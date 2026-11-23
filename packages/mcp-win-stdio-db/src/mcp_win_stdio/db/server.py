@@ -336,6 +336,21 @@ def _capture_before_image(
     return result
 
 
+def _extract_mysql_matched_changed_rows(cur: Any, conn: Any) -> Tuple[Optional[int], Optional[int]]:
+    """Extract (matched_rows, changed_rows) from PyMySQL OK packet message if available."""
+    try:
+        res = getattr(cur, "_result", None) or getattr(conn, "_result", None)
+        msg = getattr(res, "message", None)
+        if msg:
+            text = msg.decode("utf-8", errors="ignore") if isinstance(msg, bytes) else str(msg)
+            m = re.search(r"Rows matched:\s*(\d+)\s+Changed:\s*(\d+)", text, re.IGNORECASE)
+            if m:
+                return int(m.group(1)), int(m.group(2))
+    except Exception:
+        pass
+    return None, None
+
+
 def _get_db_config_file() -> Path:
     config_file_env = os.environ.get("CONFIG_FILE")
     if config_file_env:
@@ -746,51 +761,44 @@ def _get_connection(
     # 5. Try to derive sibling DB on active server or fallback server
     base_target = _normalize_connection_param(fallback_server) or _ACTIVE_CONNECTION
     if base_target and (base_target in _CONNECTION_REGISTRY or base_target in _RAW_CONFIG):
-        curr = _get_connection(base_target, visited=visited)
-        u = urlparse(curr["url"])
-        new_url = f"{u.scheme}://{u.netloc}/{name}"
-        info = _parse_url(new_url)
-        info["name"] = name
-        info["url"] = new_url
-
-        # Test connect with strict 2-second timeout
-        if info["engine"] == "postgres":
-            if not psycopg2:
-                raise RuntimeError("PostgreSQL driver (psycopg2) is not available or blocked by system policy.")
-            conn = psycopg2.connect(new_url, connect_timeout=2)
-            conn.close()
-        else:
-            if not pymysql:
-                raise RuntimeError("MySQL driver (pymysql) is not available.")
-            conn = pymysql.connect(
-                host=info["host"],
-                port=info["port"],
-                user=info["user"],
-                password=info["password"],
-                database=info["database"],
-                connect_timeout=2,
-            )
-            conn.close()
-
-        _CONNECTION_REGISTRY[name] = info
-        _RAW_CONFIG[name] = new_url
-        return info
-
-    # 6. Fallback: try connecting to local postgresql://postgres:postgres@localhost:5432/{name}
-    if psycopg2:
         try:
-            candidate_url = f"postgresql://postgres:postgres@localhost:5432/{name}"
-            conn = psycopg2.connect(candidate_url, connect_timeout=2)
-            conn.close()
-            info = _parse_url(candidate_url)
+            curr = _get_connection(base_target, visited=visited)
+            u = urlparse(curr["url"])
+            new_url = f"{u.scheme}://{u.netloc}/{name}"
+            info = _parse_url(new_url)
             info["name"] = name
-            info["url"] = candidate_url
+            info["url"] = new_url
+
+            # Test connect with strict 2-second timeout
+            if info["engine"] == "postgres":
+                if not psycopg2:
+                    raise RuntimeError("PostgreSQL driver (psycopg2) is not available or blocked by system policy.")
+                conn = psycopg2.connect(new_url, connect_timeout=2)
+                conn.close()
+            else:
+                if not pymysql:
+                    raise RuntimeError("MySQL driver (pymysql) is not available.")
+                conn = pymysql.connect(
+                    host=info["host"],
+                    port=info["port"],
+                    user=info["user"],
+                    password=info["password"],
+                    database=info["database"],
+                    connect_timeout=2,
+                )
+                conn.close()
+
             _CONNECTION_REGISTRY[name] = info
+            _RAW_CONFIG[name] = new_url
             return info
         except Exception:
             pass
 
-    raise ValueError(f"Connection or database '{name}' not found. Available connections: {list(_RAW_CONFIG.keys())}")
+    available = list(_RAW_CONFIG.keys())
+    raise ValueError(
+        f"Unknown connection alias '{name}'. Configured connections: {available}. "
+        f"Use list_connections to inspect configured connections, or add_connection to register a new one."
+    )
 
 
 def _get_pg_client(info: Dict[str, Any], dbname: Optional[str] = None):
@@ -2579,6 +2587,8 @@ def execute_query(
                             "rowCount": rowcount,
                             "statusMessage": status,
                         }
+                        if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
+                            res_obj["matchedRows"] = rowcount
                         if before_img:
                             res_obj["beforeImage"] = before_img
                         if returned_rows is not None:
@@ -2597,6 +2607,8 @@ def execute_query(
                             "rowCount": rowcount,
                             "auditId": audit_id,
                         }
+                        if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
+                            res_obj["matchedRows"] = rowcount
                         if before_img and (before_img.get("rows") or before_img.get("cascaded_children")):
                             res_obj["beforeImageSummary"] = {
                                 "operation": before_img.get("operation"),
@@ -2638,6 +2650,7 @@ def execute_query(
                         cur.execute(single_sql)
 
                     rowcount = cur.rowcount
+                    matched_rows, changed_rows = _extract_mysql_matched_changed_rows(cur, conn)
                     status = "SUCCESS (ROLLED BACK)" if effective_dry_run else "SUCCESS"
                     if effective_dry_run:
                         cur.execute("ROLLBACK;")
@@ -2648,6 +2661,15 @@ def execute_query(
                             "status": status,
                             "rowCount": rowcount,
                         }
+                        if matched_rows is not None:
+                            res_obj["matchedRows"] = matched_rows
+                        if changed_rows is not None:
+                            res_obj["changedRows"] = changed_rows
+                        if matched_rows is not None:
+                            if matched_rows > 0 and changed_rows == 0:
+                                res_obj["note"] = f"{matched_rows} row(s) matched WHERE clause; 0 changed (values already matched existing data)."
+                            elif matched_rows == 0:
+                                res_obj["note"] = "0 rows matched WHERE clause."
                         if before_img:
                             res_obj["beforeImage"] = before_img
                         return res_obj
@@ -2660,6 +2682,15 @@ def execute_query(
                             "rowCount": rowcount,
                             "auditId": audit_id,
                         }
+                        if matched_rows is not None:
+                            res_obj["matchedRows"] = matched_rows
+                        if changed_rows is not None:
+                            res_obj["changedRows"] = changed_rows
+                        if matched_rows is not None:
+                            if matched_rows > 0 and changed_rows == 0:
+                                res_obj["note"] = f"{matched_rows} row(s) matched WHERE clause; 0 changed (values already matched existing data)."
+                            elif matched_rows == 0:
+                                res_obj["note"] = "0 rows matched WHERE clause."
                         if before_img and before_img.get("rows"):
                             res_obj["beforeImageSummary"] = {
                                 "operation": before_img.get("operation"),
@@ -2757,15 +2788,19 @@ def execute_query(
                     try:
                         cur.execute(stmt)
                         rc = cur.rowcount if cur.rowcount != -1 else 0
+                        matched_rc, changed_rc = _extract_mysql_matched_changed_rows(cur, conn)
                         total_rows_affected += rc
-                        executed_statements.append(
-                            {
-                                "statement_index": idx + 1,
-                                "snippet": stmt[:80] + ("..." if len(stmt) > 80 else ""),
-                                "status": "OK",
-                                "rows_affected": rc,
-                            }
-                        )
+                        stmt_record = {
+                            "statement_index": idx + 1,
+                            "snippet": stmt[:80] + ("..." if len(stmt) > 80 else ""),
+                            "status": "OK",
+                            "rows_affected": rc,
+                        }
+                        if matched_rc is not None:
+                            stmt_record["matched_rows"] = matched_rc
+                        if changed_rc is not None:
+                            stmt_record["changed_rows"] = changed_rc
+                        executed_statements.append(stmt_record)
                     except Exception as stmt_err:
                         cur.execute("ROLLBACK;")
                         err_res = _format_db_error(stmt_err, "mysql", stmt, statement_idx=idx + 1)

@@ -88,11 +88,17 @@ def _get_db_config(conn_name_or_url: Optional[str] = None) -> str:
     if db_url_env:
         return db_url_env
 
-    # 4. Fallback: If bare db name without protocol, default to local PostgreSQL
+    # 4. Unknown connection alias
     if conn_name_or_url and "://" not in conn_name_or_url and conn_name_or_url != "default":
-        return f"postgresql://postgres:postgres@localhost:5432/{conn_name_or_url}"
+        raise ValueError(
+            f"Unknown database connection alias '{conn_name_or_url}'. "
+            f"Please configure it in ~/.mcp-win-stdio/db_connections.json or pass a full database URL."
+        )
 
-    return conn_name_or_url or "postgresql://postgres:postgres@localhost:5432/showreel_dev"
+    if not conn_name_or_url or conn_name_or_url == "default":
+        raise ValueError("No database connection specified and no default connection found in ~/.mcp-win-stdio/db_connections.json or DATABASE_URL.")
+
+    return conn_name_or_url
 
 
 @mcp.tool()
