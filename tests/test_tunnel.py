@@ -85,3 +85,24 @@ def test_tunnel_url_discovery_ignores_api_trycloudflare():
         finally:
             mgr.stop()
 
+
+def test_tunnel_process_failure_logs_and_diagnostics():
+    """Verify that unexpected cloudflared termination preserves stderr logs and provides diagnostics."""
+    with patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        mock_proc.stderr.read.return_value = "failed to request quick Tunnel: wsarecv connection was forcibly closed"
+        mock_popen.return_value = mock_proc
+
+        mgr = MwsTunnelManager(port=8994, mode="read_only", token="test_token_789")
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                mgr.start_cloudflare_tunnel(timeout=5.0)
+            msg = str(exc_info.value)
+            assert "cloudflared process terminated unexpectedly (exit code 1)" in msg
+            assert "wsarecv connection was forcibly closed" in msg
+            assert "DIAGNOSIS" in msg
+        finally:
+            mgr.stop()
+
+

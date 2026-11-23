@@ -309,8 +309,26 @@ class MwsTunnelManager:
 
         while time.time() < deadline:
             if self._cf_proc.poll() is not None:
-                err_text = self._cf_proc.stderr.read() if self._cf_proc.stderr else ""
-                raise RuntimeError(f"cloudflared process terminated unexpectedly: {err_text}")
+                remaining_err = self._cf_proc.stderr.read() if self._cf_proc.stderr else ""
+                if remaining_err:
+                    output_lines.extend(remaining_err.strip().splitlines())
+                stdout_text = self._cf_proc.stdout.read() if self._cf_proc.stdout else ""
+                if stdout_text:
+                    output_lines.extend(stdout_text.strip().splitlines())
+                full_log = "\n".join(output_lines).strip()
+
+                hint = ""
+                if any(k in full_log.lower() for k in ("wsarecv", "connection was forcibly closed", "connection reset", "handshake")):
+                    hint = (
+                        "\n\n💡 DIAGNOSIS: Connection to Cloudflare's quick tunnel service (api.trycloudflare.com) was reset.\n"
+                        "   This occurs when an ISP or local firewall restricts *.trycloudflare.com via SNI inspection.\n"
+                        "   Suggested remedies:\n"
+                        "     • Enable a VPN or switch to an alternate internet connection (e.g. mobile hotspot).\n"
+                        "     • Or run local MCP without a remote tunnel using: 'mws server'"
+                    )
+                raise RuntimeError(
+                    f"cloudflared process terminated unexpectedly (exit code {self._cf_proc.poll()}):\n{full_log}{hint}"
+                )
 
             line = self._cf_proc.stderr.readline() if self._cf_proc.stderr else ""
             if line:
