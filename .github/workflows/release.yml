@@ -76,8 +76,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install twine
-        run: pip install --upgrade twine
+      - name: Install twine and pypi-attestations
+        run: pip install --upgrade "twine>=6.1.0" pypi-attestations
 
       - name: Download dist artifacts
         uses: actions/download-artifact@v4
@@ -85,7 +85,7 @@ jobs:
           name: dist-packages
           path: dist
 
-      - name: Mint PyPI OIDC token & upload with 5s pacing
+      - name: Mint PyPI OIDC token, sign PEP 740 attestations & upload with 5s pacing
         shell: bash
         run: |
           set -euo pipefail
@@ -94,6 +94,7 @@ jobs:
           PYPI_TOKEN=$(curl -sS -X POST "https://pypi.org/_/oidc/mint-token" \
             -d "{\"token\": \"${OIDC_JWT}\"}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['token'])")
           echo "::add-mask::${PYPI_TOKEN}"
+          python -m pypi_attestations sign dist/*.whl dist/*.tar.gz
           export TWINE_USERNAME="__token__"
           export TWINE_PASSWORD="${PYPI_TOKEN}"
-          python scripts/publish_safe.py --delay 5
+          python scripts/publish_safe.py --delay 5 --attestations

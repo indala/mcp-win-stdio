@@ -155,6 +155,7 @@ def upload_single_package(
     twine_cmd: List[str],
     max_retries: int = 4,
     retry_delay: int = 15,
+    attestations: bool = False,
 ) -> bool:
     """Upload files for a single package with exponential backoff on 429 rate limit."""
     env = os.environ.copy()
@@ -165,7 +166,10 @@ def upload_single_package(
         "upload",
         "--non-interactive",
         "--skip-existing",
-    ] + [str(f) for f in files]
+    ]
+    if attestations:
+        cmd.append("--attestations")
+    cmd.extend(str(f) for f in files)
 
     for attempt in range(1, max_retries + 1):
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
@@ -198,6 +202,7 @@ def main():
     parser.add_argument("--version", default=detected_ver, help=f"Package version to publish (default: {detected_ver})")
     parser.add_argument("--delay", type=float, default=4.0, help="Seconds to pause between packages (default: 4.0s)")
     parser.add_argument("--dry-run", action="store_true", help="Check status without uploading")
+    parser.add_argument("--attestations", action="store_true", help="Upload PEP 740 provenance attestations alongside artifacts")
     parser.add_argument("--build", action="store_true", help="Run scripts/build_all.py to build all packages before uploading")
     parser.add_argument("--only", help="Publish only a single package (e.g. 'arch', 'excel', 'mcp-win-stdio-ssh')")
     args = parser.parse_args()
@@ -276,7 +281,7 @@ def main():
 
         # 3. Upload with retry and backoff
         print("   ⬆️  Uploading to PyPI...")
-        ok = upload_single_package(artifacts, token, twine_cmd)
+        ok = upload_single_package(artifacts, token, twine_cmd, attestations=args.attestations)
         if ok:
             print(f"   ✅ Successfully uploaded {pypi_name}!")
             success_count += 1

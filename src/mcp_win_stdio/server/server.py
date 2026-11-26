@@ -323,7 +323,7 @@ def manage_context(
     action: str = "get",
     type: Optional[str] = None,
     value: Optional[str] = None,
-    ctx: Optional[Context] = None,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> Dict[str, Any]:
     """
     Manage scoped session context stacks (server, db_connection, ssh_host, workspace, workbook).
@@ -555,7 +555,7 @@ def call_tool(
     server: Optional[str] = None,
     tool_name: Optional[str] = None,
     tool: Optional[str] = None,
-    ctx: Optional[Context] = None,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> Any:
     """
     Execute a tool dynamically on a target MCP server with smart auto-routing and context stack inheritance.
@@ -915,7 +915,7 @@ def run_workflow(
     name: str,
     parameters: Optional[Dict[str, Any]] = None,
     dry_run: bool = False,
-    ctx: Optional[Context] = None,
+    ctx: Context = None,  # type: ignore[assignment]
 ) -> Dict[str, Any]:
     """
     Execute a saved multi-step composite workflow in a single atomic invocation.
