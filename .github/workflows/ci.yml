@@ -65,7 +65,7 @@ jobs:
         run: |
           python -m venv .smoke_venv
           .\.smoke_venv\Scripts\python.exe -m pip install --upgrade pip
-          Get-ChildItem dist/*.whl | ForEach-Object { .\.smoke_venv\Scripts\python.exe -m pip install --no-deps $_.FullName }
+          Get-ChildItem dist/*.whl | ForEach-Object { .\.smoke_venv\Scripts\python.exe -m pip install --find-links dist $_.FullName }
           .\.smoke_venv\Scripts\python.exe -c "import mcp_win_stdio, mcp_win_stdio.server.server, mcp_win_stdio.arch.server, mcp_win_stdio.db.server, mcp_win_stdio.excel.server, mcp_win_stdio.excel_db.server, mcp_win_stdio.explorer.server, mcp_win_stdio.git.server, mcp_win_stdio.rag.server, mcp_win_stdio.ssh.server, mcp_win_stdio.tsc.server, mcp_win_stdio.word.server; print('All 11 wheels imported cleanly')"
 
   sdk-min-compat:
@@ -81,6 +81,6 @@ jobs:
       - name: Install minimum declared MCP SDK & run gateway/import tests
         run: |
           python -m pip install --upgrade pip
-          pip install "mcp==1.2.0" pyyaml tomli rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql paramiko cryptography sqlalchemy playwright networkx numpy pytest hatchling pywin32
+          pip install "mcp==1.2.0" "pydantic<2.11" pyyaml tomli rapidfuzz pathspec openpyxl pandas python-docx psycopg2-binary pymysql paramiko cryptography sqlalchemy playwright networkx numpy pytest hatchling pywin32
           pip install --no-deps -e . -e packages/mcp-win-stdio-excel -e packages/mcp-win-stdio-word -e packages/mcp-win-stdio-explorer -e packages/mcp-win-stdio-tsc -e packages/mcp-win-stdio-db -e packages/mcp-win-stdio-git -e packages/mcp-win-stdio-ssh -e packages/mcp-win-stdio-rag -e packages/mcp-win-stdio-excel-db -e packages/mcp-win-stdio-arch
           pytest tests/test_audit.py tests/test_server.py -q
