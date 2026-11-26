@@ -8,18 +8,35 @@ and routes tool calls to supervised child processes.
 import ipaddress
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from mcp.server.mcpserver import MCPServer
-from mcp.server.transport_security import TransportSecuritySettings
+try:
+    from mcp.server.mcpserver import MCPServer
+except (ImportError, ModuleNotFoundError):
+    from mcp.server.fastmcp import FastMCP as MCPServer  # type: ignore[import-not-found,no-redef]
+
+try:
+    from mcp.server.transport_security import TransportSecuritySettings
+except (ImportError, ModuleNotFoundError):
+    @dataclass
+    class TransportSecuritySettings:  # type: ignore[no-redef]
+        """Fallback shim when running against older MCP SDK releases (<1.23)."""
+
+        enable_dns_rebinding_protection: bool = True
+        allowed_hosts: List[str] = field(default_factory=list)
+        allowed_origins: List[str] = field(default_factory=list)
 from mcp.types import (
     CallToolRequestParams,
     CallToolResult,
     ListToolsResult,
-    PaginatedRequestParams,
     TextContent,
     Tool,
 )
+try:
+    from mcp.types import PaginatedRequestParams
+except ImportError:
+    PaginatedRequestParams = Any  # type: ignore[assignment,misc]
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
