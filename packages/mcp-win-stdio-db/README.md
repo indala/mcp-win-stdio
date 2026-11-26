@@ -69,12 +69,13 @@ pip install mcp-win-stdio-db
 
 ---
 
-## 🚀 One-Command Claude Setup
+## 🚀 Non-Invasive Configuration (`mws guide`)
 
 ```powershell
-mws setup db
-# or:
-mws add db
+# Print client-ready JSON snippets for Claude, Gemini, Cursor, VS Code, etc.:
+mws guide db
+# Add database connections interactively:
+mws config db
 ```
 
 ### Manual Configuration Example (Zero-Env)
@@ -97,9 +98,10 @@ In `%APPDATA%\Claude\claude_desktop_config.json`:
 ## 📖 CLI Commands & Interactive Guide
 
 ```powershell
+mws guide db       # Print client configuration snippets & tool reference
 mws db guide       # Complete tool reference & prompt recipes
 mws db doctor      # Verify PostgreSQL/MySQL adapters and native dump tools
-mws db setup       # Configure Claude Desktop / Claude Code
+mws config db      # Configure database connections interactively
 mws db run         # Launch server over stdio
 ```
 

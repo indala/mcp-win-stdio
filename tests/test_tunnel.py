@@ -40,13 +40,17 @@ def test_tunnel_manager_init_and_client_config():
 
 
 def test_tunnel_cloudflared_installed_check():
-    """Verify is_cloudflared_installed detects installed binary."""
-    assert MwsTunnelManager.is_cloudflared_installed() is True
+    """Verify is_cloudflared_installed detects installed binary and missing binary."""
+    with patch("shutil.which", return_value=r"C:\bin\cloudflared.exe"):
+        assert MwsTunnelManager.is_cloudflared_installed() is True
+    with patch("shutil.which", return_value=None):
+        assert MwsTunnelManager.is_cloudflared_installed() is False
 
 
 def test_cmd_tunnel_preflight_help_and_non_interactive():
     """Verify cmd_tunnel launches and cleanly tears down with mocked cloudflared."""
-    with patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+    with patch.object(MwsTunnelManager, "is_cloudflared_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         mock_proc.stderr.readline.side_effect = [
@@ -68,7 +72,8 @@ def test_cmd_tunnel_preflight_help_and_non_interactive():
 
 def test_tunnel_url_discovery_ignores_api_trycloudflare():
     """Verify cloudflared discovery ignores api.trycloudflare.com log lines and extracts arbitrary tunnel names."""
-    with patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+    with patch.object(MwsTunnelManager, "is_cloudflared_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         mock_proc.stderr.readline.side_effect = [
@@ -88,7 +93,8 @@ def test_tunnel_url_discovery_ignores_api_trycloudflare():
 
 def test_tunnel_process_failure_logs_and_diagnostics():
     """Verify that unexpected cloudflared termination preserves stderr logs and provides diagnostics."""
-    with patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+    with patch.object(MwsTunnelManager, "is_cloudflared_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 1
         mock_proc.stderr.read.return_value = "failed to request quick Tunnel: wsarecv connection was forcibly closed"
@@ -105,4 +111,155 @@ def test_tunnel_process_failure_logs_and_diagnostics():
         finally:
             mgr.stop()
 
+
+def test_ngrok_tunnel_url_discovery_and_domain():
+    """Verify ngrok JSON log parsing and --domain flag forwarding."""
+    with patch("mcp_win_stdio.core.tunnel.MwsTunnelManager.is_ngrok_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.stdout.readline.side_effect = [
+            '{"lvl":"info","msg":"starting web service","addr":"127.0.0.1:4040"}\n',
+            '{"lvl":"info","msg":"started tunnel","obj":"tunnels","addr":"http://127.0.0.1:8995","url":"https://my-custom.ngrok.app"}\n',
+        ]
+        mock_popen.return_value = mock_proc
+
+        mgr = MwsTunnelManager(
+            port=8995,
+            mode="read_only",
+            token="test_ngrok_tok",
+            provider="ngrok",
+            domain="my-custom.ngrok.app",
+        )
+        try:
+            url = mgr.start_tunnel(timeout=5.0)
+            assert url == "https://my-custom.ngrok.app"
+            called_cmd = mock_popen.call_args[0][0]
+            assert "--domain" in called_cmd
+            assert "my-custom.ngrok.app" in called_cmd
+            assert mgr.get_client_config()["mcpServers"]["mws"]["url"] == "https://my-custom.ngrok.app/mcp"
+        finally:
+            mgr.stop()
+
+
+def test_ngrok_authtoken_error_diagnosis():
+    """Verify ngrok missing authtoken failure surfaces actionable diagnostic hint."""
+    with patch("mcp_win_stdio.core.tunnel.MwsTunnelManager.is_ngrok_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.subprocess.Popen") as mock_popen:
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        mock_proc.stdout.read.return_value = "ERR_NGROK_4018: authentication failed: Usage of ngrok requires a verified account and authtoken."
+        mock_proc.stderr.read.return_value = ""
+        mock_popen.return_value = mock_proc
+
+        mgr = MwsTunnelManager(port=8996, mode="read_only", token="tok", provider="ngrok")
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                mgr.start_ngrok_tunnel(timeout=5.0)
+            msg = str(exc_info.value)
+            assert "ngrok process terminated unexpectedly" in msg
+            assert "ngrok config add-authtoken" in msg
+        finally:
+            mgr.stop()
+
+
+def test_direct_tunnel_modes_and_ssl_validation(tmp_path):
+    """Verify direct provider URL resolution (HTTP, explicit public_url, and HTTPS with SSL files)."""
+    # 1. Explicit public_url
+    mgr = MwsTunnelManager(
+        port=3000,
+        host="0.0.0.0",
+        mode="read_only",
+        token="direct_tok",
+        provider="direct",
+        public_url="https://123.45.67.89:3000/",
+    )
+    assert mgr.start_tunnel() == "https://123.45.67.89:3000"
+    assert mgr.get_client_config()["mcpServers"]["mws"]["url"] == "https://123.45.67.89:3000/mcp"
+
+    # 2. HTTPS scheme inferred when ssl_certfile and ssl_keyfile are provided
+    cert = tmp_path / "cert.pem"
+    key = tmp_path / "key.pem"
+    cert.write_text("dummy cert", encoding="utf-8")
+    key.write_text("dummy key", encoding="utf-8")
+
+    mgr_ssl = MwsTunnelManager(
+        port=3000,
+        host="123.45.67.89",
+        mode="read_only",
+        token="direct_ssl_tok",
+        provider="direct",
+        ssl_certfile=str(cert),
+        ssl_keyfile=str(key),
+    )
+    assert mgr_ssl.start_tunnel() == "https://123.45.67.89:3000"
+
+    # 3. Validation errors when only one SSL file is passed or file is missing
+    with pytest.raises(ValueError):
+        MwsTunnelManager(port=3000, provider="direct", ssl_certfile=str(cert))
+
+    with pytest.raises(FileNotFoundError):
+        MwsTunnelManager(
+            port=3000,
+            provider="direct",
+            ssl_certfile=str(tmp_path / "missing.pem"),
+            ssl_keyfile=str(key),
+        )
+
+
+def test_direct_cert_generation_import_and_discovery(tmp_path):
+    """Verify ~/.mcp-win-stdio/certs/ generation, import, and auto-discovery."""
+    from mcp_win_stdio.core.tunnel import (
+        generate_direct_self_signed_cert,
+        get_stored_direct_certs,
+        import_direct_certs,
+    )
+
+    certs_dir = tmp_path / "certs"
+    assert get_stored_direct_certs(certs_dir) is None
+
+    cert_p, key_p = generate_direct_self_signed_cert("123.45.67.89", certs_dir=certs_dir, days=90)
+    assert cert_p.is_file()
+    assert key_p.is_file()
+    assert "BEGIN CERTIFICATE" in cert_p.read_text(encoding="utf-8")
+
+    discovered = get_stored_direct_certs(certs_dir)
+    assert discovered == (cert_p, key_p)
+
+    # Import custom certs into a separate certs dir
+    src_cert = tmp_path / "zerossl_cert.pem"
+    src_key = tmp_path / "zerossl_key.pem"
+    src_cert.write_text("ZEROSSL CERT", encoding="utf-8")
+    src_key.write_text("ZEROSSL KEY", encoding="utf-8")
+
+    import_dir = tmp_path / "imported_certs"
+    imp_c, imp_k = import_direct_certs(src_cert, src_key, certs_dir=import_dir)
+    assert imp_c.read_text(encoding="utf-8") == "ZEROSSL CERT"
+    assert imp_k.read_text(encoding="utf-8") == "ZEROSSL KEY"
+
+
+def test_ngrok_authtoken_detection_and_interactive_redirect(tmp_path, monkeypatch):
+    """Verify authtoken detection and automatic browser redirect + inline token save."""
+    from mcp_win_stdio.cli import _ensure_tunnel_provider_binary
+
+    monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    assert MwsTunnelManager.has_ngrok_authtoken() is False
+
+    # Env var detection
+    monkeypatch.setenv("NGROK_AUTHTOKEN", "env_tok_123")
+    assert MwsTunnelManager.has_ngrok_authtoken() is True
+    monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
+
+    # Interactive redirect + save
+    with patch("mcp_win_stdio.core.tunnel.MwsTunnelManager.is_ngrok_installed", return_value=True), \
+         patch("mcp_win_stdio.core.tunnel.MwsTunnelManager.configure_ngrok_authtoken", return_value=True) as mock_cfg, \
+         patch("sys.stdin.isatty", return_value=True), \
+         patch("webbrowser.open") as mock_open, \
+         patch("builtins.input", return_value="2abc_ngrok_token_xyz"):
+        _ensure_tunnel_provider_binary("ngrok", MwsTunnelManager)
+        mock_open.assert_called_once_with("https://dashboard.ngrok.com/get-started/your-authtoken")
+        mock_cfg.assert_called_once_with("2abc_ngrok_token_xyz")
 

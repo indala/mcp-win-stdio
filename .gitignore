@@ -61,3 +61,5 @@ venv.bak/
 *.swo
 
 *.log
+.test_home/
+.smoke_venv/

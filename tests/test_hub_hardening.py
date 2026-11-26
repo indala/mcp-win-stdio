@@ -223,7 +223,7 @@ def test_non_windows_chmod_fallback(temp_sec_dir):
     mock_stat_file = type("MockStat", (), {"st_mode": 0o100600})()
 
     def fake_stat(self, *args, **kwargs):
-        if self.is_dir():
+        if self == test_dir:
             return mock_stat_dir
         return mock_stat_file
 

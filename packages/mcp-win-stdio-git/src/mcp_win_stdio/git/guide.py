@@ -106,8 +106,8 @@ def print_git_guide() -> None:
     print("     * Why this is needed: Configures git credential.helper = '!gh auth git-credential'.")
     print("       Without this, local git push/pull and multi-account switching ('gh auth switch')")
     print("       will fail or fallback to outdated Windows credentials.")
-    print("\n  4. Register with Claude Desktop or Claude Code CLI:")
-    print("     mws add git")
+    print("\n  4. View configuration snippet for Claude Desktop, Claude Code CLI, or other clients:")
+    print("     mws guide git")
 
     print("\nAVAILABLE TOOLS (26 Tools):")
     print("-" * 80)

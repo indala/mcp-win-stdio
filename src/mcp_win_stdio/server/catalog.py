@@ -292,6 +292,10 @@ def get_server_tools(server_name: str, force_refresh: bool = False) -> List[Dict
       3. In-process FastMCP introspection
       4. Dynamic MCP stdio probe via process pool
       5. Schema directory fallback
+
+    Discovery failures are never written to memory or disk caches. On a failed
+    ``force_refresh=True``, this returns ``[]`` to the current caller while
+    preserving any previously cached catalog for subsequent normal reads.
     """
     canonical = _normalize_name(server_name.lower())
 
@@ -326,17 +330,20 @@ def get_server_tools(server_name: str, force_refresh: bool = False) -> List[Dict
         except Exception:
             tools = None
 
-    # 3. Fallback: schema files directory
-    if not tools:
+    # 3. Fallback: schema files directory (only when both in-process and live probe failed)
+    if tools is None:
         tools = _introspect_from_schemas(canonical)
 
     if tools is None:
-        tools = []
+        # Discovery failed across all backends; do not cache an empty list
+        # so subsequent calls can retry once the server recovers.
+        return []
 
-    # Cache results
-    _IN_MEMORY_CACHE[canonical] = {"tools": tools, "updated_at": time.time()}
+    # Cache only successful discovery results (including legitimate 0-tool servers)
+    now = time.time()
+    _IN_MEMORY_CACHE[canonical] = {"tools": tools, "updated_at": now}
     disk_cache = _load_disk_cache()
-    disk_cache[canonical] = {"tools": tools, "updated_at": time.time()}
+    disk_cache[canonical] = {"tools": tools, "updated_at": now}
     _save_disk_cache(disk_cache)
 
     return tools

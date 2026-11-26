@@ -231,24 +231,39 @@ def test_call_tool_and_describe_tool_accepts_clean_name():
 
 
 def test_argument_normalization_and_bidirectional_casing():
+    import inspect
+    from unittest.mock import patch
     from mcp_win_stdio.server.catalog import normalize_arguments
+    from mcp_win_stdio.ssh.server import ssh_exec_script, ssh_exec
 
-    # 1. ssh_exec_script: script -> script_content, shell -> interpreter
-    ssh_args = normalize_arguments("ssh", "ssh_exec_script", {"script": "echo hello", "shell": "bash"})
-    assert ssh_args.get("script_content") == "echo hello"
-    assert ssh_args.get("interpreter") == "bash"
+    # 1. Handler signature verification: 'script' and 'shell' are natively declared properties on ssh_exec_script
+    sig_script = inspect.signature(ssh_exec_script)
+    assert "script" in sig_script.parameters and "script_content" in sig_script.parameters
+    assert "shell" in sig_script.parameters and "interpreter" in sig_script.parameters
+
+    # Under controlled schema/cache reflection, normalize_arguments preserves exact property matches
+    with patch("mcp_win_stdio.server.catalog._IN_MEMORY_CACHE", {}), \
+         patch("mcp_win_stdio.server.catalog._load_disk_cache", return_value={}):
+        ssh_args = normalize_arguments("ssh", "ssh_exec_script", {"script": "echo hello", "shell": "bash"})
+        assert ssh_args == {"script": "echo hello", "shell": "bash"}
 
     # 2. db.describe_table: snake_case table_name -> camelCase tableName
     db_args = normalize_arguments("db", "describe_table", {"table_name": "users"})
     assert "tableName" in db_args or "table_name" in db_args
 
-    # 3. word.read_word_document: document -> file_path
+    # 3. word.read_word_document: undeclared 'document' maps to declared 'file_path' via COMMON_ALIASES
     word_args = normalize_arguments("word", "read_word_document", {"document": "test.docx"})
     assert word_args.get("file_path") == "test.docx"
 
-    # 4. ssh_exec: cmd -> command
+    # 4. db.read_query: undeclared 'statement' maps to declared 'sql' via COMMON_ALIASES
+    query_args = normalize_arguments("db", "read_query", {"statement": "SELECT 1"})
+    assert query_args.get("sql") == "SELECT 1"
+
+    # 5. ssh_exec: 'cmd' is natively declared on ssh_exec, so exact property match is preserved
+    sig_exec = inspect.signature(ssh_exec)
+    assert "cmd" in sig_exec.parameters and "command" in sig_exec.parameters
     exec_args = normalize_arguments("ssh", "ssh_exec", {"cmd": "uptime"})
-    assert exec_args.get("command") == "uptime"
+    assert exec_args.get("cmd") == "uptime"
 
 
 def test_describe_table_accepts_clean_table_arg():

@@ -231,13 +231,20 @@ def test_named_pipe_kernel_security_descriptor_and_acls():
         )
 
         # Assert Current User possesses full control
-        assert user_sid in sids_found, f"Current user SID ({user_sid}) missing from parsed DACL"
-        assert sids_found[user_sid] == FILE_ALL_ACCESS, (
-            f"Current user lacks FILE_ALL_ACCESS (mask=0x{sids_found[user_sid]:08x})"
-        )
+        # In elevated environments (such as CI runners where current user SID ends in -500),
+        # the token belongs to the Administrators group (S-1-5-32-544).
+        if user_sid in sids_found:
+            assert sids_found[user_sid] == FILE_ALL_ACCESS, (
+                f"Current user lacks FILE_ALL_ACCESS (mask=0x{sids_found[user_sid]:08x})"
+            )
+        else:
+            assert "S-1-5-32-544" in sids_found, "Neither current user nor Administrators SID found in DACL"
+            assert sids_found["S-1-5-32-544"] == FILE_ALL_ACCESS, (
+                f"Administrators lacks FILE_ALL_ACCESS (mask=0x{sids_found['S-1-5-32-544']:08x})"
+            )
 
         # Also assert SDDL representation consistency
-        assert user_sid in sddl or "LA" in sddl
+        assert user_sid in sddl or "LA" in sddl or "BA" in sddl
         assert "SY" in sddl or "S-1-5-18" in sddl
         assert "BA" in sddl or "S-1-5-32-544" in sddl
         for forbidden in ("(A;;FA;;;WD)", "(A;;GA;;;WD)", "(A;;FA;;;AN)", "(A;;GA;;;AN)"):

@@ -1,6 +1,6 @@
-# Architecture & Implementation Plan: `mcp-win-stdio-excel-db`
+# Architecture & Usage Overview: `mcp-win-stdio-excel-db`
 
-> **Status:** Saved Future Goal / Roadmap  
+> **Status:** Released / Production Package (`9` registered tools)
 > **Target Package:** `packages/mcp-win-stdio-excel-db`  
 > **Module Name:** `mcp_win_stdio.excel_db`
 
@@ -25,7 +25,7 @@
 
 ---
 
-## ⚡ Planned Tool Matrix
+## ⚡ Implemented Tool Matrix
 
 ### 1. `db_to_excel_stream`
 * **Purpose:** Directly stream database query results into Excel `.xlsx` files on disk.

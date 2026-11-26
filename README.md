@@ -1,9 +1,9 @@
 # mcp-win-stdio
 
-Windows-optimized **Model Context Protocol (MCP)** suite and non-invasive CLI hub (`mws`) for local `stdio` execution and secure remote tunneling across all major AI IDEs, CLI agents, and desktop apps (Gemini, Antigravity, Claude, ChatGPT, Cursor, Kiro, OpenCode, Windsurf, Copilot, Codex).
+Windows-optimized **Model Context Protocol (MCP)** suite and non-invasive CLI hub (`mws`) for local `stdio` execution and secure remote tunneling across major AI IDEs, CLI agents, and desktop apps (Gemini, Antigravity, Claude, ChatGPT Desktop / Codex, Cursor, Kiro, OpenCode, Windsurf, and Copilot).
 
 [![PyPI Version](https://img.shields.io/pypi/v/mcp-win-stdio.svg)](https://pypi.org/project/mcp-win-stdio/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/indala/mcp-win-stdio/blob/main/LICENSE)
 [![Python: 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 
 ---
@@ -11,7 +11,7 @@ Windows-optimized **Model Context Protocol (MCP)** suite and non-invasive CLI hu
 ## 🌟 Highlights (233+ Audited Tools Across 10 Modular Servers)
 
 * **Unified On-Demand Gateway & Workflow Engine (`mws server`)**: Configure just `mws server` (or `python -m mcp_win_stdio.server`) in Claude Desktop, Cursor, Gemini, or Antigravity. Dynamic discovery, routing, workflows, and lazy child-server startup avoid loading all 200+ tools into the agent context upfront.
-* **Secure Remote Tunneling & OAuth 2.0 PKCE (`mws tunnel`)**: Expose local Windows tools to remote and web-based agents (Claude Web, ChatGPT Custom GPTs, Cursor, MCP Inspector) over encrypted Cloudflare Tunnels with terminal-generated 6-digit Host-Owner Approval PINs, PKCE (`S256`), and strict permission ceilings.
+* **Secure Remote Tunneling & OAuth 2.0 PKCE (`mws tunnel`)**: Expose local Windows tools to remote and web-based agents (Claude Web, ChatGPT Custom GPTs, Cursor, MCP Inspector) over encrypted tunnels (`cloudflare`, `ngrok`) or Direct HTTPS (`direct`) with terminal-generated 6-digit Host-Owner Approval PINs, PKCE (`S256`), and strict permission ceilings.
 * **MCP Resources & Prompts Gateway**: Discover and read child-server resources, resource templates, and rendered prompts through `mws`, with cursor-based pagination and large-result artifact handling.
 * **Agent-Synthesized Workflows (`.mws/workflows/`)**: AI agents and developers can chain multiple MCP tools into named composite pipelines with argument templating and error halting.
 * **100% Dynamic & Zero-Env Architecture**: All configurations (databases, TypeScript projects, SSH hosts, Git repositories) are managed interactively and stored in `~/.mcp-win-stdio/`. No environment variables required in client configs!
@@ -19,10 +19,10 @@ Windows-optimized **Model Context Protocol (MCP)** suite and non-invasive CLI hu
 * **Cascading Clean Uninstallation (`mws uninstall self`)**: Dynamically discovers and purges all installed `mcp-win-stdio-*` distributions in one atomic batch.
 * **Git & GitHub MCP (46 Tools)**: Unified local Git management (init, remotes, restore, bookmarks, branches, commits, diffs) and remote GitHub CLI (`gh`) operations (PR checks, releases, issues, Actions).
 * **Excel MCP (44 Tools)**: High-speed Pandas queries, multi-column reconciliation with RapidFuzz, native Excel Tables, row/col mutations, formulas, cell merging, workbook diffing, and Office COM automation.
-* **Polyglot Database MCP (36 Tools)**: PostgreSQL & MySQL manager with dynamic connection hub, AST-validated safe read queries, transaction boundaries, schema diffing with migration SQL, Mermaid ERD, slow queries, and lock trees.
+* **Polyglot Database MCP (36 Tools)**: PostgreSQL & MySQL manager with dynamic connection hub, lexical-validated safe read queries, transaction boundaries, schema diffing with migration SQL, Mermaid ERD, slow queries, and lock trees.
 * **Multi-SSH MCP (34 Tools)**: Multi-host connection pooling, auto-discovery of `~/.ssh/config`, interactive PTY terminal sessions, detached background jobs, systemd/docker services, SFTP file management, and port forwarding.
 * **Word MCP (20 Tools)**: Multi-unit geometry (in, cm, mm, pt), multi-column layout, typography, document authoring, template placeholder filling, and native Word COM PDF export.
-* **Workspace Explorer MCP (14 Tools)**: Token-safe directory exploration, collapsible heavy folders, `.gitignore` resolution, in-file regex grep, RapidFuzz fuzzy search, and Python/TypeScript AST outlines.
+* **Workspace Explorer MCP (16 Tools)**: Token-safe directory exploration, collapsible heavy folders, `.gitignore` resolution, in-file regex grep, RapidFuzz fuzzy search, Python/TypeScript code outlines, and targeted file authoring (`replace_in_file`, `write_file`).
 * **TypeScript Diagnostic Watcher MCP (12 Tools)**: Persistent background `tsc` compiler watchers maintaining an in-memory cache for instantaneous (0ms latency) error inspection and actionable fixes.
 * **RAG MCP (11 Tools)**: Multi-collection web crawling, incremental local and remote repository indexing, hybrid BM25 + TF-IDF search, and knowledge trees.
 * **Excel & DB Power Engine MCP (9 Tools)**: Zero-context streaming from database to Excel, chunked upserting, in-memory cross-source SQL joins, automated reconciliation diffs, and migration planning.
@@ -40,10 +40,10 @@ Each server is published as an independent, lightweight PyPI package. Installing
 | **mws Server / Hub** | `pip install mcp-win-stdio` | Gateway | Unified On-Demand Gateway, Composite Workflow Engine, & Remote Tunnel Bridge |
 | **Git & GitHub** | `pip install mcp-win-stdio-git` | 46 | Local Git init/remotes/restore/bookmarks/branches, commits, diffs + GitHub PR checks, releases, issues, Actions |
 | **Excel** | `pip install mcp-win-stdio-excel` | 44 | Native Excel Tables, row/col mutations, formulas, Pandas queries, RapidFuzz reconciliation, Office COM automation |
-| **Database** | `pip install mcp-win-stdio-db` | 36 | PostgreSQL & MySQL dynamic pooling, AST query defense, cross-schema resolution, index audits, schema diffs, Mermaid ERD |
+| **Database** | `pip install mcp-win-stdio-db` | 36 | PostgreSQL & MySQL dynamic pooling, lexical query defense, cross-schema resolution, index audits, schema diffs, Mermaid ERD |
 | **SSH** | `pip install mcp-win-stdio-ssh` | 34 | Multi-host pooling, ~/.ssh/config discovery, PTY shells, background jobs, systemd/docker, package management, SFTP, tunnels |
 | **Word** | `pip install mcp-win-stdio-word` | 20 | Margins (in, cm, mm, pt), multi-column layout, typography, document authoring, template filling, Office COM PDF export |
-| **Explorer** | `pip install mcp-win-stdio-explorer` | 14 | Token-safe collapsible tree, .gitignore resolution, in-file grep, AST outlines, fuzzy search |
+| **Explorer** | `pip install mcp-win-stdio-explorer` | 16 | Token-safe collapsible tree, .gitignore resolution, in-file grep, AST outlines, fuzzy search, targeted edits (`replace_in_file`, `write_file`) |
 | **TypeScript** | `pip install mcp-win-stdio-tsc` | 12 | 0ms in-memory compilation error cache, dynamic multi-project config (add_project/use_project), multi-tsconfig watchers |
 | **RAG** | `pip install mcp-win-stdio-rag` | 11 | Web crawling, local/remote repo indexing, hybrid BM25 + TF-IDF search, context and collection lifecycle |
 | **Excel & DB** | `pip install mcp-win-stdio-excel-db` | 9 | Zero-context streaming, cross-joins, master reconciliation with tolerance, transactional migration plan, dry-run sync |
@@ -86,7 +86,7 @@ mws
 Output:
 ```text
 ============================================================================
-   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.5.4)
+   🚀  mcp-win-stdio — Windows Model Context Protocol Suite (v0.5.5)
 ============================================================================
 
  Single-Source Hub:      C:\Users\admin\.mcp-win-stdio
@@ -97,10 +97,10 @@ SERVER       STATUS           TOOLS    DESCRIPTION
 ----------------------------------------------------------------------------
 git          [Installed]      46       46 tools: Local Git branching, commits, GitHub PRs...
 excel        [Installed]      44       44 tools: Pandas queries, RapidFuzz reconciliation...
-db           [Installed]      36       36 tools: Polyglot multi-server pooling, AST defense...
+db           [Installed]      36       36 tools: Polyglot multi-server pooling, lexical defense...
 ssh          [Installed]      34       34 tools: Multi-host SSH pooling, PTY, SFTP...
 word         [Installed]      20       20 tools: Multi-unit margins, tables, typography...
-explorer     [Installed]      14       14 tools: Token-safe collapsible tree, AST grep...
+explorer     [Installed]      16       16 tools: Token-safe collapsible tree, grep, file edits...
 tsc          [Installed]      12       12 tools: Background tsc compiler watchers...
 rag          [Installed]      11       11 tools: Web crawling, local & remote repo indexing...
 excel-db     [Installed]      9        9 tools: Zero-context streaming, cross-joins...
@@ -124,13 +124,14 @@ mws guide
 mws guide gemini
 mws guide claude
 mws guide cursor
+mws guide openai       # ChatGPT Desktop & Codex shared MCP configuration
 ```
 
 Simply copy and paste the snippet provided into your AI IDE or desktop agent configuration.
 
 ---
 
-## 🌐 Remote Access & Cloudflare Tunnels (`mws tunnel`)
+## 🌐 Remote Access & Secure Tunnels (`mws tunnel`)
 
 Expose local Windows tools safely to web-based AI platforms like **Claude Web**, **ChatGPT Custom GPTs**, **Cursor**, and **MCP Inspector** without opening router ports or exposing static IP addresses.
 
@@ -156,8 +157,8 @@ mws tunnel --mode read_write
 ```
 
 For complete documentation on OAuth 2.0 flows, PKCE verification, and connecting web clients, see:
-👉 [Remote Access & Secure Cloudflare Tunneling Guide](docs/tunnel-and-remote-access.md)
-👉 [Security Architecture & Defense-in-Depth](docs/security-architecture.md)
+👉 [Remote Access & Secure Tunneling Guide (Cloudflare, ngrok, Direct HTTPS)](https://github.com/indala/mcp-win-stdio/blob/main/docs/tunnel-and-remote-access.md)
+👉 [Security Architecture & Defense-in-Depth](https://github.com/indala/mcp-win-stdio/blob/main/docs/security-architecture.md)
 
 ---
 
@@ -169,7 +170,7 @@ For complete documentation on OAuth 2.0 flows, PKCE verification, and connecting
 | :--- | :--- | :--- |
 | `mws` | — | Home dashboard showing suite health, supported agents, server statuses, and quick commands. |
 | `mws server` | `mws server` | Runs the Unified On-Demand Gateway MCP server (loads 233+ tools dynamically, anti-bloat). |
-| `mws tunnel` | `mws tunnel [--auth oauth\|bearer\|none] [--mode read_only\|read_write]` | Exposes local MWS tools to web agents via secure Cloudflare Tunnel with OAuth 2.0 PKCE. |
+| `mws tunnel` | `mws tunnel [--type cloudflare\|ngrok\|direct] [--auth oauth\|bearer\|none] [--mode read_only\|read_write]` | Exposes local MWS tools to web agents via Cloudflare Tunnel, ngrok (auto-login), or Direct HTTPS (`~/.mcp-win-stdio/certs/`) with OAuth 2.0 PKCE. |
 | `mws guide` | `mws guide [server] [client]` | **Universal Multi-Agent Guide**: copy-paste snippets, tool specs, and Windows config file paths. |
 | `mws workflow` | `mws workflow [list\|run\|view\|delete]` | **Composite Workflows**: execute multi-step tool pipelines in zero LLM turns. |
 | `mws run <server>` | `mws run tsc` | Launches an individual MCP server directly over stdio. |
@@ -186,14 +187,14 @@ For complete documentation on OAuth 2.0 flows, PKCE verification, and connecting
 ## 🛠️ Complete Server Inventory
 
 For full parameter details, schemas, and usage examples for all 233+ tools, refer to:
-👉 [Complete MCP Servers & Tools Reference](docs/tools-reference.md)
+👉 [Complete MCP Servers & Tools Reference](https://github.com/indala/mcp-win-stdio/blob/main/docs/tools-reference.md)
 
 * **Git & GitHub (46 tools)**: Comprehensive local git state machine, commits, branches, stashes, diffs, blame, and full GitHub CLI actions (PRs, releases, issues).
 * **Excel (44 tools)**: Pandas dataframe queries, RapidFuzz 3-tab reconciliation, openpyxl styling, charts, and native Excel COM PDF export.
-* **Polyglot Database (36 tools)**: PostgreSQL & MySQL pools, AST-guarded `read_query`, transaction isolation, index audits, schema diffs with migration scripts.
+* **Polyglot Database (36 tools)**: PostgreSQL & MySQL pools, lexical-guarded `read_query`, transaction isolation, index audits, schema diffs with migration scripts.
 * **Multi-SSH (34 tools)**: Connection pooling, `~/.ssh/config` parsing, interactive PTY terminal emulation, background jobs, SFTP file transfer.
 * **Word (20 tools)**: Physical margin geometry (in, cm, mm, pt), typography, tables, template placeholder substitution, and COM PDF export.
-* **Workspace Explorer (14 tools)**: Collapsible heavy trees (`node_modules`), in-file regex grep, RapidFuzz filename search, and AST code outline.
+* **Workspace Explorer (16 tools)**: Collapsible heavy trees (`node_modules`), in-file regex grep, RapidFuzz filename search, code outlines, and targeted file edits (`replace_in_file`, `write_file`).
 * **TypeScript (12 tools)**: Instant 0ms cached error queries, multi-tsconfig compilation watchers, and suggested diagnostic fixes.
 * **RAG (11 tools)**: Documentation web crawling, local/remote codebase chunking, and hybrid BM25 + TF-IDF knowledge base querying.
 * **Excel & DB Power Engine (9 tools)**: Zero-context streaming from SQL to Excel, cross-source joins, master reconciliation, and migration plans.
@@ -216,12 +217,12 @@ Drop any custom standalone Python MCP script into:
 
 ## 📚 Detailed Documentation Index
 
-* 🌐 [Remote Access & Secure Cloudflare Tunneling](docs/tunnel-and-remote-access.md)
-* 🛡️ [Security Architecture & Defense-in-Depth](docs/security-architecture.md)
-* 📖 [Complete MCP Servers & Tools Reference](docs/tools-reference.md)
-* 🤖 [Repository Agent Guidelines (AGENTS.md)](AGENTS.md)
-* 🤝 [Contributing Guide](CONTRIBUTING.md)
-* 🔒 [Security Vulnerability Reporting Policy](SECURITY.md)
+* 🌐 [Remote Access & Secure Tunneling (Cloudflare, ngrok, Direct HTTPS)](https://github.com/indala/mcp-win-stdio/blob/main/docs/tunnel-and-remote-access.md)
+* 🛡️ [Security Architecture & Defense-in-Depth](https://github.com/indala/mcp-win-stdio/blob/main/docs/security-architecture.md)
+* 📖 [Complete MCP Servers & Tools Reference](https://github.com/indala/mcp-win-stdio/blob/main/docs/tools-reference.md)
+* 🤖 [Repository Agent Guidelines (AGENTS.md)](https://github.com/indala/mcp-win-stdio/blob/main/AGENTS.md)
+* 🤝 [Contributing Guide](https://github.com/indala/mcp-win-stdio/blob/main/CONTRIBUTING.md)
+* 🔒 [Security Vulnerability Reporting Policy](https://github.com/indala/mcp-win-stdio/blob/main/SECURITY.md)
 
 ---
 

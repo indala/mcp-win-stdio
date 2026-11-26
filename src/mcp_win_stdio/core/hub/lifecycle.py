@@ -4,6 +4,7 @@ Enforces explicit separation between OS spawn (STARTING), protocol handshake (IN
 and readiness (HEALTHY), with strict failure semantics and event notifications.
 """
 
+import collections
 import logging
 import queue
 import subprocess
@@ -12,6 +13,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from mcp_win_stdio.core.hub.models import LifecycleEvent, ProcessInstanceInfo, ServerState
+from mcp_win_stdio.core.hub.secrets import REDACTED_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +72,44 @@ class ProcessInstance:
         self.last_error: Optional[str] = None
         self.response_queues: Dict[Any, queue.Queue] = {}
         self.reader_thread: Optional[threading.Thread] = None
+        self.stderr_thread: Optional[threading.Thread] = None
+        self.recent_stderr: collections.deque[str] = collections.deque(maxlen=100)
+        self._secret_values: List[str] = []
         self.job_object: Optional[Any] = None
 
         self._listeners: List[Callable[[LifecycleEvent], None]] = []
         if on_event:
             self._listeners.append(on_event)
+
+    def set_secret_values(self, values: List[str]) -> None:
+        """Register resolved secret values for redaction in captured stderr."""
+        with self._lock:
+            self._secret_values = sorted({v for v in values if v}, key=len, reverse=True)
+
+    def _redact_known_secrets(self, text: str) -> str:
+        with self._lock:
+            secrets_copy = list(self._secret_values)
+        for sec in secrets_copy:
+            if sec in text:
+                text = text.replace(sec, REDACTED_MARKER)
+        return text
+
+    def append_stderr_line(self, line: str) -> None:
+        """Append a bounded line to the stderr ring buffer thread-safely."""
+        line = self._redact_known_secrets(line)
+        if len(line) > 4096:
+            line = line[-4096:]
+        with self._lock:
+            self.recent_stderr.append(line)
+
+    def get_recent_stderr(self, max_chars: int = 500) -> str:
+        """Return the most recent stderr output from the bounded ring buffer, truncated to max_chars."""
+        with self._lock:
+            combined = "".join(self.recent_stderr).strip()
+        combined = self._redact_known_secrets(combined)
+        if len(combined) > max_chars:
+            return combined[-max_chars:]
+        return combined
 
     def register_response_queue(self, req_id: Any, q: queue.Queue) -> None:
         """Register a response queue for a pending JSON-RPC request."""

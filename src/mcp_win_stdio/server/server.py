@@ -195,10 +195,28 @@ def use_server(server: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
 
 def _proxy_server_capability(server: str, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     clean_server = server.lower().strip()
-    if clean_server not in discover_available_servers():
+    available = discover_available_servers()
+    if clean_server not in available:
+        if clean_server.replace("_", "-") in available:
+            clean_server = clean_server.replace("_", "-")
+        elif clean_server.replace("-", "_") in available:
+            clean_server = clean_server.replace("-", "_")
+        else:
+            return {
+                "isError": True,
+                "error": f"Unknown server '{server}'. Use list_servers to see available servers.",
+            }
+
+    # Enforce scope and capability authorization at the target-server boundary
+    from mcp_win_stdio.core.permissions import check_capability_permission
+
+    permitted, perm_err = check_capability_permission(clean_server, method)
+    if not permitted:
         return {
             "isError": True,
-            "error": f"Unknown server '{server}'. Use list_servers to see available servers.",
+            "server": clean_server,
+            "capability": method,
+            "error": perm_err,
         }
 
     try:
@@ -319,7 +337,8 @@ def manage_context(
       - 'push':          Push a new temporary value onto stack (preserves previous value for later pop).
       - 'pop':           Pop active value from stack, restoring previous context.
       - 'clear':         Clear a specific context stack or all stacks.
-      - 'list_sessions': List all active client sessions and their idle durations.
+      - 'session_info':  Inspect the calling client's own active session and idle duration.
+      - 'list_sessions': Alias for 'session_info' (intentionally scoped to the caller's session to prevent cross-client session enumeration).
 
     Supported Types:
       - 'server':        Active MCP server namespace (e.g. 'db', 'excel', 'ssh', 'git', 'arch').
@@ -332,11 +351,12 @@ def manage_context(
     sid = _resolve_session_id(ctx)
     session = GLOBAL_CONTEXT.get_session(sid)
 
-    if act == "list_sessions":
+    if act in ("list_sessions", "session_info"):
         now = time.time()
         idle = now - session.last_accessed_at
         return {
             "status": "success",
+            "scope": "caller_only",
             "sessions": [
                 {
                     "session_id": session.session_id,
@@ -399,7 +419,7 @@ def manage_context(
     else:
         return {
             "status": "error",
-            "error": f"Unknown action '{action}'. Supported actions: 'get', 'set', 'push', 'pop', 'clear', 'list_sessions'.",
+            "error": f"Unknown action '{action}'. Supported actions: 'get', 'set', 'push', 'pop', 'clear', 'session_info', 'list_sessions'.",
         }
 
 
@@ -957,6 +977,13 @@ def delete_workflow(name: str, scope: Optional[str] = None) -> Dict[str, Any]:
 
 
 def main():
+    try:
+        from mcp_win_stdio.core.artifacts import maybe_prune_expired_artifacts
+
+        maybe_prune_expired_artifacts()
+        GLOBAL_POOL.start_background_reaper()
+    except Exception:
+        pass
     mcp.run()
 
 

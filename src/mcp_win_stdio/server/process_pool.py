@@ -4,15 +4,18 @@ Manages lazy-spawning, health-monitoring, and idle-reaping of child MCP server p
 """
 
 import atexit
+import collections
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mcp_win_stdio.core.config import BREAKER_STATE_FILE
+from mcp_win_stdio.core.hub.secrets import redact_sensitive_data
 
 from .config import DEFAULT_IDLE_TIMEOUT_SECONDS, MAX_RESPONSE_CHARS
 from .discovery import discover_available_servers
@@ -65,6 +68,48 @@ class MCPProcess:
         self.pid = self.proc.pid
         self._initialized = False
 
+        # Continuously drain stderr into bounded ring buffer to prevent pipe deadlock
+        self._stderr_buffer: collections.deque[str] = collections.deque(maxlen=100)
+        self._stderr_lock = threading.Lock()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            name=f"mws-stderr-{self.name}-{self.pid}",
+            daemon=True,
+        )
+        self._stderr_thread.start()
+
+    def _drain_stderr(self) -> None:
+        """Continuously drain child stderr pipe into a bounded, redacted ring buffer to prevent OS pipe deadlock."""
+        max_entry_chars = 4096
+        try:
+            if self.proc.stderr:
+                while True:
+                    try:
+                        line = self.proc.stderr.readline(65536)
+                    except (ValueError, OSError):
+                        break
+                    if not line:
+                        break
+                    try:
+                        redacted = redact_sensitive_data(line)
+                    except Exception:
+                        redacted = "[stderr redaction failed]\n"
+                    if len(redacted) > max_entry_chars:
+                        redacted = redacted[-max_entry_chars:]
+                    with self._stderr_lock:
+                        self._stderr_buffer.append(redacted)
+        except Exception:
+            pass
+
+    def get_recent_stderr(self, max_chars: int = 500) -> str:
+        """Return the most recent redacted stderr output from the ring buffer, truncated to max_chars."""
+        with self._stderr_lock:
+            combined = "".join(self._stderr_buffer).strip()
+        redacted = redact_sensitive_data(combined)
+        if len(redacted) > max_chars:
+            return redacted[-max_chars:]
+        return redacted
+
     def is_alive(self) -> bool:
         """Check if process is still running."""
         return self.proc.poll() is None
@@ -100,6 +145,21 @@ class MCPProcess:
                 self.proc.kill()
             except Exception:
                 pass
+
+        # Safely close open pipes to unblock reader threads
+        for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            if pipe and not getattr(pipe, "closed", True):
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+        if (
+            getattr(self, "_stderr_thread", None) is not None
+            and self._stderr_thread.is_alive()
+            and threading.current_thread() is not self._stderr_thread
+        ):
+            self._stderr_thread.join(timeout=1.0)
 
     def _bytes_available(self) -> int:
         """Non-blocking inspection of pending bytes on child stdout pipe (Windows-safe)."""
@@ -151,13 +211,9 @@ class MCPProcess:
                 while time.time() - start_time < timeout:
                     if self._bytes_available() == 0:
                         if not self.is_alive():
-                            stderr_out = ""
-                            try:
-                                stderr_out = self.proc.stderr.read()
-                            except Exception:
-                                pass
+                            stderr_out = self.get_recent_stderr(500)
                             raise RuntimeError(
-                                f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out[:500]}"
+                                f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out}"
                             )
                         time.sleep(0.01)
                         continue
@@ -165,13 +221,9 @@ class MCPProcess:
                     line = self.proc.stdout.readline()
                     if not line:
                         if not self.is_alive():
-                            stderr_out = ""
-                            try:
-                                stderr_out = self.proc.stderr.read()
-                            except Exception:
-                                pass
+                            stderr_out = self.get_recent_stderr(500)
                             raise RuntimeError(
-                                f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out[:500]}"
+                                f"MCP server '{self.name}' terminated unexpectedly. Stderr: {stderr_out}"
                             )
                         time.sleep(0.01)
                         continue
@@ -194,8 +246,10 @@ class MCPProcess:
 
                 # Reached timeout without matching response
                 should_kill = True
+                stderr_diag = self.get_recent_stderr(500)
+                stderr_suffix = f" Stderr: {stderr_diag}" if stderr_diag else ""
                 kill_reason = (
-                    f"Timed out waiting for response from '{self.name}' on method '{method}' after {timeout}s. "
+                    f"Timed out waiting for response from '{self.name}' on method '{method}' after {timeout}s.{stderr_suffix} "
                     "Child process tree terminated to prevent pipe desynchronization."
                 )
 
@@ -315,20 +369,30 @@ class CircuitBreaker:
     Cooldown: 30 seconds before allowing a single probe attempt.
     """
 
-    def __init__(self, failure_threshold: int = 3, cooldown_seconds: float = 30.0):
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        cooldown_seconds: float = 30.0,
+        state_file: Optional[Path] = None,
+    ):
         self.failure_threshold = failure_threshold
         self.cooldown_seconds = cooldown_seconds
+        self._state_file: Optional[Path] = Path(state_file) if state_file is not None else None
         self.consecutive_failures: Dict[str, int] = {}
         self.opened_at: Dict[str, float] = {}
         self.probing: Dict[str, bool] = {}
         self._lock = threading.RLock()
         self._load_persisted_state()
 
+    def _get_state_file(self) -> Path:
+        return self._state_file if self._state_file is not None else BREAKER_STATE_FILE
+
     def _load_persisted_state(self) -> None:
         """Load breaker state persisted by server process."""
-        if BREAKER_STATE_FILE.exists():
+        state_file = self._get_state_file()
+        if state_file.exists():
             try:
-                data = json.loads(BREAKER_STATE_FILE.read_text(encoding="utf-8"))
+                data = json.loads(state_file.read_text(encoding="utf-8"))
                 self.consecutive_failures = data.get("failures", {})
                 self.opened_at = data.get("opened_at", {})
             except Exception:
@@ -336,16 +400,17 @@ class CircuitBreaker:
 
     def _persist_state(self) -> None:
         """Persist breaker state atomically for CLI (e.g. mws doctor) inspection."""
+        state_file = self._get_state_file()
         try:
-            BREAKER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            state_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "failures": self.consecutive_failures,
                 "opened_at": self.opened_at,
                 "updated_at": time.time(),
             }
-            tmp = BREAKER_STATE_FILE.with_suffix(".tmp")
+            tmp = state_file.with_suffix(".tmp")
             tmp.write_text(json.dumps(data), encoding="utf-8")
-            tmp.replace(BREAKER_STATE_FILE)
+            tmp.replace(state_file)
         except Exception:
             pass
 
@@ -419,7 +484,38 @@ class ProcessPool:
         self._processes: Dict[str, MCPProcess] = {}
         self._pool_lock = threading.Lock()
         self.circuit_breaker = CIRCUIT_BREAKER
+        self._reaper_thread: Optional[threading.Thread] = None
+        self._reaper_stop_event = threading.Event()
         atexit.register(self.shutdown_all)
+
+    def start_background_reaper(self, check_interval_seconds: float = 60.0) -> None:
+        """Start a background daemon thread that periodically reaps idle processes and prunes artifacts."""
+        with self._pool_lock:
+            if self._reaper_thread and self._reaper_thread.is_alive():
+                return
+            self._reaper_stop_event.clear()
+
+            def _reap_loop():
+                while not self._reaper_stop_event.wait(timeout=check_interval_seconds):
+                    try:
+                        self.reap_idle()
+                    except Exception:
+                        pass
+
+            self._reaper_thread = threading.Thread(
+                target=_reap_loop,
+                name="mws-process-pool-reaper",
+                daemon=True,
+            )
+            self._reaper_thread.start()
+
+    def stop_background_reaper(self) -> None:
+        """Stop the background reaper thread."""
+        self._reaper_stop_event.set()
+        thread = self._reaper_thread
+        if thread and thread.is_alive() and threading.current_thread() is not thread:
+            thread.join(timeout=1.0)
+            self._reaper_thread = None
 
     def get_or_spawn(self, server_name: str) -> MCPProcess:
         """Get an existing warm MCP process or spawn a new one on demand."""
@@ -480,6 +576,8 @@ class ProcessPool:
 
     def reap_idle(self, max_idle_seconds: float = DEFAULT_IDLE_TIMEOUT_SECONDS) -> List[str]:
         """Terminate processes that have been idle longer than max_idle_seconds."""
+        from mcp_win_stdio.core.artifacts import maybe_prune_expired_artifacts
+
         now = time.time()
         reaped = []
         with self._pool_lock:
@@ -488,6 +586,7 @@ class ProcessPool:
                     proc.terminate()
                     self._processes.pop(name, None)
                     reaped.append(name)
+        maybe_prune_expired_artifacts()
         return reaped
 
     def get_active_sessions(self) -> List[Dict[str, Any]]:
@@ -510,6 +609,7 @@ class ProcessPool:
 
     def shutdown_all(self) -> None:
         """Terminate all active children."""
+        self.stop_background_reaper()
         with self._pool_lock:
             for proc in self._processes.values():
                 try:

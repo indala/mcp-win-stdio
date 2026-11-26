@@ -47,12 +47,11 @@ pip install mcp-win-stdio-excel
 
 ---
 
-## 🚀 One-Command Claude Setup
+## 🚀 Non-Invasive Configuration (`mws guide`)
 
 ```powershell
-mws setup excel
-# or:
-mws add excel
+# Print client-ready JSON snippets for Claude, Gemini, Cursor, VS Code, etc.:
+mws guide excel
 ```
 
 ### Manual Configuration Example
@@ -73,9 +72,9 @@ In `%APPDATA%\Claude\claude_desktop_config.json`:
 ## 📖 CLI Commands & Interactive Guide
 
 ```powershell
+mws guide excel     # Print client configuration snippets
 mws excel guide     # Complete tool reference & prompt recipes
 mws excel doctor    # Verify Excel COM automation, Pandas, and OpenPyXL
-mws excel setup     # Configure Claude Desktop / Claude Code
 mws excel run       # Launch server over stdio
 ```
 

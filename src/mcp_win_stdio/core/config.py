@@ -16,6 +16,7 @@ PLUGINS_DIR = USER_DIR / "plugins"
 LOGS_DIR = USER_DIR / "logs"
 EXPORTS_DIR = USER_DIR / "exports"
 KEYS_DIR = USER_DIR / "keys"
+CERTS_DIR = USER_DIR / "certs"
 WORKFLOWS_DIR = USER_DIR / "workflows"
 CONFIG_FILE = USER_DIR / "config.json"
 BREAKER_STATE_FILE = USER_DIR / "circuit_breaker.json"
@@ -31,7 +32,7 @@ HUB_FILE_JSON = USER_DIR / "hub.json"
 SERVERS_DIR = USER_DIR / "servers"
 
 DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
-    "version": "0.5.4",
+    "version": "0.5.5",
     "mode": "read_write",              # "read_write" | "read_only"
     "safe_writes": True,               # blocks naked UPDATE/DELETE without WHERE and TRUNCATE without allow_unfiltered
     "require_confirm_on_prod": False,  # optional user prompt before executing on prod env (default false)
@@ -39,18 +40,23 @@ DEFAULT_SYSTEM_CONFIG: Dict[str, Any] = {
     "log_level": "INFO",
     "installed_servers": {},
     "tunnel": {
+        "provider": "cloudflare",      # "cloudflare" | "ngrok" | "direct"
         "mode": "read_only",           # default remote security mode
         "auth_mode": "bearer",         # "bearer" | "none" | "oauth"
         "port": 8080,                  # local bridge port
         "token": None,                 # optional static bearer token; if None, random token is generated
         "host": "127.0.0.1",
+        "domain": None,                # optional custom domain for ngrok (--domain)
+        "public_url": None,            # optional explicit public URL for direct mode
+        "ssl_certfile": None,          # optional TLS cert file for direct HTTPS mode
+        "ssl_keyfile": None,           # optional TLS key file for direct HTTPS mode
     },
 }
 
 
 def ensure_workspace_dirs() -> Dict[str, Path]:
     """Ensure all core directories exist and return paths."""
-    for d in (USER_DIR, PLUGINS_DIR, LOGS_DIR, EXPORTS_DIR, KEYS_DIR, WORKFLOWS_DIR, SERVERS_DIR):
+    for d in (USER_DIR, PLUGINS_DIR, LOGS_DIR, EXPORTS_DIR, KEYS_DIR, CERTS_DIR, WORKFLOWS_DIR, SERVERS_DIR):
         d.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -61,6 +67,7 @@ def ensure_workspace_dirs() -> Dict[str, Path]:
         "logs": LOGS_DIR,
         "exports": EXPORTS_DIR,
         "keys": KEYS_DIR,
+        "certs": CERTS_DIR,
         "config": CONFIG_FILE,
     }
 

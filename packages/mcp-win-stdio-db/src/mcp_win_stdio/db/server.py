@@ -177,11 +177,92 @@ def _clean_sql_comments(sql: str) -> str:
     return sql.strip()
 
 
+def _strip_cte_prefix(sql: str) -> Tuple[Optional[str], str]:
+    """
+    If sql begins with a CTE (WITH ...), strips the CTE definitions
+    and returns (cte_prefix, main_statement).
+    Otherwise returns (None, sql).
+    """
+    cleaned = _clean_sql_comments(sql)
+    if not re.match(r"^\s*WITH\b", cleaned, re.IGNORECASE):
+        return None, cleaned
+
+    in_single_quote = False
+    in_double_quote = False
+    depth = 0
+    i = 0
+    n = len(cleaned)
+    has_seen_open_paren = False
+
+    while i < n:
+        ch = cleaned[i]
+        if in_single_quote:
+            if ch == "'":
+                if i + 1 < n and cleaned[i + 1] == "'":
+                    i += 1
+                else:
+                    in_single_quote = False
+        elif in_double_quote:
+            if ch == '"':
+                if i + 1 < n and cleaned[i + 1] == '"':
+                    i += 1
+                else:
+                    in_double_quote = False
+        else:
+            if ch == "'":
+                in_single_quote = True
+            elif ch == '"':
+                in_double_quote = True
+            elif ch == "(":
+                depth += 1
+                has_seen_open_paren = True
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and has_seen_open_paren:
+                    rest = cleaned[i + 1:].lstrip()
+                    if rest.startswith(","):
+                        i += 1
+                        continue
+                    match = re.match(r"^(DELETE|UPDATE|INSERT|SELECT|TRUNCATE)\b", rest, re.IGNORECASE)
+                    if match:
+                        cte_part = cleaned[:i + 1].strip()
+                        main_part = rest.strip()
+                        return cte_part, main_part
+        i += 1
+
+    return None, cleaned
+
+
+MODIFYING_KEYWORDS_PATTERN = re.compile(
+    r"\b(DELETE\s+FROM|UPDATE\s+|INSERT\s+INTO|MERGE\s+INTO|TRUNCATE\s+|DROP\s+|ALTER\s+)\b",
+    re.IGNORECASE,
+)
+
+
+def _contains_modifying_verbs(sql: str) -> bool:
+    """Check if SQL text outside string literals contains data-modifying keywords."""
+    cleaned = _clean_sql_comments(sql)
+    no_strings = re.sub(r"'(?:''|[^'])*'", "''", cleaned)
+    no_strings = re.sub(r'"(?:""|[^"])*"', '""', no_strings)
+    return bool(MODIFYING_KEYWORDS_PATTERN.search(no_strings))
+
+
 def _parse_modifying_statement(sql: str) -> Optional[Dict[str, Any]]:
     cleaned = _clean_sql_comments(sql)
+    cte_prefix, target_stmt = _strip_cte_prefix(cleaned)
+
+    # 1. Detect data-modifying CTEs (e.g. WITH d AS (DELETE FROM ... RETURNING ...))
+    if cte_prefix and _contains_modifying_verbs(cte_prefix):
+        return {
+            "operation": "DATA_MODIFYING_CTE",
+            "table": "unknown",
+            "where": None,
+            "cte_prefix": cte_prefix,
+        }
+
     del_match = re.search(
         r"^\s*DELETE\s+FROM\s+(?:ONLY\s+)?([`\"\w\.]+)(?:\s+(?:AS\s+)?([`\"\w]+))?(?:\s+WHERE\s+([\s\S]+?))?(?:\s+RETURNING\s+[\s\S]+)?\s*;?$",
-        cleaned,
+        target_stmt,
         re.IGNORECASE,
     )
     if del_match:
@@ -195,11 +276,12 @@ def _parse_modifying_statement(sql: str) -> Optional[Dict[str, Any]]:
             "table": table,
             "alias": alias,
             "where": where.strip() if where else None,
+            "cte_prefix": cte_prefix,
         }
 
     upd_match = re.search(
         r"^\s*UPDATE\s+(?:ONLY\s+)?([`\"\w\.]+)(?:\s+(?:AS\s+)?([`\"\w]+))?\s+SET\s+[\s\S]+?(?:\s+WHERE\s+([\s\S]+?))?(?:\s+RETURNING\s+[\s\S]+)?\s*;?$",
-        cleaned,
+        target_stmt,
         re.IGNORECASE,
     )
     if upd_match:
@@ -213,11 +295,12 @@ def _parse_modifying_statement(sql: str) -> Optional[Dict[str, Any]]:
             "table": table,
             "alias": alias,
             "where": where.strip() if where else None,
+            "cte_prefix": cte_prefix,
         }
 
     trunc_match = re.search(
         r"^\s*TRUNCATE\s+(?:TABLE\s+)?([`\"\w\.,\s]+?)(?:\s+(?:CASCADE|RESTRICT))?\s*;?$",
-        cleaned,
+        target_stmt,
         re.IGNORECASE,
     )
     if trunc_match:
@@ -226,7 +309,18 @@ def _parse_modifying_statement(sql: str) -> Optional[Dict[str, Any]]:
             "table": trunc_match.group(1).strip(),
             "alias": None,
             "where": None,
+            "cte_prefix": cte_prefix,
         }
+
+    # Conservative fail-closed fallback: if query contains CTE and modifying verbs anywhere
+    if cte_prefix or re.match(r"^\s*WITH\b", cleaned, re.IGNORECASE):
+        if _contains_modifying_verbs(cleaned):
+            return {
+                "operation": "UNVERIFIED_CTE_MUTATION",
+                "table": "unknown",
+                "where": None,
+                "cte_prefix": cte_prefix,
+            }
 
     return None
 
@@ -250,7 +344,104 @@ def _check_write_policy(parsed: Optional[Dict[str, Any]], allow_unfiltered: bool
             f"Safety Guardrail: TRUNCATE is blocked on table '{table}' without explicit confirmation. "
             "Pass allow_unfiltered=True if you really intend to truncate."
         )
+    if op in ("DATA_MODIFYING_CTE", "UNVERIFIED_CTE_MUTATION") and not allow_unfiltered:
+        return (
+            f"Safety Guardrail: Data-modifying or unverified CTE statement ({op}) cannot be safely "
+            "verified for WHERE clause boundaries and does not support automatic undo snapshots. "
+            "Pass allow_unfiltered=True to confirm and execute."
+        )
     return None
+
+
+def _mask_sql_literals_and_comments(sql: str) -> str:
+    """Replace SQL comments and single-quoted string literals with placeholders for safe keyword matching."""
+    cleaned = _clean_sql_comments(sql)
+    out: List[str] = []
+    i = 0
+    n = len(cleaned)
+    in_sq = False
+    while i < n:
+        ch = cleaned[i]
+        if in_sq:
+            if ch == "'":
+                if i + 1 < n and cleaned[i + 1] == "'":
+                    i += 2
+                    continue
+                in_sq = False
+                out.append("'")
+            i += 1
+        else:
+            if ch == "'":
+                in_sq = True
+                out.append("'")
+            else:
+                out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+def _classify_destructive_ddl(sql: str) -> Optional[Dict[str, str]]:
+    """
+    Conservatively classify destructive DDL and ambiguous/dynamic SQL blocks.
+    Returns metadata dict with 'kind' and 'impact' if destructive/ambiguous, else None.
+    """
+    cleaned = _clean_sql_comments(sql)
+    if not cleaned:
+        return None
+
+    # Conservative fail-closed check for DO blocks and dynamic SQL (EXECUTE ...)
+    if re.match(r"^\s*DO\b", cleaned, re.IGNORECASE) or re.search(
+        r"\bEXECUTE\s+(?:IMMEDIATE\b|['\"(])", cleaned, re.IGNORECASE
+    ):
+        return {
+            "kind": "DYNAMIC_OR_AMBIGUOUS_DDL",
+            "impact": "DO blocks and dynamic EXECUTE statements cannot be statically verified and may perform destructive DDL or unfiltered writes.",
+        }
+
+    masked = _mask_sql_literals_and_comments(cleaned)
+
+    if re.search(r"\bDROP\s+DATABASE\b", masked, re.IGNORECASE):
+        return {
+            "kind": "DROP_DATABASE",
+            "impact": "Drops the entire database and all contained schemas, tables, and data.",
+        }
+    if re.search(r"\bDROP\s+SCHEMA\b", masked, re.IGNORECASE):
+        return {
+            "kind": "DROP_SCHEMA",
+            "impact": "Drops the schema and potentially all contained tables, views, and functions.",
+        }
+    if re.search(r"\bDROP\s+(?:TEMPORARY\s+)?TABLE\b", masked, re.IGNORECASE):
+        return {
+            "kind": "DROP_TABLE",
+            "impact": "Drops the table along with its rows, indexes, constraints, and triggers.",
+        }
+    if re.search(
+        r"\bALTER\s+TABLE\b[\s\S]*?\bDROP\s+(?!CONSTRAINT\b|INDEX\b|KEY\b|PRIMARY\b|FOREIGN\b|CHECK\b|DEFAULT\b|NOT\s+NULL\b|TRIGGER\b|POLICY\b|RULE\b)(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?[`\"\w\.]+",
+        masked,
+        re.IGNORECASE,
+    ):
+        return {
+            "kind": "DROP_COLUMN",
+            "impact": "Removes the column from SQL access and discards its stored values.",
+        }
+    if re.search(r"\bTRUNCATE\s+(?:TABLE\s+)?", masked, re.IGNORECASE):
+        return {
+            "kind": "TRUNCATE",
+            "impact": "Removes all rows from the table(s) without per-row before-image snapshots.",
+        }
+    return None
+
+
+def _is_ddl_statement(sql: str) -> bool:
+    """Return True if the statement is a DDL or DO block."""
+    cleaned = _clean_sql_comments(sql)
+    return bool(
+        re.match(
+            r"^\s*(?:CREATE|ALTER|DROP|TRUNCATE|RENAME|DO|COMMENT|GRANT|REVOKE)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _capture_before_image(
@@ -259,6 +450,10 @@ def _capture_before_image(
     engine: str,
     limit: int = 100,
 ) -> Optional[Dict[str, Any]]:
+    # Never execute or capture before-images on CTE statements to prevent sequence advancement or volatile side-effects
+    if parsed.get("cte_prefix") or parsed.get("operation") in ("DATA_MODIFYING_CTE", "UNVERIFIED_CTE_MUTATION"):
+        return None
+
     op = parsed.get("operation")
     if op not in ("UPDATE", "DELETE"):
         return None
@@ -660,8 +855,14 @@ def _format_db_error(
             "42703": "Undefined column: Column does not exist in table. Use describe_table to inspect available columns.",
             "42601": "Syntax error in SQL statement. Check commas, quotes, and keyword order.",
             "25P02": "Current transaction is aborted: Previous statement failed in this transaction. Rollback before executing further commands.",
-            "57014": "Query canceled due to statement timeout.",
+            "55P03": "Lock timeout: Statement aborted while waiting to acquire a lock.",
+            "57014": "Query canceled (statement timeout or external cancellation).",
         }
+        err_text_lower = f"{error_payload.get('message', '')} {getattr(e, 'pgerror', '') or ''}".lower()
+        if code == "55P03" and "lock timeout" in err_text_lower:
+            error_payload["timeoutKind"] = "lock_timeout"
+        elif code == "57014" and "statement timeout" in err_text_lower:
+            error_payload["timeoutKind"] = "statement_timeout"
         if code and code in suggestions:
             error_payload["suggestion"] = suggestions[code]
 
@@ -678,7 +879,10 @@ def _format_db_error(
             1146: "Table doesn't exist. Check database name and table spelling with list_schemas.",
             1054: "Unknown column: Column does not exist in table. Use describe_table to check column names.",
             1064: "Syntax error in SQL query.",
+            1205: "Lock wait timeout exceeded while waiting for a lock.",
         }
+        if code == 1205:
+            error_payload["timeoutKind"] = "lock_timeout"
         if code and code in mysql_suggestions:
             error_payload["suggestion"] = mysql_suggestions[code]
 
@@ -2469,6 +2673,12 @@ def execute_query(
     confirm: bool = False,
     allow_unfiltered: bool = False,
     allowUnfiltered: Optional[bool] = None,
+    allow_destructive_ddl: bool = False,
+    allowDestructiveDdl: Optional[bool] = None,
+    lock_timeout_ms: Optional[int] = None,
+    lockTimeoutMs: Optional[int] = None,
+    statement_timeout_ms: Optional[int] = None,
+    statementTimeoutMs: Optional[int] = None,
     connection: Optional[str] = None,
     server: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -2476,26 +2686,37 @@ def execute_query(
     Execute INSERT, UPDATE, DELETE, or DDL statement(s).
     Supports transactional multi-statement batch execution with statement-by-statement progress,
     exact line/statement failure diagnostics, dry_run rollback support with before-image row preview,
-    safety guardrails against naked updates/deletes and prod truncates, and statement audit logging with undo support.
+    safety guardrails against naked updates/deletes and destructive DDL, and statement audit logging with undo support.
 
     Safety Guards:
     - Connections configured as mode='read_only' automatically block all write statements.
     - Connections flagged with env='prod' require explicit confirm=True for non-dry-run writes.
-    - Naked UPDATE or DELETE statements without a WHERE clause and TRUNCATE on prod require allow_unfiltered=True.
+    - Naked UPDATE or DELETE statements without a WHERE clause and TRUNCATE require allow_unfiltered=True.
+    - Destructive DDL (DROP COLUMN/TABLE/SCHEMA/DATABASE, TRUNCATE, DO/dynamic SQL) fails closed unless allow_destructive_ddl=True.
+    - Destructive or non-rollbackable DDL is validated without executing against the target DB when dry_run=True.
 
     Args:
         sql: SQL statement or semicolon-separated batch (e.g. CREATE TABLE ...; ALTER TABLE ...;).
         params: Optional parameter list for single statements (e.g. [123, "active"]).
-        dry_run: If True, executes inside a transaction and rolls back while previewing affected rows (default False).
+        dry_run: If True, simulates DML in a rolled-back transaction or validates destructive/non-rollbackable DDL without executing (default False).
         dryRun: CamelCase alias for dry_run.
         confirm: Must be True to execute live non-dry-run writes on 'prod' environment connections.
-        allow_unfiltered: Set to True to intentionally permit table-wide UPDATE/DELETE without WHERE or TRUNCATE on prod.
+        allow_unfiltered: Set to True to intentionally permit table-wide UPDATE/DELETE without WHERE or TRUNCATE.
         allowUnfiltered: CamelCase alias for allow_unfiltered.
+        allow_destructive_ddl: Set to True to intentionally permit destructive DDL (DROP COLUMN/TABLE/SCHEMA/DATABASE, TRUNCATE, DO/dynamic SQL).
+        allowDestructiveDdl: CamelCase alias for allow_destructive_ddl.
+        lock_timeout_ms: Lock acquisition timeout in milliseconds for DDL (default 5000ms for DDL).
+        lockTimeoutMs: CamelCase alias for lock_timeout_ms.
+        statement_timeout_ms: Statement execution timeout in milliseconds (PostgreSQL only; default 30000ms for PostgreSQL DDL).
+        statementTimeoutMs: CamelCase alias for statement_timeout_ms.
         connection: Connection name to target (defaults to active connection).
         server: Optional server or connection alias.
     """
     effective_dry_run = dry_run or (dryRun is True)
     effective_allow_unfiltered = allow_unfiltered or (allowUnfiltered is True)
+    effective_allow_destructive_ddl = allow_destructive_ddl or (allowDestructiveDdl is True)
+    raw_lock_ms = lock_timeout_ms if lock_timeout_ms is not None else lockTimeoutMs
+    raw_stmt_ms = statement_timeout_ms if statement_timeout_ms is not None else statementTimeoutMs
     try:
         info = _get_connection(_resolve_conn(connection, server))
     except Exception as e:
@@ -2543,6 +2764,69 @@ def execute_query(
                     "statement": stmt_check,
                 }
 
+    # 3. Destructive & non-rollbackable DDL classification
+    destructive_hits: List[Tuple[str, Dict[str, str]]] = []
+    has_ddl = False
+    for stmt_check in statements:
+        if _is_ddl_statement(stmt_check):
+            has_ddl = True
+        d_info = _classify_destructive_ddl(stmt_check)
+        if d_info is not None:
+            has_ddl = True
+            destructive_hits.append((stmt_check, d_info))
+
+    # Never execute destructive DDL or MySQL DDL (which implicitly commits) on dry_run=True
+    if effective_dry_run and (destructive_hits or (info.get("engine") == "mysql" and has_ddl)):
+        _log_statement_audit(conn_name, sql, -1, True, "DRY RUN VALIDATED (NOT EXECUTED)")
+        return {
+            "connection": conn_name,
+            "dryRun": True,
+            "executed": False,
+            "status": "VALIDATED (NOT EXECUTED)",
+            "undoSupported": False,
+            "destructiveOperations": [
+                {"statement": s, "kind": d["kind"], "impact": d["impact"]} for s, d in destructive_hits
+            ],
+            "undoNotice": (
+                "Destructive or non-rollbackable DDL is validated without executing against the target database "
+                "during dry_run=True (MySQL DDL implicitly commits, PostgreSQL DROP DATABASE cannot run inside a "
+                "transaction, and live DDL acquires exclusive locks). This operation is not recoverable through "
+                "undo_query; recovery once committed requires a suitable backup or other recovery mechanism."
+            ),
+        }
+
+    # Fail closed on live destructive/ambiguous DDL unless allow_destructive_ddl=True
+    if cfg_safe_writes and not effective_dry_run and destructive_hits and not effective_allow_destructive_ddl:
+        first_stmt, first_d = destructive_hits[0]
+        return {
+            "error": True,
+            "isError": True,
+            "destructiveDdlKind": first_d["kind"],
+            "undoSupported": False,
+            "connection": conn_name,
+            "statement": first_stmt,
+            "message": (
+                f"Safety Guardrail ({first_d['kind']}): {first_d['impact']} "
+                "This operation is not recoverable through undo_query; once committed, recovery requires a suitable "
+                "backup or other recovery mechanism. Validate with dry_run=True and ensure a verified backup exists, "
+                "then pass allow_destructive_ddl=True to confirm execution."
+            ),
+        }
+
+    eff_lock_ms: Optional[int] = raw_lock_ms if raw_lock_ms is not None else (5000 if has_ddl else None)
+    eff_stmt_ms: Optional[int] = (
+        raw_stmt_ms if raw_stmt_ms is not None else (30000 if (has_ddl and info.get("engine") == "postgres") else None)
+    )
+
+    if len(statements) > 1 and any(d["kind"] == "DROP_DATABASE" for _, d in destructive_hits):
+        return {
+            "error": True,
+            "isError": True,
+            "destructiveDdlKind": "DROP_DATABASE",
+            "connection": conn_name,
+            "message": "DROP DATABASE cannot run inside a multi-statement transaction batch; execute it as a single statement.",
+        }
+
     # =========================================================================
     # SINGLE STATEMENT EXECUTION
     # =========================================================================
@@ -2555,8 +2839,18 @@ def execute_query(
             except Exception as e:
                 return _format_db_error(e, "postgres", single_sql)
 
+            is_drop_db = any(d["kind"] == "DROP_DATABASE" for _, d in destructive_hits)
+            if is_drop_db:
+                conn.autocommit = True
+
             try:
                 with conn.cursor() as cur:
+                    set_scope = "SET" if is_drop_db else "SET LOCAL"
+                    if eff_lock_ms is not None and eff_lock_ms > 0:
+                        cur.execute(f"{set_scope} lock_timeout = '{int(eff_lock_ms)}ms';")
+                    if eff_stmt_ms is not None and eff_stmt_ms > 0:
+                        cur.execute(f"{set_scope} statement_timeout = '{int(eff_stmt_ms)}ms';")
+
                     before_img = None
                     if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
                         before_img = _capture_before_image(cur, parsed_single, "postgres")
@@ -2599,7 +2893,8 @@ def execute_query(
                             res_obj["warning"] = f"Duplicate column names in RETURNING clause: {dups_ret}."
                         return res_obj
                     else:
-                        conn.commit()
+                        if not is_drop_db:
+                            conn.commit()
                         audit_id = _log_statement_audit(info["name"], single_sql, rowcount, False, status, before_image=before_img)
                         res_obj = {
                             "connection": info["name"],
@@ -2607,15 +2902,35 @@ def execute_query(
                             "rowCount": rowcount,
                             "auditId": audit_id,
                         }
+                        if eff_lock_ms is not None and eff_lock_ms > 0:
+                            res_obj["lockTimeoutMs"] = int(eff_lock_ms)
+                        if eff_stmt_ms is not None and eff_stmt_ms > 0:
+                            res_obj["statementTimeoutMs"] = int(eff_stmt_ms)
                         if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
                             res_obj["matchedRows"] = rowcount
-                        if before_img and (before_img.get("rows") or before_img.get("cascaded_children")):
-                            res_obj["beforeImageSummary"] = {
-                                "operation": before_img.get("operation"),
-                                "table": before_img.get("table"),
-                                "rowsAffected": len(before_img.get("rows", [])),
-                                "cascadedTables": list(before_img.get("cascaded_children", {}).keys()),
-                            }
+                        if destructive_hits:
+                            res_obj["undoSupported"] = False
+                            res_obj["undoNotice"] = (
+                                "Before-image snapshot is not captured for DDL or TRUNCATE statements. "
+                                "This operation is not recoverable through undo_query; recovery requires a suitable "
+                                "backup or other recovery mechanism."
+                            )
+                        elif parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE", "DATA_MODIFYING_CTE", "UNVERIFIED_CTE_MUTATION"):
+                            if before_img and (before_img.get("rows") or before_img.get("cascaded_children")):
+                                res_obj["undoSupported"] = True
+                                res_obj["beforeImageSummary"] = {
+                                    "operation": before_img.get("operation"),
+                                    "table": before_img.get("table"),
+                                    "rowsAffected": len(before_img.get("rows", [])),
+                                    "cascadedTables": list(before_img.get("cascaded_children", {}).keys()),
+                                }
+                            else:
+                                res_obj["undoSupported"] = False
+                                if parsed_single.get("cte_prefix") or parsed_single.get("operation") in ("DATA_MODIFYING_CTE", "UNVERIFIED_CTE_MUTATION"):
+                                    res_obj["undoNotice"] = (
+                                        "Before-image snapshot is not available for this CTE mutation. "
+                                        "Operation is not reversible via undo_query."
+                                    )
                         if returned_rows is not None:
                             res_obj["returned_rows"] = returned_rows
                         if cols_ret:
@@ -2630,6 +2945,12 @@ def execute_query(
                     pass
                 return _format_db_error(e, "postgres", single_sql)
             finally:
+                if is_drop_db:
+                    try:
+                        with conn.cursor() as cur_reset:
+                            cur_reset.execute("RESET lock_timeout; RESET statement_timeout;")
+                    except Exception:
+                        pass
                 conn.close()
         else:
             try:
@@ -2637,8 +2958,22 @@ def execute_query(
             except Exception as e:
                 return _format_db_error(e, "mysql", single_sql)
 
+            prev_lock_wait: Optional[int] = None
+            applied_lock_sec: Optional[int] = None
             try:
                 with conn.cursor() as cur:
+                    if eff_lock_ms is not None and eff_lock_ms > 0:
+                        applied_lock_sec = max(1, (int(eff_lock_ms) + 999) // 1000)
+                        try:
+                            cur.execute("SELECT @@SESSION.lock_wait_timeout AS val;")
+                            row_lw = cur.fetchone()
+                            if isinstance(row_lw, dict):
+                                prev_lock_wait = int(row_lw["val"])
+                            elif row_lw:
+                                prev_lock_wait = int(row_lw[0])
+                        except Exception:
+                            prev_lock_wait = None
+                        cur.execute(f"SET SESSION lock_wait_timeout = {applied_lock_sec};")
                     cur.execute("START TRANSACTION;")
                     before_img = None
                     if parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE"):
@@ -2691,12 +3026,34 @@ def execute_query(
                                 res_obj["note"] = f"{matched_rows} row(s) matched WHERE clause; 0 changed (values already matched existing data)."
                             elif matched_rows == 0:
                                 res_obj["note"] = "0 rows matched WHERE clause."
-                        if before_img and before_img.get("rows"):
-                            res_obj["beforeImageSummary"] = {
-                                "operation": before_img.get("operation"),
-                                "table": before_img.get("table"),
-                                "rowsAffected": len(before_img.get("rows", [])),
-                            }
+                        if applied_lock_sec is not None:
+                            res_obj["lockTimeoutSeconds"] = applied_lock_sec
+                            res_obj["lockTimeoutNote"] = (
+                                "MySQL lock_wait_timeout applies per metadata lock attempt; "
+                                "statement_timeout is not supported for MySQL DDL."
+                            )
+                        if destructive_hits:
+                            res_obj["undoSupported"] = False
+                            res_obj["undoNotice"] = (
+                                "Before-image snapshot is not captured for DDL or TRUNCATE statements. "
+                                "This operation is not recoverable through undo_query; recovery requires a suitable "
+                                "backup or other recovery mechanism."
+                            )
+                        elif parsed_single and parsed_single.get("operation") in ("UPDATE", "DELETE", "DATA_MODIFYING_CTE", "UNVERIFIED_CTE_MUTATION"):
+                            if before_img and before_img.get("rows"):
+                                res_obj["undoSupported"] = True
+                                res_obj["beforeImageSummary"] = {
+                                    "operation": before_img.get("operation"),
+                                    "table": before_img.get("table"),
+                                    "rowsAffected": len(before_img.get("rows", [])),
+                                }
+                            else:
+                                res_obj["undoSupported"] = False
+                                if parsed_single.get("cte_prefix") or parsed_single.get("operation") in ("DATA_MODIFYING_CTE", "UNVERIFIED_CTE_MUTATION"):
+                                    res_obj["undoNotice"] = (
+                                        "Before-image snapshot is not available for this CTE mutation. "
+                                        "Operation is not reversible via undo_query."
+                                    )
                         return res_obj
             except Exception as e:
                 try:
@@ -2705,6 +3062,12 @@ def execute_query(
                     pass
                 return _format_db_error(e, "mysql", single_sql)
             finally:
+                if prev_lock_wait is not None:
+                    try:
+                        with conn.cursor() as cur_restore:
+                            cur_restore.execute(f"SET SESSION lock_wait_timeout = {int(prev_lock_wait)};")
+                    except Exception:
+                        pass
                 conn.close()
 
     # =========================================================================
@@ -2720,6 +3083,10 @@ def execute_query(
         total_rows_affected = 0
         try:
             with conn.cursor() as cur:
+                if eff_lock_ms is not None and eff_lock_ms > 0:
+                    cur.execute(f"SET LOCAL lock_timeout = '{int(eff_lock_ms)}ms';")
+                if eff_stmt_ms is not None and eff_stmt_ms > 0:
+                    cur.execute(f"SET LOCAL statement_timeout = '{int(eff_stmt_ms)}ms';")
                 for idx, stmt in enumerate(statements):
                     try:
                         cur.execute(stmt)
@@ -2762,7 +3129,7 @@ def execute_query(
                     }
                 else:
                     conn.commit()
-                    return {
+                    batch_res: Dict[str, Any] = {
                         "connection": info["name"],
                         "dryRun": False,
                         "status": "BATCH SUCCESS",
@@ -2771,6 +3138,18 @@ def execute_query(
                         "total_rows_affected": total_rows_affected,
                         "executed_statements": executed_statements,
                     }
+                    if eff_lock_ms is not None and eff_lock_ms > 0:
+                        batch_res["lockTimeoutMs"] = int(eff_lock_ms)
+                    if eff_stmt_ms is not None and eff_stmt_ms > 0:
+                        batch_res["statementTimeoutMs"] = int(eff_stmt_ms)
+                    if destructive_hits:
+                        batch_res["undoSupported"] = False
+                        batch_res["undoNotice"] = (
+                            "Before-image snapshot is not captured for DDL or TRUNCATE statements. "
+                            "This operation is not recoverable through undo_query; recovery requires a suitable "
+                            "backup or other recovery mechanism."
+                        )
+                    return batch_res
         finally:
             conn.close()
     else:
@@ -2781,8 +3160,22 @@ def execute_query(
 
         executed_statements = []
         total_rows_affected = 0
+        prev_batch_lock_wait: Optional[int] = None
+        applied_batch_lock_sec: Optional[int] = None
         try:
             with conn.cursor() as cur:
+                if eff_lock_ms is not None and eff_lock_ms > 0:
+                    applied_batch_lock_sec = max(1, (int(eff_lock_ms) + 999) // 1000)
+                    try:
+                        cur.execute("SELECT @@SESSION.lock_wait_timeout AS val;")
+                        row_lw = cur.fetchone()
+                        if isinstance(row_lw, dict):
+                            prev_batch_lock_wait = int(row_lw["val"])
+                        elif row_lw:
+                            prev_batch_lock_wait = int(row_lw[0])
+                    except Exception:
+                        prev_batch_lock_wait = None
+                    cur.execute(f"SET SESSION lock_wait_timeout = {applied_batch_lock_sec};")
                 cur.execute("START TRANSACTION;")
                 for idx, stmt in enumerate(statements):
                     try:
@@ -2830,7 +3223,7 @@ def execute_query(
                     }
                 else:
                     cur.execute("COMMIT;")
-                    return {
+                    batch_mysql_res: Dict[str, Any] = {
                         "connection": info["name"],
                         "dryRun": False,
                         "status": "BATCH SUCCESS",
@@ -2839,7 +3232,27 @@ def execute_query(
                         "total_rows_affected": total_rows_affected,
                         "executed_statements": executed_statements,
                     }
+                    if applied_batch_lock_sec is not None:
+                        batch_mysql_res["lockTimeoutSeconds"] = applied_batch_lock_sec
+                        batch_mysql_res["lockTimeoutNote"] = (
+                            "MySQL lock_wait_timeout applies per metadata lock attempt; "
+                            "statement_timeout is not supported for MySQL DDL."
+                        )
+                    if destructive_hits:
+                        batch_mysql_res["undoSupported"] = False
+                        batch_mysql_res["undoNotice"] = (
+                            "Before-image snapshot is not captured for DDL or TRUNCATE statements. "
+                            "This operation is not recoverable through undo_query; recovery requires a suitable "
+                            "backup or other recovery mechanism."
+                        )
+                    return batch_mysql_res
         finally:
+            if prev_batch_lock_wait is not None:
+                try:
+                    with conn.cursor() as cur_restore:
+                        cur_restore.execute(f"SET SESSION lock_wait_timeout = {int(prev_batch_lock_wait)};")
+                except Exception:
+                    pass
             conn.close()
 
 

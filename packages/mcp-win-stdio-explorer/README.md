@@ -44,12 +44,11 @@ pip install mcp-win-stdio-explorer
 
 ---
 
-## 🚀 One-Command Claude Setup
+## 🚀 Non-Invasive Configuration (`mws guide`)
 
 ```powershell
-mws setup explorer
-# or:
-mws add explorer
+# Print client-ready JSON snippets for Claude, Gemini, Cursor, VS Code, etc.:
+mws guide explorer
 ```
 
 ### Manual Configuration Example
@@ -70,9 +69,9 @@ In `%APPDATA%\Claude\claude_desktop_config.json`:
 ## 📖 CLI Commands & Interactive Guide
 
 ```powershell
+mws guide explorer     # Print client configuration snippets
 mws explorer guide     # Complete tool reference & prompt recipes
 mws explorer doctor    # Verify pathspec and rapidfuzz dependencies
-mws explorer setup     # Configure Claude Desktop / Claude Code
 mws explorer run       # Launch server over stdio
 ```
 

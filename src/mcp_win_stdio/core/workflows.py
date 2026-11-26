@@ -6,6 +6,7 @@ Stored in ~/.mcp-win-stdio/workflows/ (global) or <workspace>/.mws/workflows/ (p
 """
 
 import concurrent.futures
+import contextvars
 import json
 import re
 import threading
@@ -913,7 +914,13 @@ def _run_dag_workflow(
 
             # Launch ready steps up to concurrency limit
             for step_id, step_data, idx in ready_to_launch:
-                fut = executor.submit(execute_step, step_id, step_data, idx)
+                fut = executor.submit(
+                    contextvars.copy_context().run,
+                    execute_step,
+                    step_id,
+                    step_data,
+                    idx,
+                )
                 running_futures[fut] = step_id
 
             if not running_futures:

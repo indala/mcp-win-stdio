@@ -21,6 +21,8 @@ logger = logging.getLogger("mcp_win_stdio.artifacts")
 
 ARTIFACTS_DIR = EXPORTS_DIR / "artifacts"
 _ARTIFACT_LOCK = threading.RLock()
+PRUNE_INTERVAL_SECONDS = 300.0
+_LAST_PRUNE_AT_BY_DIR: Dict[str, float] = {}
 
 # Strict ID validation regex: art_YYYYMMDD_<8-char-hex>
 ARTIFACT_ID_PATTERN = re.compile(r"^art_\d{8}_[a-f0-9]{8,16}$")
@@ -67,6 +69,7 @@ def prune_expired_artifacts(ttl_hours: float = TTL_HOURS) -> int:
     pruned = 0
 
     with _ARTIFACT_LOCK:
+        _LAST_PRUNE_AT_BY_DIR[str(ARTIFACTS_DIR)] = time.monotonic()
         files: List[Tuple[Path, float, int]] = []
         total_size = 0
         try:
@@ -100,12 +103,31 @@ def prune_expired_artifacts(ttl_hours: float = TTL_HOURS) -> int:
     return pruned
 
 
+def maybe_prune_expired_artifacts(
+    ttl_hours: float = TTL_HOURS,
+    min_interval_seconds: Optional[float] = None,
+) -> int:
+    """Periodically invoke bounded artifact pruning without scanning disk on every call."""
+    if not ARTIFACTS_DIR.exists():
+        return 0
+
+    interval = PRUNE_INTERVAL_SECONDS if min_interval_seconds is None else min_interval_seconds
+    dir_key = str(ARTIFACTS_DIR)
+    now = time.monotonic()
+    with _ARTIFACT_LOCK:
+        last_at = _LAST_PRUNE_AT_BY_DIR.get(dir_key)
+        if last_at is not None and interval > 0 and (now - last_at) < interval:
+            return 0
+    return prune_expired_artifacts(ttl_hours=ttl_hours)
+
+
 def write_artifact_atomically(data: Any, handle: Optional[str] = None) -> Tuple[str, Path, int]:
     """
     Atomically writes a payload to an artifact file using a tempfile + atomic rename.
     Returns (handle, artifact_path, byte_count).
     """
     artifacts_dir = _ensure_artifacts_dir()
+    maybe_prune_expired_artifacts()
     art_id = handle or generate_artifact_id()
     final_path = artifacts_dir / f"{art_id}.json"
 
@@ -134,6 +156,8 @@ def maybe_spill_to_artifact(
     Rule 2: Only spill if serialized JSON exceeds threshold_bytes.
     Returns (spilled: bool, result_payload).
     """
+    maybe_prune_expired_artifacts()
+
     # 1. Never spill error responses
     if isinstance(data, dict):
         if data.get("isError") or data.get("status") == "error":
@@ -230,6 +254,7 @@ def read_artifact_payload(
         }
 
     artifacts_dir = _ensure_artifacts_dir().resolve()
+    maybe_prune_expired_artifacts()
     target_file = (artifacts_dir / f"{clean_handle}.json").resolve()
 
     # Traversal security verification

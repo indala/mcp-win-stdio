@@ -62,19 +62,22 @@ SUPPORTED_CLIENTS: Dict[str, Dict[str, Any]] = {
             "   (Or run: claude mcp add <server-name> mws <args...>)"
         ),
     },
-    "chatgpt": {
-        "id": "chatgpt",
-        "name": "ChatGPT Desktop",
-        "aliases": ["chatgpt", "openai"],
+    "openai": {
+        "id": "openai",
+        "name": "ChatGPT Desktop & OpenAI Codex",
+        "aliases": ["openai", "chatgpt", "chatgpt-desktop", "codex", "codex-cli"],
         "paths": [
-            r"%APPDATA%\OpenAI\ChatGPT\mcp.json",
-            r"%LOCALAPPDATA%\Programs\ChatGPT\resources\mcp.json",
+            r"%USERPROFILE%\.codex\config.toml",
+            r"<workspace>\.codex\config.toml",
         ],
-        "format": "json",
+        "format": "toml",
         "instructions": (
-            "1. In ChatGPT Desktop, open Settings -> Advanced / Developer -> MCP Servers.\n"
-            "   (Or paste into %APPDATA%\\OpenAI\\ChatGPT\\mcp.json).\n"
-            "2. Paste the JSON snippet inside 'mcpServers' and save."
+            "ChatGPT Desktop and Codex share MCP configuration on the same Codex host.\n"
+            "1. In ChatGPT Desktop, open Settings -> MCP servers -> Add server, choose STDIO,\n"
+            "   enter the command and args from this snippet, save, then restart ChatGPT.\n"
+            "2. The shared global config is %USERPROFILE%\\.codex\\config.toml. Codex CLI and\n"
+            "   the IDE extension use the same settings; inspect them with 'codex mcp list'.\n"
+            "3. For a trusted project, you may instead use <workspace>\\.codex\\config.toml."
         ),
     },
     "cursor": {
@@ -150,20 +153,6 @@ SUPPORTED_CLIENTS: Dict[str, Dict[str, Any]] = {
             "1. For GitHub Copilot CLI (gh copilot), create or edit %USERPROFILE%\\.copilot\\mcp-config.json.\n"
             "2. For VS Code Copilot, open %APPDATA%\\Code\\User\\mcp.json or <workspace>\\.mcp.json.\n"
             "3. Paste the JSON snippet inside 'mcpServers'."
-        ),
-    },
-    "codex": {
-        "id": "codex",
-        "name": "OpenAI Codex CLI",
-        "aliases": ["codex"],
-        "paths": [
-            r"%USERPROFILE%\.codex\config.toml",
-            r"<workspace>\.codex\config.toml",
-        ],
-        "format": "toml",
-        "instructions": (
-            "1. Open %USERPROFILE%\\.codex\\config.toml or your workspace .codex\\config.toml.\n"
-            "2. Paste the TOML configuration block at the bottom of the file."
         ),
     },
 }

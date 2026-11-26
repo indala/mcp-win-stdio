@@ -1,5 +1,5 @@
 """
-Build script to compile wheels and source distributions for all 8 packages.
+Build script to compile wheels and source distributions for all 11 packages (root + 10 subpackages).
 """
 
 import shutil

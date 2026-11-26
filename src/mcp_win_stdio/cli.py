@@ -96,8 +96,8 @@ def print_dashboard() -> None:
     print("=" * 76)
     print(f" Single-Source Hub:      {USER_DIR}")
     print(" Supported AI Clients:   Gemini / Antigravity, Claude Desktop & Code,")
-    print("                         ChatGPT, Cursor, Kiro, OpenCode, Windsurf,")
-    print("                         GitHub Copilot, OpenAI Codex")
+    print("                         ChatGPT Desktop / OpenAI Codex, Cursor, Kiro,")
+    print("                         OpenCode, Windsurf, GitHub Copilot")
     print(" Architecture:           Non-invasive (zero automatic config file mutations)")
     print("-" * 76)
 
@@ -208,7 +208,7 @@ def print_global_guide() -> None:
     print("-" * 80)
     print("Instead of configuring 9 separate servers and bloating context with 30,000+ tokens,")
     print("the Gateway exposes lightweight meta-tools that dynamically load child servers on demand.\n")
-    print("Copy & paste under 'mcpServers' in your client configuration file:")
+    print("Copy & paste under 'mcpServers' in JSON-based client configuration:")
     print("```json")
     print(generate_snippet("server"))
     print("```")
@@ -216,6 +216,8 @@ def print_global_guide() -> None:
     print("```json")
     print(generate_snippet("server", use_python_exe=True))
     print("```\n")
+    print("For ChatGPT Desktop and Codex, use the shared TOML guide instead:")
+    print("   mws guide openai   (aliases: mws guide chatgpt, mws guide codex)\n")
 
     print("-" * 80)
     print(" 📁 Supported AI Clients & Windows Configuration Paths:")
@@ -359,7 +361,7 @@ def print_server_guide_universal(server_name: str) -> None:
     print("=" * 80)
 
     print("\n📋 Universal Copy & Paste Configuration Snippet:")
-    print("Add this under 'mcpServers' in any standard MCP client config:")
+    print("Add this under 'mcpServers' in JSON-based MCP client configs:")
     print("```json")
     print(generate_snippet(s_norm))
     print("```")
@@ -368,6 +370,7 @@ def print_server_guide_universal(server_name: str) -> None:
     print("```json")
     print(generate_snippet(s_norm, use_python_exe=True))
     print("```")
+    print(f"\nFor ChatGPT Desktop / Codex TOML, use: mws guide {s_norm} openai")
 
     if s_norm == "db":
         print("\n🔒 Database Tip: Set DATABASE_URL in 'env', or manage credentials centrally")
@@ -543,13 +546,12 @@ def cmd_retired(args: argparse.Namespace) -> None:
     print(f"The '{cmd_name}' command has been retired because mws no longer automatically")
     print("modifies client configuration files. We support all major AI environments:")
     print("  • Gemini / Antigravity IDE     • Claude Desktop & Claude Code")
-    print("  • ChatGPT Desktop              • Cursor AI")
+    print("  • ChatGPT Desktop & OpenAI Codex • Cursor AI")
     print("  • Kiro IDE                     • OpenCode")
     print("  • Codeium Windsurf             • GitHub Copilot / VS Code")
-    print("  • OpenAI Codex")
     print("\n👉 To view copy-paste configuration snippets and exact file paths:")
     print("   mws guide                   -> Universal multi-agent guide")
-    print("   mws guide <client>          -> Recommended Unified Gateway setup (e.g. 'mws guide gemini')")
+    print("   mws guide <client>          -> Recommended Unified Gateway setup (e.g. 'mws guide openai')")
     print("   mws guide <server> <client> -> Standalone server snippet (e.g. 'mws guide tsc gemini')")
     print("=" * 76 + "\n")
 
@@ -2615,18 +2617,80 @@ def cmd_hub_restart(args: argparse.Namespace) -> None:
     cmd_hub_start(args)
 
 
-def cmd_tunnel(args: argparse.Namespace) -> None:
-    """Launch public Cloudflare Tunnel for MWS StreamableHTTP endpoint with pre-flight config review."""
-    from mcp_win_stdio.core.config import (
-        get_tunnel_config,
-        load_hierarchical_config,
-        save_config,
-    )
-    from mcp_win_stdio.core.tunnel import MwsTunnelManager
+def _ensure_tunnel_provider_binary(provider: str, manager_cls: Any) -> None:
+    """Ensure required external CLI binary for the selected tunnel provider is installed."""
+    if provider == "direct":
+        return
 
-    if not MwsTunnelManager.is_cloudflared_installed():
+    if provider == "ngrok":
+        if not manager_cls.is_ngrok_installed():
+            print("❌ Error: 'ngrok' CLI is not installed or not found in system PATH.", file=sys.stderr)
+            print("   'mws tunnel --type ngrok' requires ngrok to expose your local tools.\n", file=sys.stderr)
+            can_auto_install = bool(shutil.which("winget") if sys.platform == "win32" else shutil.which("brew"))
+            if can_auto_install and sys.stdin.isatty():
+                mgr_name = "winget" if sys.platform == "win32" else "brew"
+                cmd_suggestion = "winget install --id Ngrok.Ngrok" if sys.platform == "win32" else "brew install ngrok/ngrok/ngrok"
+                print(f"👉 You can install it with: {cmd_suggestion}\n")
+                try:
+                    ans = input(f"Would you like mws to install ngrok now using {mgr_name}? [Y/n]: ").strip().lower()
+                    if ans in ("", "y", "yes"):
+                        print(f"\nInstalling ngrok via {mgr_name}...")
+                        if manager_cls.try_install_ngrok():
+                            print("✅ ngrok installed successfully!\n")
+                            if not manager_cls.is_ngrok_installed():
+                                print("⚠️  Please restart your shell so PATH changes take effect, then run 'mws tunnel --type ngrok' again.")
+                                sys.exit(0)
+                        else:
+                            print(f"❌ Failed to install ngrok automatically. Please run:\n   {cmd_suggestion}", file=sys.stderr)
+                            sys.exit(1)
+                    else:
+                        sys.exit(1)
+                except (KeyboardInterrupt, EOFError):
+                    sys.exit(1)
+            else:
+                if sys.platform == "win32":
+                    print("👉 Install via winget (recommended):", file=sys.stderr)
+                    print("   winget install --id Ngrok.Ngrok\n", file=sys.stderr)
+                print("👉 Or download directly from:", file=sys.stderr)
+                print("   https://ngrok.com/download", file=sys.stderr)
+                sys.exit(1)
+
+        if not manager_cls.has_ngrok_authtoken():
+            auth_url = "https://dashboard.ngrok.com/get-started/your-authtoken"
+            if sys.stdin.isatty():
+                import webbrowser
+
+                print("\n🔐 ngrok requires a one-time free authtoken to start tunnels.")
+                print(f"🌐 Opening ngrok dashboard in your browser: {auth_url}")
+                try:
+                    webbrowser.open(auth_url)
+                except Exception:
+                    pass
+                print("   Sign in (free), copy your authtoken, and paste it below.")
+                try:
+                    tok = input("ngrok authtoken (or press Enter to cancel): ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    print("\nOperation cancelled.")
+                    sys.exit(0)
+                if not tok:
+                    print("Cancelled. Run 'ngrok config add-authtoken <TOKEN>' when ready.", file=sys.stderr)
+                    sys.exit(1)
+                if manager_cls.configure_ngrok_authtoken(tok):
+                    print("✅ ngrok authtoken saved! Continuing to start tunnel...\n")
+                else:
+                    print("❌ Failed to save ngrok authtoken. Please run: ngrok config add-authtoken <TOKEN>", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                print("❌ Error: ngrok authtoken is not configured.", file=sys.stderr)
+                print(f"   1. Get your free authtoken at: {auth_url}", file=sys.stderr)
+                print("   2. Run: ngrok config add-authtoken <YOUR_TOKEN>", file=sys.stderr)
+                sys.exit(1)
+        return
+
+    if not manager_cls.is_cloudflared_installed():
         print("❌ Error: 'cloudflared' CLI is not installed or not found in system PATH.", file=sys.stderr)
-        print("   'mws tunnel' requires Cloudflare Tunnel to expose your local tools to ChatGPT & Gemini.\n", file=sys.stderr)
+        print("   'mws tunnel' requires Cloudflare Tunnel to expose your local tools to ChatGPT & Gemini.", file=sys.stderr)
+        print("   (Tip: or use '--provider ngrok' or '--provider direct')\n", file=sys.stderr)
 
         can_auto_install = bool(shutil.which("winget") if sys.platform == "win32" else shutil.which("brew"))
         if can_auto_install and sys.stdin.isatty():
@@ -2637,9 +2701,9 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 ans = input(f"Would you like mws to install cloudflared now using {mgr_name}? [Y/n]: ").strip().lower()
                 if ans in ("", "y", "yes"):
                     print(f"\nInstalling cloudflared via {mgr_name}...")
-                    if MwsTunnelManager.try_install_cloudflared():
+                    if manager_cls.try_install_cloudflared():
                         print("✅ cloudflared installed successfully!\n")
-                        if not MwsTunnelManager.is_cloudflared_installed():
+                        if not manager_cls.is_cloudflared_installed():
                             print("⚠️  Please restart your shell so PATH changes take effect, then run 'mws tunnel' again.")
                             sys.exit(0)
                     else:
@@ -2657,16 +2721,163 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
             print("   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/", file=sys.stderr)
             sys.exit(1)
 
+
+def _save_tunnel_settings(
+    scope_name: str,
+    workspace_path: Optional[str],
+    provider: str,
+    mode: str,
+    auth_mode: str,
+    port: int,
+    host: str,
+    token: Optional[str],
+    domain: Optional[str],
+    public_url: Optional[str],
+    ssl_certfile: Optional[str],
+    ssl_keyfile: Optional[str],
+) -> Path:
+    """Persist tunnel configuration to workspace or global ~/.mcp-win-stdio/config.json."""
+    from mcp_win_stdio.core.config import load_config, load_workspace_config, save_config
+
+    save_scope = "workspace" if workspace_path else "global"
+    target_cfg = load_workspace_config() if save_scope == "workspace" else load_config()
+    if "tunnel" not in target_cfg or not isinstance(target_cfg["tunnel"], dict):
+        target_cfg["tunnel"] = {}
+    tcfg = target_cfg["tunnel"]
+    tcfg["provider"] = provider
+    tcfg["mode"] = mode
+    tcfg["auth_mode"] = auth_mode
+    tcfg["port"] = port
+    tcfg["host"] = host
+    if domain:
+        tcfg["domain"] = domain
+    else:
+        tcfg.pop("domain", None)
+    if public_url:
+        tcfg["public_url"] = public_url
+    else:
+        tcfg.pop("public_url", None)
+    if ssl_certfile and ssl_keyfile:
+        tcfg["ssl_certfile"] = ssl_certfile
+        tcfg["ssl_keyfile"] = ssl_keyfile
+    else:
+        tcfg.pop("ssl_certfile", None)
+        tcfg.pop("ssl_keyfile", None)
+    if token:
+        tcfg["token"] = token
+    else:
+        tcfg.pop("token", None)
+    return save_config(target_cfg, scope=save_scope)
+
+
+def _run_direct_cert_setup_wizard(
+    port: int,
+    public_url: Optional[str],
+    ssl_certfile: Optional[str],
+    ssl_keyfile: Optional[str],
+) -> tuple[int, str, Optional[str], Optional[str], Optional[str]]:
+    """
+    Interactive setup for Direct IP/Domain HTTPS certificates stored in ~/.mcp-win-stdio/certs/.
+    Returns (port, host, public_url, ssl_certfile, ssl_keyfile).
+    """
+    from mcp_win_stdio.core.config import CERTS_DIR
+    from mcp_win_stdio.core.tunnel import (
+        MwsTunnelManager,
+        generate_direct_self_signed_cert,
+        import_direct_certs,
+    )
+
+    default_ip = MwsTunnelManager._detect_local_ip()
+    if public_url:
+        # Extract host part if user already has a URL
+        stripped_host = public_url.split("://")[-1].split("/")[0].split(":")[0]
+        if stripped_host:
+            default_ip = stripped_host
+
+    print("\n------------------------------------------------------------")
+    print("        🔐 DIRECT HTTPS / CERTIFICATE SETUP")
+    print(f"        (Certificates stored in: {CERTS_DIR})")
+    print("------------------------------------------------------------")
+    target_host = input(f"Public IP or Domain [{default_ip}]: ").strip() or default_ip
+    p_in = input(f"Listen Port [{port}]: ").strip()
+    if p_in:
+        try:
+            port = int(p_in)
+        except ValueError:
+            print("⚠️  Invalid port, keeping current value.")
+
+    print("\nChoose TLS Certificate option:")
+    print(" [1] Generate 90-day OpenSSL self-signed HTTPS cert (stored in ~/.mcp-win-stdio/certs/)")
+    print("     (Great for your own clients/scripts; note: ChatGPT/Claude Web require CA-signed certs)")
+    print(" [2] Import existing 90-day ZeroSSL / Let's Encrypt cert & key into ~/.mcp-win-stdio/certs/")
+    print(" [3] Plain HTTP only (no TLS certificate)")
+    cert_choice = input("Select option [1-3]: ").strip()
+
+    if cert_choice == "1":
+        cert_p, key_p = generate_direct_self_signed_cert(target_host, certs_dir=CERTS_DIR, days=90)
+        ssl_certfile, ssl_keyfile = str(cert_p), str(key_p)
+        public_url = f"https://{target_host}:{port}"
+        print(f"✅ Generated 90-day HTTPS certificate in {CERTS_DIR}")
+    elif cert_choice == "2":
+        c_src = input("Path to certificate file (.pem/.crt): ").strip().strip('"')
+        k_src = input("Path to private key file (.pem/.key): ").strip().strip('"')
+        try:
+            cert_p, key_p = import_direct_certs(Path(c_src), Path(k_src), certs_dir=CERTS_DIR)
+            ssl_certfile, ssl_keyfile = str(cert_p), str(key_p)
+            public_url = f"https://{target_host}:{port}"
+            print(f"✅ Imported TLS certificates into {CERTS_DIR}")
+        except Exception as imp_err:
+            print(f"❌ Failed to import certificates: {imp_err}")
+    elif cert_choice == "3":
+        ssl_certfile = None
+        ssl_keyfile = None
+        public_url = f"http://{target_host}:{port}"
+        print("ℹ️  Configured direct mode for plain HTTP.")
+    else:
+        print("No changes made.")
+
+    return port, "0.0.0.0", public_url, ssl_certfile, ssl_keyfile
+
+
+def cmd_tunnel(args: argparse.Namespace) -> None:
+    """Launch public tunnel (Cloudflare, ngrok, or direct) for MWS StreamableHTTP endpoint."""
+    from mcp_win_stdio.core.config import (
+        CERTS_DIR,
+        get_tunnel_config,
+        load_hierarchical_config,
+    )
+    from mcp_win_stdio.core.tunnel import MwsTunnelManager, get_stored_direct_certs
+
     # 1. Resolve configuration defaults
     hier_cfg = load_hierarchical_config()
     tunnel_cfg = get_tunnel_config()
     workspace_path = hier_cfg.get("_resolved_sources", {}).get("workspace_path")
     scope_name = "Workspace" if workspace_path else "Global"
 
+    provider = (
+        getattr(args, "type", None)
+        or getattr(args, "provider", None)
+        or tunnel_cfg.get("provider")
+        or "cloudflare"
+    ).lower().strip()
     mode = (getattr(args, "mode", None) or tunnel_cfg.get("mode") or "read_only").lower().strip()
     auth_mode = (getattr(args, "auth", None) or tunnel_cfg.get("auth_mode") or "oauth").lower().strip()
     port = int(getattr(args, "port", None) or tunnel_cfg.get("port") or 8080)
     token = getattr(args, "token", None) or tunnel_cfg.get("token")
+    explicit_host = getattr(args, "host", None)
+    cfg_host = tunnel_cfg.get("host")
+    host = explicit_host or (cfg_host if cfg_host and not (provider == "direct" and cfg_host == "127.0.0.1") else ("0.0.0.0" if provider == "direct" else "127.0.0.1"))
+    domain = getattr(args, "domain", None) or tunnel_cfg.get("domain")
+    public_url_arg = getattr(args, "public_url", None) or tunnel_cfg.get("public_url")
+    ssl_certfile = getattr(args, "ssl_certfile", None) or tunnel_cfg.get("ssl_certfile")
+    ssl_keyfile = getattr(args, "ssl_keyfile", None) or tunnel_cfg.get("ssl_keyfile")
+
+    # Auto-discover stored direct certificates in ~/.mcp-win-stdio/certs/
+    if provider == "direct" and not ssl_certfile and not ssl_keyfile:
+        stored = get_stored_direct_certs(CERTS_DIR)
+        if stored:
+            ssl_certfile, ssl_keyfile = str(stored[0]), str(stored[1])
+
     auto_yes = bool(getattr(args, "yes", False))
     allow_sensitive_reads = bool(getattr(args, "allow_sensitive_reads", False))
 
@@ -2706,17 +2917,40 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
 
     # 2. Interactive Pre-flight Review (if stdin is interactive and --yes was not provided)
     if not auto_yes and sys.stdin.isatty():
+        # If user explicitly chose direct mode and has no certificates yet, offer setup immediately
+        if provider == "direct" and not ssl_certfile and not public_url_arg:
+            print(f"\nℹ️  Direct mode selected, and no TLS certificates were found in {CERTS_DIR}.")
+            try:
+                ans = input("Would you like to run Direct HTTPS Setup now? [Y/n]: ").strip().lower()
+                if ans in ("", "y", "yes"):
+                    port, host, public_url_arg, ssl_certfile, ssl_keyfile = _run_direct_cert_setup_wizard(
+                        port, public_url_arg, ssl_certfile, ssl_keyfile
+                    )
+                    saved_to = _save_tunnel_settings(
+                        scope_name, workspace_path, provider, mode, auth_mode,
+                        port, host, token, domain, public_url_arg, ssl_certfile, ssl_keyfile,
+                    )
+                    print(f"✅ Saved settings to {saved_to}")
+            except (EOFError, KeyboardInterrupt):
+                print("\nOperation cancelled.")
+                sys.exit(0)
+
         while True:
             print("\n============================================================")
             print("         🌐 MWS REMOTE TUNNEL PRE-FLIGHT CONFIGURATION      ")
             print("============================================================")
             print(f" • Scope:            {scope_name} ({workspace_path or '~/.mcp-win-stdio/config.json'})")
+            print(f" • Tunnel Type:      {provider.upper()}" + (f" (domain: {domain})" if provider == "ngrok" and domain else ""))
             print(f" • Auth Mode:        {auth_mode.upper()} ({'Unauthenticated (ChatGPT compatible)' if auth_mode == 'none' else 'Bearer Token' if auth_mode == 'bearer' else 'OAuth 2.0 (Gemini/ChatGPT)'})")
             if auth_mode == "none":
                 print(" • Security Mode:    READ_ONLY (Forced by unauthenticated mode)")
             else:
                 print(f" • Security Mode:    {mode.upper()} ({'Naked write protection + Safe' if mode == 'read_write' else 'All mutations blocked'})")
-            print(f" • Local Bridge:     http://127.0.0.1:{port}")
+            scheme = "https" if (ssl_certfile and ssl_keyfile) else "http"
+            print(f" • Local Bridge:     {scheme}://{host}:{port}")
+            if provider == "direct":
+                print(f" • Public URL:       {public_url_arg or f'{scheme}://<auto-ip>:{port}'}")
+                print(f" • TLS Certificate:  {ssl_certfile or f'None (run setup to store in {CERTS_DIR})'}")
             if auth_mode == "none":
                 print(" • Auth Token:       None (Public / Unauthenticated)")
             elif auth_mode == "oauth":
@@ -2730,16 +2964,21 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                 print(f" • Tool Scope:       {srv_filter_desc}")
             print("------------------------------------------------------------")
             print(" [1] 🚀 Start Tunnel with these settings")
-            print(f" [2] 🛡️  Toggle Security Mode (currently: {mode})")
-            print(f" [3] 🔢 Change Local Bridge Port (currently: {port})")
-            print(f" [4] 🔐 Cycle Auth Mode (currently: {auth_mode})")
+            print(f" [2] 🌍 Change Tunnel Type (currently: {provider})")
+            print(f" [3] 🛡️  Toggle Security Mode (currently: {mode})")
+            print(f" [4] 🔢 Change Local Bridge Port (currently: {port})")
+            print(f" [5] 🔐 Cycle Auth Mode (currently: {auth_mode})")
             if auth_mode == "bearer":
-                print(f" [5] 🔑 Set Custom Bearer Token (currently: {'Set' if token else 'Auto-generate'})")
-            print(" [6] 💾 Save current tunnel settings to config")
+                print(f" [6] 🔑 Set Custom Bearer Token (currently: {'Set' if token else 'Auto-generate'})")
+            if provider == "direct":
+                print(" [7] 🔒 Setup / Manage Direct HTTPS Certificates")
+            elif provider == "ngrok":
+                print(f" [7] 🏷️  Set ngrok Custom Domain (currently: {domain or 'Auto'})")
+            print(" [8] 💾 Save current tunnel settings to config")
             print(" [Q] ❌ Cancel & Exit")
             print("------------------------------------------------------------")
             try:
-                choice = input("Select an option [1-6, Q]: ").strip().lower()
+                choice = input("Select an option [1-8, Q]: ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("\nOperation cancelled.")
                 sys.exit(0)
@@ -2747,19 +2986,41 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
             if choice in ("1", "", "start", "run"):
                 break
             elif choice == "2":
+                print("\nSelect Tunnel Type:")
+                print("  [1] cloudflare  (Quick HTTPS tunnel via trycloudflare.com)")
+                print("  [2] ngrok       (HTTPS tunnel via ngrok — great when Cloudflare is blocked)")
+                print("  [3] direct      (Direct IP/Domain HTTP or HTTPS using ~/.mcp-win-stdio/certs/)")
+                t_sel = input("Choose [1-3]: ").strip().lower()
+                t_map = {"1": "cloudflare", "cloudflare": "cloudflare", "2": "ngrok", "ngrok": "ngrok", "3": "direct", "direct": "direct"}
+                if t_sel in t_map:
+                    provider = t_map[t_sel]
+                    if not explicit_host:
+                        host = "0.0.0.0" if provider == "direct" else "127.0.0.1"
+                    if provider == "direct" and not ssl_certfile and not ssl_keyfile:
+                        stored = get_stored_direct_certs(CERTS_DIR)
+                        if stored:
+                            ssl_certfile, ssl_keyfile = str(stored[0]), str(stored[1])
+                        else:
+                            print(f"\nℹ️  No TLS certificates found in {CERTS_DIR}.")
+                            if input("Run Direct HTTPS Setup now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+                                port, host, public_url_arg, ssl_certfile, ssl_keyfile = _run_direct_cert_setup_wizard(
+                                    port, public_url_arg, ssl_certfile, ssl_keyfile
+                                )
+                    print(f"Tunnel Type set to: {provider.upper()}")
+            elif choice == "3":
                 if auth_mode == "none":
                     print("⚠️  Security mode cannot be changed to 'read_write' in unauthenticated mode.")
                 else:
                     mode = "read_write" if mode == "read_only" else "read_only"
                     print(f"Security Mode set to: {mode}")
-            elif choice == "3":
+            elif choice == "4":
                 try:
                     p_in = input(f"Enter local bridge port [{port}]: ").strip()
                     if p_in:
                         port = int(p_in)
                 except ValueError:
                     print("Invalid port number.")
-            elif choice == "4":
+            elif choice == "5":
                 modes = ["oauth", "bearer", "none"]
                 auth_mode = modes[(modes.index(auth_mode) + 1) % len(modes)]
                 if auth_mode == "none":
@@ -2767,46 +3028,49 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
                     print("Auth Mode set to: NONE (Security mode locked to 'read_only')")
                 else:
                     print(f"Auth Mode set to: {auth_mode.upper()}")
-            elif choice == "5" and auth_mode == "bearer":
+            elif choice == "6" and auth_mode == "bearer":
                 t_in = input("Enter custom bearer token (leave empty for auto-generated): ").strip()
                 token = t_in if t_in else None
-            elif choice == "6":
-                # Bug fix: load only the target scope's existing config (not the merged
-                # hierarchical config) so we don't clobber global settings with workspace
-                # overrides or vice versa. Only the tunnel section is updated.
-                save_scope = "workspace" if workspace_path else "global"
-                from mcp_win_stdio.core.config import load_config, load_workspace_config
-                if save_scope == "workspace":
-                    target_cfg = load_workspace_config()
-                else:
-                    target_cfg = load_config()
-                if "tunnel" not in target_cfg or not isinstance(target_cfg["tunnel"], dict):
-                    target_cfg["tunnel"] = {}
-                target_cfg["tunnel"]["mode"] = mode
-                target_cfg["tunnel"]["auth_mode"] = auth_mode
-                target_cfg["tunnel"]["port"] = port
-                if token:
-                    target_cfg["tunnel"]["token"] = token
-                elif "token" in target_cfg["tunnel"]:
-                    # Remove stale token when auto-generate is selected
-                    target_cfg["tunnel"].pop("token", None)
-                saved_to = save_config(target_cfg, scope=save_scope)
+            elif choice == "7" and provider == "direct":
+                port, host, public_url_arg, ssl_certfile, ssl_keyfile = _run_direct_cert_setup_wizard(
+                    port, public_url_arg, ssl_certfile, ssl_keyfile
+                )
+            elif choice == "7" and provider == "ngrok":
+                d_in = input("Enter custom ngrok domain (leave empty for auto): ").strip()
+                domain = d_in if d_in else None
+            elif choice == "8":
+                saved_to = _save_tunnel_settings(
+                    scope_name, workspace_path, provider, mode, auth_mode,
+                    port, host, token, domain, public_url_arg, ssl_certfile, ssl_keyfile,
+                )
                 print(f"✅ Saved tunnel configuration to {saved_to}")
             elif choice in ("q", "quit", "exit"):
                 print("Tunnel start aborted.")
                 sys.exit(0)
 
-    # 3. Launch tunnel manager
-    print(f"\n🚀 Launching MWS StreamableHTTP bridge on 127.0.0.1:{port} (mode: {mode}, auth: {auth_mode})...")
-    mgr = MwsTunnelManager(
-        port=port,
-        mode=mode,
-        token=token,
-        auth_mode=auth_mode,
-        host="127.0.0.1",
-        allow_sensitive_reads=allow_sensitive_reads,
-        scope_filter=scope_filter,
-    )
+    # 3. Ensure required tunnel binary is available for the selected provider
+    _ensure_tunnel_provider_binary(provider, MwsTunnelManager)
+
+    # 4. Launch tunnel manager
+    print(f"\n🚀 Launching MWS StreamableHTTP bridge on {host}:{port} (provider: {provider}, mode: {mode}, auth: {auth_mode})...")
+    try:
+        mgr = MwsTunnelManager(
+            port=port,
+            mode=mode,
+            token=token,
+            auth_mode=auth_mode,
+            host=host,
+            allow_sensitive_reads=allow_sensitive_reads,
+            scope_filter=scope_filter,
+            provider=provider,
+            domain=domain,
+            public_url=public_url_arg,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
+        )
+    except (ValueError, FileNotFoundError) as cfg_err:
+        print(f"❌ Tunnel configuration error: {cfg_err}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         mgr.start_local_bridge()
@@ -2814,21 +3078,29 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
         print(f"❌ Failed to start local HTTP bridge: {bridge_err}", file=sys.stderr)
         sys.exit(1)
 
-    print("☁️  Connecting to Cloudflare edge network via quick tunnel...")
+    if provider == "ngrok":
+        print("🚇 Connecting to ngrok edge network...")
+    elif provider == "direct":
+        print("🌐 Exposing direct MWS StreamableHTTP endpoint...")
+    else:
+        print("☁️  Connecting to Cloudflare edge network via quick tunnel...")
+
     try:
-        public_url = mgr.start_cloudflare_tunnel(timeout=20.0)
-    except Exception as cf_err:
+        public_url = mgr.start_tunnel(timeout=20.0)
+    except Exception as tunnel_err:
         mgr.stop()
-        print(f"❌ Failed to establish Cloudflare tunnel: {cf_err}", file=sys.stderr)
+        print(f"❌ Failed to establish {provider} tunnel: {tunnel_err}", file=sys.stderr)
         sys.exit(1)
 
     mcp_endpoint = f"{public_url}/mcp"
     client_cfg = mgr.get_client_config()
 
+    url_label = "Public HTTPS URL" if public_url.startswith("https://") else "Public URL"
     print("\n============================================================")
     print("           🔗 MWS REMOTE MCP TUNNEL IS LIVE 🔗              ")
     print("============================================================")
-    print(f" • Public HTTPS URL:  {public_url}")
+    print(f" • Provider:          {provider.upper()}")
+    print(f" • {url_label + ':':<18} {public_url}")
     print(f" • MCP Endpoint:      {mcp_endpoint}")
     print(f" • Auth Mode:         {mgr.auth_mode.upper()}")
     if mgr.auth_mode == "oauth":
@@ -2847,7 +3119,7 @@ def cmd_tunnel(args: argparse.Namespace) -> None:
     print("============================================================\n", flush=True)
 
     mgr.wait()
-    print("\n🛑 Cloudflare tunnel disconnected and local bridge stopped successfully.")
+    print(f"\n🛑 {provider.capitalize()} tunnel disconnected and local bridge stopped successfully.")
 
 
 
@@ -2892,13 +3164,13 @@ def main() -> None:
         "target",
         nargs="?",
         default=None,
-        help="Server ('server', 'tsc', 'excel', ...) or client ('gemini', 'claude', 'chatgpt', 'cursor', 'kiro', 'opencode', 'windsurf', 'copilot', 'codex', 'all')",
+        help="Server ('server', 'tsc', 'excel', ...) or client ('gemini', 'claude', 'openai'/'chatgpt'/'codex', 'cursor', 'kiro', 'opencode', 'windsurf', 'copilot', 'all')",
     )
     sub_guide.add_argument(
         "client",
         nargs="?",
         default=None,
-        help="Optional client name to tailor config snippet ('gemini', 'claude', 'chatgpt', 'cursor', 'kiro', 'opencode', 'windsurf', 'copilot', 'codex')",
+        help="Optional client name to tailor config snippet ('gemini', 'claude', 'openai'/'chatgpt'/'codex', 'cursor', 'kiro', 'opencode', 'windsurf', 'copilot')",
     )
     sub_guide.set_defaults(func=cmd_guide)
 
@@ -3116,10 +3388,44 @@ def main() -> None:
     )
     hub_restart.set_defaults(func=cmd_hub_restart)
 
-    # 13. tunnel: public Cloudflare Tunnel for ChatGPT, Gemini, and Claude Web
+    # 13. tunnel: public Tunnel (Cloudflare, ngrok, or direct) for ChatGPT, Gemini, and Claude Web
     sub_tunnel = subparsers.add_parser(
         "tunnel",
-        help="Expose local MWS MCP tools to ChatGPT, Gemini, and Claude Web via secure Cloudflare Tunnel",
+        help="Expose local MWS MCP tools via Cloudflare, ngrok, or direct HTTP/HTTPS",
+    )
+    sub_tunnel.add_argument(
+        "--type",
+        "--provider",
+        "-P",
+        dest="type",
+        choices=["cloudflare", "ngrok", "direct"],
+        default=None,
+        help="Tunnel type: cloudflare (default), ngrok, or direct (bind host/port directly)",
+    )
+    sub_tunnel.add_argument(
+        "--host",
+        default=None,
+        help="Local bind host (default: 127.0.0.1 for tunnels, 0.0.0.0 for direct)",
+    )
+    sub_tunnel.add_argument(
+        "--domain",
+        default=None,
+        help="Custom domain for ngrok (--domain)",
+    )
+    sub_tunnel.add_argument(
+        "--public-url",
+        default=None,
+        help="Explicit public URL (e.g. https://123.45.67.89:3000) for direct mode",
+    )
+    sub_tunnel.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="Path to TLS certificate file (.pem/.crt) for direct HTTPS mode",
+    )
+    sub_tunnel.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="Path to TLS private key file (.pem/.key) for direct HTTPS mode",
     )
     sub_tunnel.add_argument(
         "--mode",
@@ -3201,6 +3507,7 @@ def main() -> None:
         "server",
         "gateway",
         "mws",
+        "openai",
         "antigravity",
         "gemini",
         "codex",

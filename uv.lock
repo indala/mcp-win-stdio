@@ -1160,12 +1160,16 @@ wheels = [
 
 [[package]]
 name = "mcp-win-stdio"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "." }
 dependencies = [
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "pyyaml" },
+    { name = "starlette", version = "1.7.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "starlette", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -1223,6 +1227,7 @@ word = [
 requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2.0" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.25.0" },
+    { name = "jsonschema", specifier = ">=4.0.0" },
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "mcp-win-stdio-arch", marker = "extra == 'all'", editable = "packages/mcp-win-stdio-arch" },
     { name = "mcp-win-stdio-arch", marker = "extra == 'arch'", editable = "packages/mcp-win-stdio-arch" },
@@ -1247,14 +1252,16 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9.0" },
+    { name = "starlette", specifier = ">=0.27.0" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0.0" },
+    { name = "uvicorn", specifier = ">=0.23.0" },
 ]
 provides-extras = ["excel", "word", "explorer", "tsc", "db", "git", "ssh", "rag", "excel-db", "arch", "all", "dev"]
 
 [[package]]
 name = "mcp-win-stdio-arch"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-arch" }
 dependencies = [
     { name = "mcp" },
@@ -1273,7 +1280,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-db"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-db" }
 dependencies = [
     { name = "mcp" },
@@ -1292,7 +1299,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-excel"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-excel" }
 dependencies = [
     { name = "mcp" },
@@ -1317,7 +1324,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-excel-db"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-excel-db" }
 dependencies = [
     { name = "mcp" },
@@ -1340,7 +1347,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-explorer"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-explorer" }
 dependencies = [
     { name = "mcp" },
@@ -1360,7 +1367,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-git"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-git" }
 dependencies = [
     { name = "mcp" },
@@ -1375,7 +1382,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-rag"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-rag" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -1402,7 +1409,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-ssh"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-ssh" }
 dependencies = [
     { name = "cryptography" },
@@ -1421,7 +1428,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-tsc"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-tsc" }
 dependencies = [
     { name = "mcp" },
@@ -1436,7 +1443,7 @@ requires-dist = [
 
 [[package]]
 name = "mcp-win-stdio-word"
-version = "0.4.3"
+version = "0.5.5"
 source = { editable = "packages/mcp-win-stdio-word" }
 dependencies = [
     { name = "mcp" },

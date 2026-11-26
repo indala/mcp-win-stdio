@@ -47,12 +47,13 @@ pip install mcp-win-stdio-tsc
 
 ---
 
-## 🚀 One-Command Claude Setup
+## 🚀 Non-Invasive Configuration (`mws guide`)
 
 ```powershell
-mws setup tsc
-# or:
-mws add tsc
+# Print client-ready JSON snippets for Claude, Gemini, Cursor, VS Code, etc.:
+mws guide tsc
+# Register TypeScript projects interactively:
+mws config tsc
 ```
 
 ### Manual Configuration Example (Zero-Env)

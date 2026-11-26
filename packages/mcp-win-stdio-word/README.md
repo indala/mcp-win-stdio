@@ -54,12 +54,11 @@ pip install mcp-win-stdio-word
 
 ---
 
-## 🚀 One-Command Claude Setup
+## 🚀 Non-Invasive Configuration (`mws guide`)
 
 ```powershell
-mws setup word
-# or:
-mws add word
+# Print client-ready JSON snippets for Claude, Gemini, Cursor, VS Code, etc.:
+mws guide word
 ```
 
 ### Manual Configuration Example
@@ -80,9 +79,9 @@ In `%APPDATA%\Claude\claude_desktop_config.json`:
 ## 📖 CLI Commands & Interactive Guide
 
 ```powershell
+mws guide word      # Print client configuration snippets
 mws word guide      # Complete tool reference & prompt recipes
 mws word doctor     # Verify python-docx and PyWin32 COM readiness
-mws word setup      # Configure Claude Desktop / Claude Code
 mws word run        # Launch server over stdio
 ```
 

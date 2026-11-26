@@ -1,42 +1,44 @@
-# 🌐 Zero-Config Project & Repo Guide for AI Agents
+# 🌐 Project & Repository Configuration Guide for AI Agents
 
-> **Purpose:** How to configure your repositories so that **VS Code (1.106+)**, **Google Antigravity**, **GitHub Copilot**, **Claude Code CLI**, **Cursor**, and **Windsurf** automatically detect and load your `mws` MCP servers without manual setup.
+> **Purpose:** How to configure your repositories with project-level MCP configuration and agent guidance files for **ChatGPT Desktop / OpenAI Codex**, **Claude Code CLI**, **Cursor**, **Google Antigravity**, **VS Code / GitHub Copilot**, and **Windsurf**.
 
 ---
 
-## ⚠️ Important Note: VS Code 1.106+ `.mcp.json` Migration
+## ⚠️ Note on Client Configuration Files
 
 > [!NOTE]
-> **`.vscode/mcp.json` is deprecated as of VS Code version 1.106.**
-> VS Code has unified MCP configuration to the workspace root **`.mcp.json`** file format.
-> The `mws` CLI automatically detects legacy `.vscode/mcp.json` files, seamlessly migrates existing server definitions into `.mcp.json`, and cleans up `.vscode/mcp.json` to avoid deprecation warnings.
+> MCP workspace configuration paths vary by client and version:
+> - **`.mcp.json`** (repository root) is supported by **Claude Code CLI**, **Cursor** (alongside `.cursor/mcp.json`), and workspace tools that adopt the root `.mcp.json` convention (including recent **VS Code** releases under workspace discovery settings, alongside **`.vscode/mcp.json`**).
+> - **Google Antigravity** loads global and workspace MCP settings (such as `.gemini/` / Antigravity's IDE MCP config) and reads workspace instruction files (`AGENTS.md`, `GEMINI.md`).
+> - **ChatGPT Desktop and OpenAI Codex** share MCP configuration on the same Codex host. The global configuration is `%USERPROFILE%\.codex\config.toml`; ChatGPT Desktop also provides Settings → MCP servers to add a server, then restart the app. Codex CLI and the IDE extension use the same MCP configuration. A trusted workspace may use `.codex/config.toml`.
+> - `mws` follows a **non-invasive, zero-mutation design**: the CLI never automatically modifies or deletes `.mcp.json`, `.vscode/mcp.json`, or global agent configuration files. Instead, use **`mws guide`** to generate copy-pasteable JSON/TOML snippets for your target client.
 
 ---
 
-## 🤖 Does Antigravity & VS Code Pick Up Configurations Automatically?
+## 🤖 How Team Discovery & Setup Works
 
-**YES!** When you open any workspace/folder:
-1. **Unified Root `.mcp.json` Auto-Discovery:** VS Code (1.106+), Google Antigravity, GitHub Copilot, Claude Code CLI, and Cursor natively detect and attach MCP servers defined in root `.mcp.json`.
-2. **Context & Rules Auto-Loading:** Antigravity and Claude Code automatically load workspace instruction files (`CLAUDE.md`, `AGENTS.md`, and `.gemini/`).
-3. **Zero Configuration for Teams:** Any developer or teammate who clones your repository immediately gets access to all MCP tools without re-running setup scripts.
+When another developer clones a repository that includes `.mcp.json` or agent instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`):
+1. **Configuration Discovery:** Clients that support those files discover the configured server entries and usage guidelines from the repository.
+2. **Prerequisites Required:** Cloning shares configuration, **not the runtime binaries**. Each developer must still install `mcp-win-stdio` (`pip install "mcp-win-stdio[all]"` or `pip install mcp-win-stdio` + `mws install <server>`) on their machine and configure local credentials/targets (`mws config db`, `mws config ssh`, `mws config tsc`).
 
 ---
 
-## 📂 The Universal Repo Configuration Structure
+## 📂 Recommended Repository Files
 
-Place these **2 files** at the root of any repository or project to make all AI agents auto-detect `mws`:
+Place these files in your repository manually using snippets from `mws guide`:
 
 ```
 your-repo/
-├── .mcp.json               <-- Unified standard (VS Code 1.106+, Antigravity, Copilot, Claude Code, Cursor)
-└── AGENTS.md (or CLAUDE.md)<-- Read by all AI agents for project context & tool guidance
+├── .mcp.json                 <-- Project MCP config (Claude Code, Cursor, etc.)
+├── .vscode/mcp.json          <-- Optional VS Code workspace MCP config
+└── AGENTS.md (or CLAUDE.md)  <-- Project guidance read by AI agents
 ```
 
 ---
 
-### 1️⃣ `.mcp.json` (Unified Workspace MCP Configuration)
+### 1️⃣ `.mcp.json` / Workspace MCP Configuration
 
-You can configure individual servers or simply use the **Unified On-Demand Gateway** (`server`) which dynamically proxies all 220+ tools across all 10 servers with zero token overhead:
+You can configure individual servers or simply use the **Unified On-Demand Gateway** (`server`) which dynamically proxies all 233 modular tools across all 10 servers (plus 18 gateway tools) with minimal token overhead:
 
 ```json
 {
@@ -91,7 +93,7 @@ Or configure individual standalone servers if preferred:
 ```
 
 > [!TIP]
-> **Workspace Variables:** Root `.mcp.json` supports `${workspaceFolder}` variable expansion in environment variables or arguments (e.g. `"EXPLORER_ROOT": "${workspaceFolder}"`).
+> **Workspace Variables:** Client workspace configs such as `.mcp.json` / `.vscode/mcp.json` support `${workspaceFolder}` variable expansion in arguments or environment variables (e.g. `"EXPLORER_ROOT": "${workspaceFolder}"`).
 
 ---
 
@@ -114,64 +116,51 @@ This repository is equipped with the **mcp-win-stdio (`mws`)** tool suite:
 
 ---
 
-## ⚡ Matrix: Which Agent Auto-Detects Which File?
+## ⚡ Matrix: Which Agent Reads Which File?
 
-| AI Agent / IDE / Tool | Auto-Detects File | Supported Standard |
+| AI Agent / IDE / Tool | Workspace / Global Config Paths | Notes |
 | :--- | :--- | :--- |
-| **VS Code (1.106+)** | `.mcp.json` | ✅ **Yes (Official Standard)** |
-| **Google Antigravity** | `.mcp.json`, `.gemini/`, `AGENTS.md` | ✅ **Yes (Zero Config)** |
-| **GitHub Copilot (VS Code 1.106+)** | `.mcp.json` | ✅ **Yes** |
-| **Claude Code CLI** | `.mcp.json`, `CLAUDE.md` | ✅ **Yes** |
-| **Cursor IDE** | `.mcp.json`, `.cursor/mcp.json` | ✅ **Yes** |
-| **Windsurf** | `.mcp.json`, `~/.codeium/windsurf/mcp_config.json` | ✅ **Yes** |
-| **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` | ✅ **Yes (Global Config)** |
+| **Claude Code CLI** | `.mcp.json`, `CLAUDE.md`, `~/.claude.json` | Native `.mcp.json` discovery |
+| **Cursor IDE** | `.cursor/mcp.json`, `.mcp.json` | Supports workspace `.cursor/mcp.json` and root `.mcp.json` |
+| **VS Code / GitHub Copilot** | `.vscode/mcp.json`, `.mcp.json` | Supports workspace `.vscode/mcp.json` (and `.mcp.json` when enabled) |
+| **Google Antigravity** | Global Antigravity MCP config, `.gemini/`, `AGENTS.md` | Reads workspace rules/skills (`AGENTS.md`, `GEMINI.md`, `.gemini/`) |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` | Global MCP config |
+| **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` | Global MCP config |
 
 ---
 
-## 🛠️ CLI Project Configuration Commands
+## 🛠️ Supported CLI Commands (`mws`)
 
-You can configure project-level MCP files using the `mws` CLI directly:
+Because `mws` uses a **non-invasive architecture**, the legacy file-mutating commands (`mws init`, `mws init-project`, `mws setup`, `mws setup-project`, `mws add`, `mws add-project`, `mws remove`, `mws remove-project`) are **retired** — running any of them prints a notice and directs you to `mws guide` without touching client or workspace config files.
 
-### 1. Initialize Project (All or Specific Servers)
+### 1. Generate Client Snippets (`mws guide`)
 ```powershell
-# Review installed servers, confirm workspace changes, then configure:
-mws init-project
+# Universal multi-agent snippet & paths:
+mws guide
 
-# Configure specific servers; db prompts for DATABASE_URL:
-mws init-project excel db tsc
+# Snippet for a specific client (e.g. gemini, claude, cursor, vscode):
+mws guide gemini
 
-# Configure Codex's trusted-project config as well:
-mws init codex excel db tsc
+# ChatGPT Desktop and Codex use the same TOML configuration:
+mws guide openai  # aliases: mws guide chatgpt, mws guide codex
 
-# Explicitly accept without confirmation/environment prompts:
-mws init db --yes
+# Standalone server snippet for a specific client:
+mws guide db claude
+```
 
-# Preview changes without writing files:
-mws init db --dry-run
+### 2. Configure Targets & Credentials (`mws config`)
+```powershell
+# Interactive wizards for database connections, SSH hosts, and TypeScript projects:
+mws config db
+mws config ssh
+mws config tsc
+```
 
-# Inspect project setup without changing it:
+### 3. Inspect Installation & Environment Readiness (`mws status` & `mws doctor`)
+```powershell
+# Read-only readiness report across all servers:
 mws status
+
+# Run diagnostic health checks (Python, COM, DB drivers, Git/gh CLI, SSH, PATH):
+mws doctor
 ```
-*(Creates `.mcp.json`, migrates and cleans legacy `.vscode/mcp.json` if found, and generates tailored `AGENTS.md`).*
-
-### 2. Add / Setup Specific Server in Current Project
-```powershell
-# Confirm and add one or more servers without overwriting existing ones:
-mws setup-project excel
-mws add-project db excel-db
-```
-
-### 3. Remove Server from Current Project
-```powershell
-# Remove a server from .mcp.json:
-mws remove-project ssh word
-```
-
-### 4. Automatic Legacy Migration
-When running `mws init-project` or `mws setup-project` in any repo that previously had `.vscode/mcp.json`:
-- All existing custom servers configured in `.vscode/mcp.json` are preserved and merged into `.mcp.json`.
-- The deprecated `.vscode/mcp.json` file is deleted to keep your workspace clean and prevent VS Code 1.106+ deprecation notices.
-
-`mws init` and `mws init-project` are aliases for interactive **project bootstrap**: they ask for confirmation, default to installed servers, and can configure an agent client when named. `mws setup-project`/`mws add-project` is the incremental alternative: it requires explicit server names and adds only those servers after confirmation. Both configure project-scoped MCP entries and environment settings. `mws setup <server>` (alias `mws add <server>`) is different: it checks/installs a server and configures Claude Desktop/Code at user scope. Use `--yes` for non-interactive project changes; this skips confirmation and interactive environment prompts. Project launch commands load the root `.env`; keep credentials there, not in `.mcp.json` or committed instruction files. The project commands update mws-managed guidance blocks in `AGENTS.md`, `GEMINI.md`, `CLAUDE.md`, and `.github/copilot-instructions.md` without replacing surrounding text.
-
-`mws status` is read-only and reports configured versus installed servers, supported environment keys present in `.env`, and basic config warnings. Add `--dry-run` to `mws init` or `mws setup-project` to preview planned project file changes without prompting or writing anything.

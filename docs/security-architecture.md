@@ -8,7 +8,7 @@ The `mcp-win-stdio` (`mws`) suite is built for Windows environments where local 
 
 1. **Fail-Closed by Default**: If an authentication check, permission lookup, SQL dialect analysis, or input parser hits an unexpected state or ambiguity, the operation is immediately denied with an informative error rather than proceeding.
 2. **Context-Driven Permission Ceilings**: Permissions are enforced globally at the server entry point, refined per-session, and clamped dynamically at the request level via Python `ContextVar` (`CURRENT_PERMISSION_MODE`).
-3. **Defense-in-Depth**: No single layer of defense is trusted on its own. For example, database query protection pairs an AST/lexical parser with database-level read-only transactions, engine-level session variables, and dialect isolation.
+3. **Defense-in-Depth**: No single layer of defense is trusted on its own. For example, database query protection pairs a lexical/state-machine validator with database-level read-only transactions, engine-level session variables, and dialect isolation.
 
 ---
 
@@ -28,7 +28,7 @@ flowchart TD
     end
     
     subgraph Database Sandbox (read_query)
-        ExecTool --> SQLSanitize["5. Lexical & AST SQL Sanitizer"]
+        ExecTool --> SQLSanitize["5. Lexical & State-Machine SQL Sanitizer"]
         SQLSanitize --> CommentCheck["Quote & Comment Balancing Guard"]
         CommentCheck --> TokenFSM["State Machine: Reject DDL, DML, CTE writes, side-effect funcs"]
         TokenFSM --> EngineTx["6. Database Engine Read-Only Transaction"]
@@ -90,7 +90,7 @@ Before SQL is sent to the database driver, it is parsed by `_validate_readonly_s
    * Only queries beginning with `SELECT`, `WITH`, or `EXPLAIN` are permitted.
    * Write statements (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `REPLACE`, `MERGE`, `GRANT`, `REVOKE`, `CREATE`) are blocked outright.
 3. **Data-Modifying CTE Detection**:
-   * Common Table Expressions (`WITH ... AS (...)`) in PostgreSQL can wrap mutating statements (`WITH x AS (DELETE FROM ...) SELECT ...`). The parser inspects recursive token trees inside CTE blocks and blocks write operations.
+   * Common Table Expressions (`WITH ... AS (...)`) in PostgreSQL can wrap mutating statements (`WITH x AS (DELETE FROM ...) SELECT ...`). The validator scans CTE blocks outside quotes/comments and rejects write keywords.
 4. **Dangerous Side-Effect Function Blocklist**:
    * Prohibits functions that could lock server processes or leak timing information, including:
      * MySQL: `GET_LOCK`, `RELEASE_LOCK`, `SLEEP`

@@ -431,20 +431,10 @@ def check_tool_permission(
     - In 'auth_mode == none', sensitive tools (explorer file reads, database queries, ssh inspection)
       are blocked unless allow_sensitive_reads is True.
     """
-    norm_mode = (mode or "read_only").lower().strip()
-    if norm_mode == "read_write":
-        return True, None
-
     srv = normalize_server_name(server)
     tool = (tool_name or "").lower().strip()
 
-    if (srv, tool) not in SAFE_READ_TOOLS:
-        return (
-            False,
-            f"Permission Denied: Tool '{tool}' on server '{server}' is not approved for 'read_only' mode.",
-        )
-
-    # Confidentiality check for unauthenticated tunnels
+    # Confidentiality check for unauthenticated tunnels (enforced across all permission modes)
     eff_auth = (auth_mode or CURRENT_AUTH_MODE.get() or "bearer").lower().strip()
     eff_allow_sens = (
         allow_sensitive_reads
@@ -457,6 +447,64 @@ def check_tool_permission(
             return (
                 False,
                 f"Access Denied: Tool '{tool}' on server '{server}' accesses sensitive local or infrastructure "
+                f"data and is restricted on unauthenticated public tunnels (--auth none). "
+                f"Use '--auth bearer' for protected access, or start the tunnel with '--allow-sensitive-reads'.",
+            )
+
+    norm_mode = (mode or "read_only").lower().strip()
+    if norm_mode == "read_write":
+        return True, None
+
+    if (srv, tool) not in SAFE_READ_TOOLS:
+        return (
+            False,
+            f"Permission Denied: Tool '{tool}' on server '{server}' is not approved for 'read_only' mode.",
+        )
+
+    return True, None
+
+
+def check_capability_permission(
+    server: str,
+    capability_method: str,
+    auth_mode: Optional[str] = None,
+    allow_sensitive_reads: Optional[bool] = None,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Validate whether an MCP capability operation (resources/*, prompts/*) on a target server
+    is permitted under the active scope filter and authentication ceiling.
+
+    Enforces policy at the target-server boundary:
+    1. Scope boundary: Verifies the target server is allowed under CURRENT_SCOPE_FILTER.
+    2. Confidentiality boundary: On unauthenticated public tunnels (--auth none), reading resource
+       payloads (resources/read) or rendering prompts (prompts/get) is restricted if the server
+       exposes sensitive local/infrastructure data (derived from UNAUTHENTICATED_RESTRICTED_TOOLS
+       or ssh), unless allow_sensitive_reads is explicitly granted.
+    """
+    srv = normalize_server_name(server)
+
+    # 1. Target server scope filter check
+    scope_filter = CURRENT_SCOPE_FILTER.get()
+    if scope_filter and not scope_filter.is_server_allowed(srv):
+        return (
+            False,
+            f"Scope Error: Access to server '{server}' is not permitted under the active scope filter.",
+        )
+
+    # 2. Confidentiality check for unauthenticated tunnels
+    eff_auth = (auth_mode or CURRENT_AUTH_MODE.get() or "bearer").lower().strip()
+    eff_allow_sens = (
+        allow_sensitive_reads
+        if allow_sensitive_reads is not None
+        else CURRENT_ALLOW_SENSITIVE_READS.get()
+    )
+
+    if eff_auth == "none" and not eff_allow_sens:
+        is_sensitive_server = srv == "ssh" or any(s == srv for s, _ in UNAUTHENTICATED_RESTRICTED_TOOLS)
+        if is_sensitive_server and capability_method in ("resources/read", "prompts/get"):
+            return (
+                False,
+                f"Access Denied: Capability '{capability_method}' on server '{server}' accesses sensitive "
                 f"data and is restricted on unauthenticated public tunnels (--auth none). "
                 f"Use '--auth bearer' for protected access, or start the tunnel with '--allow-sensitive-reads'.",
             )

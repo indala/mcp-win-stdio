@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import mcp_win_stdio.server.process_pool as process_pool
 from mcp_win_stdio.server.process_pool import (
     CIRCUIT_BREAKER,
     GLOBAL_POOL,
@@ -16,9 +17,18 @@ from mcp_win_stdio.server.process_pool import (
 )
 
 
-def test_circuit_breaker_trip_and_cooldown():
-    """Verify circuit breaker opens after 3 infrastructure failures and respects cooldown."""
-    cb = CircuitBreaker(failure_threshold=3, cooldown_seconds=0.5)
+def _snapshot_file(path):
+    return path.read_bytes() if path.exists() else None
+
+
+def test_circuit_breaker_trip_and_cooldown(tmp_path, monkeypatch):
+    """Verify circuit breaker opens after 3 infrastructure failures and respects cooldown without touching global state."""
+    default_state_file = process_pool.BREAKER_STATE_FILE
+    before_default = _snapshot_file(default_state_file)
+    isolated_state_file = tmp_path / "circuit_breaker_trip.json"
+    monkeypatch.setattr(process_pool, "BREAKER_STATE_FILE", isolated_state_file)
+
+    cb = CircuitBreaker(failure_threshold=3, cooldown_seconds=0.5, state_file=isolated_state_file)
 
     # 1. Initial state: closed / available
     assert cb.check_availability("test_srv") is None
@@ -42,6 +52,8 @@ def test_circuit_breaker_trip_and_cooldown():
     cb.record_success("test_srv")
     assert cb.check_availability("test_srv") is None
     assert "test_srv" not in cb.consecutive_failures
+    assert isolated_state_file.exists()
+    assert _snapshot_file(default_state_file) == before_default
 
 
 def test_timeout_kills_process_tree():
@@ -115,11 +127,16 @@ time.sleep(30)
         proc.terminate()
 
 
-def test_circuit_breaker_single_probe_concurrency():
-    """Verify that during half-open state, only exactly 1 concurrent probe is permitted."""
+def test_circuit_breaker_single_probe_concurrency(tmp_path, monkeypatch):
+    """Verify that during half-open state, only exactly 1 concurrent probe is permitted without touching global state."""
     import concurrent.futures
 
-    cb = CircuitBreaker(failure_threshold=2, cooldown_seconds=0.3)
+    default_state_file = process_pool.BREAKER_STATE_FILE
+    before_default = _snapshot_file(default_state_file)
+    isolated_state_file = tmp_path / "circuit_breaker_probe.json"
+    monkeypatch.setattr(process_pool, "BREAKER_STATE_FILE", isolated_state_file)
+
+    cb = CircuitBreaker(failure_threshold=2, cooldown_seconds=0.3, state_file=isolated_state_file)
     cb.record_infrastructure_failure("srv1", "crash1")
     cb.record_infrastructure_failure("srv1", "crash2")
     assert cb.check_availability("srv1") is not None
@@ -143,4 +160,7 @@ def test_circuit_breaker_single_probe_concurrency():
 
     assert none_count == 1, f"Expected exactly 1 probe permit, got {none_count}"
     assert blocked_count == 4, f"Expected 4 blocked threads, got {blocked_count}"
+    assert isolated_state_file.exists()
+    assert "srv1" in isolated_state_file.read_text(encoding="utf-8")
+    assert _snapshot_file(default_state_file) == before_default
 

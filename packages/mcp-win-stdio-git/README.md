@@ -64,14 +64,13 @@ pip install mcp-win-stdio-git
 
 ---
 
-## 🚀 One-Command Claude Setup
+## 🚀 Non-Invasive Configuration (`mws guide`)
 
 ```powershell
-mws setup git
-# or:
-mws add git
+# Print client-ready JSON snippets for Claude, Gemini, Cursor, VS Code, etc.:
+mws guide git
 ```
-This automatically configures Claude Desktop (`claude_desktop_config.json`) and Claude Code CLI with zero manual JSON editing.
+Use `mws guide git` to print copy-paste configuration snippets for Claude Desktop, Claude Code CLI, Cursor, and Gemini without mutating your config files.
 
 ### Manual Configuration
 ```json
@@ -86,9 +85,9 @@ This automatically configures Claude Desktop (`claude_desktop_config.json`) and 
 ## 📖 CLI Commands & Interactive Guide
 
 ```powershell
+mws guide git      # Print client configuration snippets
 mws git guide      # Complete tool reference & prompt recipes
 mws git doctor     # Verify Git, GitHub CLI, and credential helper status
-mws git setup      # Configure Claude Desktop / Claude Code
 mws git run        # Launch server over stdio
 ```
 

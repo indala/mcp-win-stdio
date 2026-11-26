@@ -2,4 +2,4 @@
 mws server: Built-in dynamic MCP server for mcp-win-stdio (mws).
 """
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"

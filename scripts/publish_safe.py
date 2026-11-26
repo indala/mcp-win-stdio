@@ -86,30 +86,43 @@ def check_is_published(pkg_pypi_name: str, version: str) -> bool:
         return False
 
 
+def _normalize_dist_name(name: str) -> str:
+    """Normalize a Python distribution name per PEP 503."""
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
 def get_artifacts_for_package(pkg_prefix: str, version: str) -> List[Path]:
     """
     Find wheel (.whl) and source distribution (.tar.gz) files for a package.
-    Matches both underscore and hyphen file naming conventions.
+    Matches normalized distribution name and exact version string cleanly.
     """
     if not DIST_DIR.exists():
         return []
 
-    name_patterns = [
-        pkg_prefix,
-        pkg_prefix.replace("-", "_"),
-        pkg_prefix.replace("_", "-"),
-    ]
-
+    target_norm = _normalize_dist_name(pkg_prefix)
     matched_artifacts: List[Path] = []
     for file in DIST_DIR.iterdir():
         if not file.is_file():
             continue
         fname = file.name
-        # Match files like mcp_win_stdio_excel-0.3.1-py3-none-any.whl or mcp_win_stdio_excel-0.3.1.tar.gz
-        for prefix in name_patterns:
-            if fname.startswith(f"{prefix}-{version}") and (fname.endswith(".whl") or fname.endswith(".tar.gz")):
-                if file not in matched_artifacts:
-                    matched_artifacts.append(file)
+        parsed_name: Optional[str] = None
+        parsed_ver: Optional[str] = None
+
+        if fname.endswith(".whl"):
+            # PEP 427 wheel filename: {distribution}-{version}(-{build tag})?-{python tag}-{abi tag}-{platform tag}.whl
+            parts = fname[:-4].split("-")
+            if len(parts) >= 5:
+                parsed_name = parts[0]
+                parsed_ver = parts[1]
+        elif fname.endswith(".tar.gz"):
+            # Sdist filename: {name}-{version}.tar.gz
+            stem = fname[:-7]
+            if "-" in stem:
+                parsed_name, parsed_ver = stem.rsplit("-", 1)
+
+        if parsed_name and parsed_ver:
+            if _normalize_dist_name(parsed_name) == target_norm and parsed_ver == version:
+                matched_artifacts.append(file)
 
     # Sort wheel first, then tar.gz
     return sorted(matched_artifacts, key=lambda f: f.suffix, reverse=True)
@@ -184,7 +197,6 @@ def main():
     parser = argparse.ArgumentParser(description="Rate-limit-safe package publisher for mcp-win-stdio")
     parser.add_argument("--version", default=detected_ver, help=f"Package version to publish (default: {detected_ver})")
     parser.add_argument("--delay", type=float, default=4.0, help="Seconds to pause between packages (default: 4.0s)")
-    parser.add_argument("--token", help="PyPI API token (or set via TWINE_PASSWORD env var)")
     parser.add_argument("--dry-run", action="store_true", help="Check status without uploading")
     parser.add_argument("--build", action="store_true", help="Run scripts/build_all.py to build all packages before uploading")
     parser.add_argument("--only", help="Publish only a single package (e.g. 'arch', 'excel', 'mcp-win-stdio-ssh')")
@@ -213,7 +225,7 @@ def main():
             print(f"Error: No package matches filter '{args.only}'. Available: {[p[0] for p in PACKAGE_ORDER]}", file=sys.stderr)
             sys.exit(1)
 
-    token = args.token or os.environ.get("TWINE_PASSWORD")
+    token = os.environ.get("TWINE_PASSWORD")
     if not token and not args.dry_run:
         print("\n🔑 PyPI Authentication Required:")
         token = getpass.getpass("Enter PyPI API Token (pypi-...): ").strip()
@@ -234,6 +246,7 @@ def main():
 
     success_count = 0
     skipped_count = 0
+    dry_run_count = 0
     failed_packages = []
 
     for idx, (pypi_name, file_prefix) in enumerate(target_packages, 1):
@@ -257,7 +270,8 @@ def main():
             print(f"   📦 {a.name} ({a.stat().st_size / 1024:.1f} KB)")
 
         if args.dry_run:
-            print("   🔍 [DRY RUN] Would upload above artifacts.")
+            print("   🔍 [DRY RUN] Validated artifacts; no upload performed.")
+            dry_run_count += 1
             continue
 
         # 3. Upload with retry and backoff
@@ -277,16 +291,26 @@ def main():
             print(" done.")
 
     print("\n" + "=" * 76)
-    print("   📊  Publishing Summary")
+    print("   📊  Dry Run Summary" if args.dry_run else "   📊  Publishing Summary")
     print("=" * 76)
-    print(f" Successfully published: {success_count}")
-    print(f" Already up to date:     {skipped_count}")
-    print(f" Failed:                 {len(failed_packages)}")
-    if failed_packages:
-        print(f" Failed packages: {', '.join(failed_packages)}")
-        sys.exit(1)
+    if args.dry_run:
+        print(f" Ready for upload:       {dry_run_count}")
+        print(f" Already up to date:     {skipped_count}")
+        print(f" Missing / Failed:       {len(failed_packages)}")
+        if failed_packages:
+            print(f" Missing/Failed pkgs: {', '.join(failed_packages)}")
+            sys.exit(1)
+        else:
+            print("\n🔍 [DRY RUN COMPLETE] All checked packages are valid/ready. No packages were uploaded to PyPI.\n")
     else:
-        print("\n🎉 All packages verified and live on PyPI!\n")
+        print(f" Successfully published: {success_count}")
+        print(f" Already up to date:     {skipped_count}")
+        print(f" Failed:                 {len(failed_packages)}")
+        if failed_packages:
+            print(f" Failed packages: {', '.join(failed_packages)}")
+            sys.exit(1)
+        else:
+            print("\n🎉 All packages verified and live on PyPI!\n")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ The `mcp-win-stdio` (`mws`) suite provides **233 audited tools** organized acros
 | **Database** | `mcp-win-stdio-db` | 36 | PostgreSQL & MySQL connection pooling, schema diffs, index audits, safe queries |
 | **SSH** | `mcp-win-stdio-ssh` | 34 | Multi-host connection pool, PTY terminal sessions, background jobs, SFTP |
 | **Word** | `mcp-win-stdio-word` | 20 | Multi-unit geometry, typography, tables, template filling, COM PDF export |
-| **Explorer** | `mcp-win-stdio-explorer` | 14 | Token-safe collapsible tree, AST code outlines, regex grep, fuzzy search |
+| **Explorer** | `mcp-win-stdio-explorer` | 16 | Token-safe collapsible tree, AST code outlines, regex grep, fuzzy search, targeted edits |
 | **TypeScript** | `mcp-win-stdio-tsc` | 12 | 0ms in-memory cache, multi-project watchers, actionable diagnostic fixes |
 | **RAG** | `mcp-win-stdio-rag` | 11 | Web crawling, local & remote repository indexing, hybrid BM25 + TF-IDF search |
 | **Excel & DB** | `mcp-win-stdio-excel-db` | 9 | Zero-context streaming from DB to Excel, chunked upserts, cross-source joins |
@@ -34,7 +34,7 @@ The `mcp-win-stdio` (`mws`) suite provides **233 audited tools** organized acros
 
 ### 2. Polyglot Database MCP (`mcp-win-stdio-db`) — 36 Tools
 * **Schema & Inspection**: `list_connections`, `use_database`, `list_databases`, `list_schemas`, `describe_table` (automatic cross-schema resolution), `get_table_ddl`, `schema_overview`, `compact_schema_overview`, `get_table_sample`, `search_schema`, `generate_erd`.
-* **Execution & Diagnostics**: `read_query` (hardened read-only execution with AST parsing and database-level transaction limits), `execute_query` (transactional DDL/DML), `explain_query`, `undo_query`, `get_database_stats`, `analyze_table_indexes`, `compare_schemas` (structural diff with migration SQL), `audit_database_health` (unindexed foreign keys, dead tuples, table bloat), `list_slow_queries`, `get_locks`, `diff_data`.
+* **Execution & Diagnostics**: `read_query` (hardened read-only execution with lexical/token SQL validation and database-level transaction limits), `execute_query` (transactional DDL/DML with destructive-DDL confirmation and before-image DML undo), `explain_query`, `undo_query`, `get_database_stats`, `analyze_table_indexes`, `compare_schemas` (structural diff with migration SQL), `audit_database_health` (unindexed foreign keys, dead tuples, table bloat), `list_slow_queries`, `get_locks`, `diff_data`.
 * **Connection & DBA Operations**: `add_connection`, `edit_connection`, `remove_connection`, `test_connection`, `create_database`, `drop_database` (safety confirmation required), `clone_database` (instant template clone on PostgreSQL), `terminate_connections`, `list_active_queries`, `get_audit_log`.
 * **Streaming Utilities**: `dump_database` (`pg_dump`/`mysqldump`), `restore_database` (`psql`/`mysql`), `export_table`, `import_csv`.
 
@@ -57,11 +57,12 @@ The `mcp-win-stdio` (`mws`) suite provides **233 audited tools** organized acros
 * **Document Authoring**: `create_document`, `add_paragraph`, `add_heading`, `fill_template` (placeholder substitution), `replace_text`, `edit_paragraph`.
 * **Inspection & Conversion**: `read_word_document`, `search_word_document`, `get_document_outline`, `get_document_metadata`, `get_headers_and_footers`, `inspect_revisions_and_comments`, `export_to_pdf` (Word COM automation).
 
-### 6. Workspace Explorer MCP (`mcp-win-stdio-explorer`) — 14 Tools
+### 6. Workspace Explorer MCP (`mcp-win-stdio-explorer`) — 16 Tools
 * **Token-Safe Directory Navigation**: `list_dir`, `get_directory_tree` (collapses heavy dependencies like `node_modules`, `.next`, `dist`, `.git`), `workspace_summary`, `export_tree_to_file`.
 * **Fast Search**: `find_files` (glob matching), `fuzzy_find` (RapidFuzz typo-tolerant filename searching), `grep_search` (in-file regex grep with context windows).
 * **Code Intelligence**: `get_code_outline` (AST extraction of Python classes/functions and JS/TS signatures), `get_file_info`, `find_symbol`, `get_code_stats`, `find_duplicate_files`.
 * **Safe Content Access**: `read_file` (windowed line slicing with binary protection), `read_head_tail`.
+* **Targeted File Authoring (Mutating)**: `replace_in_file` (exact contiguous text replacement), `write_file` (atomic file creation, overwrite, or append within configured workspace boundaries).
 
 ### 7. TypeScript Diagnostic Watcher MCP (`mcp-win-stdio-tsc`) — 12 Tools
 * **Dynamic Multi-Project Registry**: `list_projects`, `use_project`, `add_project`, `remove_project`.
@@ -80,6 +81,6 @@ The `mcp-win-stdio` (`mws`) suite provides **233 audited tools** organized acros
 * **Master Reconciliation**: `reconcile_db_vs_excel`, `compare_master_datasets`, `generate_master_migration_plan`, `sync_master_to_db`, `py_template_pipeline`, `db_to_excel_template`.
 
 ### 10. Architecture Knowledge Graph MCP (`mcp-win-stdio-arch`) — 5 Tools
-* **Blueprint Generation**: `get_full_stack_blueprint` (generates full-stack vertical architecture flowcharts).
-* **Tracing & Blast-Radius**: `trace_execution_path` (traces entry points through service layers down to database entities), `analyze_blast_radius` (dependency impact analysis for proposed refactors).
-* **Diagramming**: `generate_erd_diagram`, `scan_workspace_architecture`.
+* **Blueprint Generation**: `blueprint_feature` (generates full-stack vertical feature flowcharts across UI, API, and database layers).
+* **Tracing & Blast-Radius**: `blueprint_trace` (traces entry points through service layers down to database entities), `blueprint_impact` (dependency impact analysis for proposed refactors).
+* **Diagramming & Auditing**: `blueprint_erd` (generates entity-relationship diagrams from schema models), `blueprint_audit` (audits workspace architecture health and cross-layer mismatches).

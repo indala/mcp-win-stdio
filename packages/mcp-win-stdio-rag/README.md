@@ -4,13 +4,13 @@ Windows-optimized RAG MCP server for indexing documentation and repositories, th
 
 ## Tools
 
-The server exposes 10 tools:
+The server exposes 11 tools:
 
 | Workflow | Tools |
 | --- | --- |
 | Indexing | `crawl_and_index_url`, `index_local_codebase`, `index_remote_repo` |
 | Retrieval | `query_knowledge_base`, `get_chunk_context`, `find_related_chunks`, `get_knowledge_tree` |
-| Collection management | `list_rag_collections`, `delete_rag_collection`, `prune_rag_cache` |
+| Collection management | `list_rag_collections`, `rag_status`, `delete_rag_collection`, `prune_rag_cache` |
 
 ## Agent workflow
 

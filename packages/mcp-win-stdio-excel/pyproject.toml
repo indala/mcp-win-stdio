@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-win-stdio-excel"
-version = "0.5.4"
-description = "Windows-optimized Model Context Protocol (MCP) server for Excel: 34 tools for Pandas queries, bulk 2D writes, cell styling, conditional formatting, chart generation, data deduplication/cleaning, in-memory transformations, RapidFuzz reconciliation, and native Excel COM automation (PDF export, recalc, pivots, macros)."
+version = "0.5.5"
+description = "Windows-optimized Model Context Protocol (MCP) server for Excel: 44 tools for Pandas queries, bulk 2D writes, cell styling, conditional formatting, chart generation, data deduplication/cleaning, in-memory transformations, RapidFuzz reconciliation, and native Excel COM automation (PDF export, recalc, pivots, macros)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "indala", email = "indala@example.com" }
+    { name = "Mohan Kumar Indala" }
 ]
 keywords = ["mcp", "claude", "excel", "pandas", "openpyxl", "reconciliation", "windows", "ai", "llm"]
 classifiers = [
@@ -29,7 +29,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "mcp-win-stdio>=0.5.4",
+    "mcp-win-stdio>=0.5.5",
     "mcp>=1.2.0",
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",

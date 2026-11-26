@@ -142,6 +142,7 @@ class ProcessSupervisor:
                 env[k] = str(v)
 
             # Resolve profile if manager is provided
+            resolved_secrets: List[str] = []
             if self._profile_manager:
                 try:
                     prof, _ = self._profile_manager.resolve_profile(
@@ -158,6 +159,8 @@ class ProcessSupervisor:
                             sval = self._profile_manager._secrets.resolve_secret(sec_ref)
                             env[sk] = sval
                             env[f"MWS_SECRET_{sk.upper()}"] = sval
+                            if sval:
+                                resolved_secrets.append(sval)
                         except Exception as sec_err:
                             logger.warning("Could not resolve secret '%s': %s", sk, sec_err)
                 except Exception as e:
@@ -173,6 +176,8 @@ class ProcessSupervisor:
                 instance_id=inst_id,
                 on_event=self._dispatch_event,
             )
+            if resolved_secrets:
+                instance.set_secret_values(resolved_secrets)
             self._instances[clean_name] = instance
             instance.transition_to(ServerState.STARTING, reason="starting server process")
 
@@ -377,10 +382,12 @@ class ProcessSupervisor:
                 finally:
                     # Notify any pending callers that process exited or closed stdout (if not already handled)
                     if not overflow_occurred:
+                        recent_err = instance.get_recent_stderr(500)
+                        err_suffix = f". Stderr: {recent_err}" if recent_err else ""
                         err_msg = {
                             "error": {
                                 "code": -32000,
-                                "message": f"Server '{instance.server_name}' closed stdout prematurely",
+                                "message": f"Server '{instance.server_name}' closed stdout prematurely{err_suffix}",
                             }
                         }
                         instance.fail_all_pending(err_msg)
@@ -392,6 +399,37 @@ class ProcessSupervisor:
             )
             reader_t.start()
             instance.reader_thread = reader_t
+
+            # 7b. Start persistent stderr reader thread to prevent OS pipe buffer deadlock
+            def stderr_reader() -> None:
+                try:
+                    if proc.stderr:
+                        while True:
+                            try:
+                                chunk = proc.stderr.readline(65536)
+                            except (ValueError, OSError):
+                                break
+                            if not chunk:
+                                break
+                            try:
+                                line_str = chunk.decode("utf-8", errors="replace")
+                            except Exception:
+                                line_str = str(chunk)
+                            try:
+                                redacted = redact_sensitive_data(line_str)
+                            except Exception:
+                                redacted = "[stderr redaction failed]\n"
+                            instance.append_stderr_line(redacted)
+                except Exception as stderr_err:
+                    logger.debug("Exception in stderr reader for '%s': %s", instance.server_name, stderr_err)
+
+            stderr_t = threading.Thread(
+                target=stderr_reader,
+                name=f"mws-stderr-{instance.server_name}-{instance.instance_id}",
+                daemon=True,
+            )
+            stderr_t.start()
+            instance.stderr_thread = stderr_t
 
             # 8. Transition to INITIALIZING
             instance.transition_to(
@@ -481,9 +519,11 @@ class ProcessSupervisor:
             msg = q_init.get(timeout=timeout)
         except queue.Empty:
             code = proc.poll()
+            recent_err = instance.get_recent_stderr(500)
+            err_suffix = f". Stderr: {recent_err}" if recent_err else ""
             raise TimeoutError(
                 f"Timed out waiting for MCP initialize response from '{instance.server_name}' "
-                f"after {timeout:.1f}s (process exit code: {code})."
+                f"after {timeout:.1f}s (process exit code: {code}){err_suffix}."
             )
         finally:
             instance.remove_response_queue(req_id)
@@ -535,9 +575,11 @@ class ProcessSupervisor:
                 ping_msg = q_ping.get(timeout=sup_config.probe_timeout_seconds)
             except queue.Empty:
                 code = proc.poll()
+                recent_err = instance.get_recent_stderr(500)
+                err_suffix = f". Stderr: {recent_err}" if recent_err else ""
                 raise TimeoutError(
                     f"Protocol ping to '{instance.server_name}' timed out after "
-                    f"{sup_config.probe_timeout_seconds:.1f}s (process exit code: {code})."
+                    f"{sup_config.probe_timeout_seconds:.1f}s (process exit code: {code}){err_suffix}."
                 )
             finally:
                 instance.remove_response_queue(ping_id)
@@ -596,8 +638,10 @@ class ProcessSupervisor:
         try:
             msg = q.get(timeout=timeout)
         except queue.Empty:
+            recent_err = instance.get_recent_stderr(500)
+            err_suffix = f". Stderr: {recent_err}" if recent_err else ""
             raise TimeoutError(
-                f"Timed out executing tool '{tool_name}' on server '{server_name}' after {timeout:.1f}s."
+                f"Timed out executing tool '{tool_name}' on server '{server_name}' after {timeout:.1f}s{err_suffix}."
             )
         finally:
             instance.remove_response_queue(req_id)
@@ -649,7 +693,9 @@ class ProcessSupervisor:
         try:
             msg = q.get(timeout=timeout)
         except queue.Empty:
-            raise TimeoutError(f"Timed out listing tools from server '{server_name}' after {timeout:.1f}s.")
+            recent_err = instance.get_recent_stderr(500)
+            err_suffix = f". Stderr: {recent_err}" if recent_err else ""
+            raise TimeoutError(f"Timed out listing tools from server '{server_name}' after {timeout:.1f}s{err_suffix}.")
         finally:
             instance.remove_response_queue(req_id)
 
@@ -749,9 +795,11 @@ class ProcessSupervisor:
                     pass
                 instance.job_object = None
 
-            # Ensure reader thread terminates cleanly
+            # Ensure reader threads terminate cleanly
             if instance.reader_thread and instance.reader_thread.is_alive():
                 instance.reader_thread.join(timeout=2.0)
+            if instance.stderr_thread and instance.stderr_thread.is_alive():
+                instance.stderr_thread.join(timeout=2.0)
 
             instance.transition_to(ServerState.STOPPED, reason="process exited")
             return instance.snapshot()
@@ -821,7 +869,9 @@ class ProcessSupervisor:
                             exit_code = proc.poll()
                             instance.last_exit_code = exit_code
                             self._close_pipes(proc)
-                            reason = redact_sensitive_data(f"Process exited unexpectedly with code {exit_code}")
+                            recent_err = instance.get_recent_stderr(500)
+                            err_suffix = f": {recent_err}" if recent_err else ""
+                            reason = redact_sensitive_data(f"Process exited unexpectedly with code {exit_code}{err_suffix}")
                             instance.transition_to(ServerState.FAILED, reason=reason)
 
                             # Evaluate auto-restart policy
