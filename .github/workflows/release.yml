@@ -1,0 +1,99 @@
+name: Release & Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish_pypi:
+        description: "Publish built packages to PyPI via Trusted Publishing (OIDC)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-release:
+    name: Build 11 Packages & Create GitHub Release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build & verification tools
+        run: pip install --upgrade build twine hatchling uv
+
+      - name: Verify uv.lock freshness
+        run: uv lock --check
+
+      - name: Build all 11 packages
+        run: python scripts/build_all.py
+
+      - name: Validate distributions with Twine
+        run: twine check dist/*
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-packages
+          path: dist/*
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release create $tag dist/* --title "$tag" --generate-notes
+
+  publish-pypi:
+    name: Publish to PyPI (OIDC + Rate-Limit Paced)
+    needs: build-and-release
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_pypi == true
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mcp-win-stdio/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install twine
+        run: pip install --upgrade twine
+
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-packages
+          path: dist
+
+      - name: Mint PyPI OIDC token & upload with 5s pacing
+        shell: bash
+        run: |
+          set -euo pipefail
+          OIDC_JWT=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=pypi" | python3 -c "import sys, json; print(json.load(sys.stdin)['value'])")
+          PYPI_TOKEN=$(curl -sS -X POST "https://pypi.org/_/oidc/mint-token" \
+            -d "{\"token\": \"${OIDC_JWT}\"}" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['token'])")
+          echo "::add-mask::${PYPI_TOKEN}"
+          export TWINE_USERNAME="__token__"
+          export TWINE_PASSWORD="${PYPI_TOKEN}"
+          python scripts/publish_safe.py --delay 5
