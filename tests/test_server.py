@@ -566,15 +566,17 @@ def test_e2e_mcp_transport_session_isolation_and_persistence():
 
     from mcp_win_stdio.server.server import mcp
 
+    lowlevel_server = getattr(mcp, "_lowlevel_server", None) or mcp._mcp_server
+
     async def scenario():
         # Client 1 connects
         async with create_client_server_memory_streams() as (c1_stream, s1_stream):
             async with anyio.create_task_group() as tg1:
                 tg1.start_soon(
-                    mcp._lowlevel_server.run,
+                    lowlevel_server.run,
                     s1_stream[0],
                     s1_stream[1],
-                    mcp._lowlevel_server.create_initialization_options(),
+                    lowlevel_server.create_initialization_options(),
                 )
                 async with ClientSession(c1_stream[0], c1_stream[1]) as session1:
                     await session1.initialize()
@@ -596,10 +598,10 @@ def test_e2e_mcp_transport_session_isolation_and_persistence():
                     async with create_client_server_memory_streams() as (c2_stream, s2_stream):
                         async with anyio.create_task_group() as tg2:
                             tg2.start_soon(
-                                mcp._lowlevel_server.run,
+                                lowlevel_server.run,
                                 s2_stream[0],
                                 s2_stream[1],
-                                mcp._lowlevel_server.create_initialization_options(),
+                                lowlevel_server.create_initialization_options(),
                             )
                             async with ClientSession(c2_stream[0], c2_stream[1]) as session2:
                                 await session2.initialize()
