@@ -30,7 +30,7 @@ classifiers = [
 
 dependencies = [
     "mcp-win-stdio>=0.5.5",
-    "mcp>=1.25.0",
+    "mcp>=2.0.0",
     "pandas>=2.0.0",
     "openpyxl>=3.1.0",
     "rapidfuzz>=3.0.0",

@@ -1,5 +1,5 @@
 # Core MCP Runtime & Protocol
-mcp>=1.25.0
+mcp>=2.0.0
 
 # Spreadsheets & Excel MCP
 pandas>=2.0.0
