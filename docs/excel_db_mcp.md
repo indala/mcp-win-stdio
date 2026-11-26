@@ -15,7 +15,7 @@
 ## 🏗️ Core Architecture & Dependencies
 
 ### Python Dependencies
-* `mcp>=1.2.0`
+* `mcp>=1.25.0`
 * `pandas>=2.0.0`
 * `duckdb>=0.9.0` (High-performance in-memory SQL engine over `.xlsx`, `.csv`, `.parquet`, and SQL DB connections)
 * `polars>=0.20.0`

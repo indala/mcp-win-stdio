@@ -1228,7 +1228,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2.0" },
     { name = "hatchling", marker = "extra == 'dev'", specifier = ">=1.25.0" },
     { name = "jsonschema", specifier = ">=4.0.0" },
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio-arch", marker = "extra == 'all'", editable = "packages/mcp-win-stdio-arch" },
     { name = "mcp-win-stdio-arch", marker = "extra == 'arch'", editable = "packages/mcp-win-stdio-arch" },
     { name = "mcp-win-stdio-db", marker = "extra == 'all'", editable = "packages/mcp-win-stdio-db" },
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "networkx", specifier = ">=3.2.1" },
 ]
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "psycopg2-binary", specifier = ">=2.9.0" },
     { name = "pymysql", specifier = ">=1.1.0" },
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "pandas", specifier = ">=2.0.0" },
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "openpyxl", specifier = ">=3.1.0" },
     { name = "pandas", specifier = ">=2.0.0" },
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "pathspec", specifier = ">=0.12.0" },
     { name = "rapidfuzz", specifier = ">=3.0.0" },
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
 ]
 
@@ -1400,7 +1400,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "networkx", specifier = ">=3.0" },
     { name = "numpy", specifier = ">=1.24.0" },
@@ -1421,7 +1421,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=3.3.0" },
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "paramiko", specifier = ">=3.0.0" },
 ]
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
 ]
 
@@ -1454,7 +1454,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", specifier = ">=1.2.0" },
+    { name = "mcp", specifier = ">=1.25.0" },
     { name = "mcp-win-stdio", editable = "." },
     { name = "python-docx", specifier = ">=1.1.0" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
