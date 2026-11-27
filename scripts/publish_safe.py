@@ -162,6 +162,13 @@ def upload_single_package(
     env["TWINE_USERNAME"] = "__token__"
     env["TWINE_PASSWORD"] = token
 
+    upload_inputs = [str(f) for f in files]
+    if attestations:
+        for f in files:
+            att = Path(f"{f}.publish.attestation")
+            if att.exists():
+                upload_inputs.append(str(att))
+
     cmd = twine_cmd + [
         "upload",
         "--non-interactive",
@@ -169,7 +176,7 @@ def upload_single_package(
     ]
     if attestations:
         cmd.append("--attestations")
-    cmd.extend(str(f) for f in files)
+    cmd.extend(upload_inputs)
 
     for attempt in range(1, max_retries + 1):
         proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
